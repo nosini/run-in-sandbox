@@ -3,6 +3,7 @@
 # writes captured under ~/game-sandboxes/<name>/). Auto-detects:
 #   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
 #   * Ren'Py / native    -> right-click the game folder or its .sh launcher
+#   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
 # Install as TWO menu entries (same file); the "(Wayland)" copy passes --wayland
 # for native SDL Wayland games (ignored for RPGM, which always uses x11 ozone):
@@ -11,6 +12,9 @@
 #   install -Dm755 Sandbox-game "$D/Sandbox game (Wayland)"
 #
 # NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
+# Proton likewise: newest install wins, override with PROTON_VER=GE-Proton11
+# (name substring) or PROTON_DIR=/path/to/proton-install. The prefix is built
+# fresh under ~/game-sandboxes/<name>/compat/, never your real Steam one.
 # Errors show in a zenity dialog; full output logs to
 #   ~/game-sandboxes/<name>-lastrun.log
 set -uo pipefail
@@ -32,7 +36,39 @@ SEL="$(realpath "$SEL")"
 
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
-RO=(); CMD=(); GAMEDIR=""
+# Windows games ship a heap of .exe beside the real one; drop the usual
+# installers and helpers, but only while something else is left to run.
+EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet|redist|crashhandler|crashreport|crashsender|touchup|nwjc|notification_helper|python'
+
+find_exes() {                                  # $1 = dir -> best guess first
+    local dir="$1" d list keep
+    for d in 1 5; do                           # top level first, then deeper
+        list="$(find "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null)"
+        [ -n "$list" ] && break
+    done
+    [ -n "$list" ] || return 0
+    keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*\.exe$" <<<"$list")"
+    [ -n "$keep" ] && list="$keep"
+    # Rank: filename echoing the folder name first, then biggest -- the real
+    # binary is rarely the small one. awk keeps the folder name literal, so a
+    # game called "S.T.A.L.K.E.R." is not read as a regex.
+    awk -F'\t' -v b="${dir##*/}" '
+        BEGIN { b = tolower(b) }
+        { n = $2; sub(/.*\//, "", n)
+          print (index(tolower(n), b) ? 0 : 1) "\t" $0 }' <<<"$list" \
+        | sort -t"$(printf '\t')" -k1,1n -k2,2rn | cut -f3
+}
+
+pick() {                                       # $1 = dir to strip, $@ = paths
+    local dir="$1" rel; shift
+    [ "$#" -eq 1 ] && { printf '%s\n' "$1"; return; }
+    rel="$(printf '%s\n' "${@#"$dir"/}" \
+        | zenity --list --title="Pick launcher" --column="Launcher" \
+                 --width=700 --height=400 2>/dev/null)"
+    [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
+}
+
+RO=(); CMD=(); GAMEDIR=""; PROTON=0
 
 # ---- figure out what was selected -----------------------------------------
 APPDIR=""
@@ -76,22 +112,29 @@ if [ -n "$APPDIR" ]; then
         exec "$d/$1" "$2" --ozone-platform=x11
     ' _ "$NW_NAME" "$APP_IN" )
 else
-    # ----- Ren'Py / native (.sh) -----
+    # ----- Ren'Py / native (.sh), else Windows (.exe) under Proton -----
+    # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
+    # in the same folder, and running the Linux build beats emulating the other.
     if [ -d "$SEL" ]; then
         GAMEDIR="${SEL%/}"
         mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
-        case "${#shs[@]}" in
-            0) die "Not an RPGM/NW.js app and no .sh launcher at:\n$GAMEDIR\n\nWine/Proton games: launch from the CLI." ;;
-            1) LAUNCHER="${shs[0]}" ;;
-            *) LAUNCHER="$(printf '%s\n' "${shs[@]}" \
-                   | zenity --list --title="Pick launcher" --column="Launcher" --width=700 --height=400 2>/dev/null)"
-               [ -n "$LAUNCHER" ] || exit 0 ;;
-        esac
+        if [ "${#shs[@]}" -gt 0 ]; then
+            LAUNCHER="$(pick "$GAMEDIR" "${shs[@]}")"
+        else
+            mapfile -t exes < <(find_exes "$GAMEDIR")
+            [ "${#exes[@]}" -gt 0 ] \
+                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a .sh launcher and a .exe."
+            LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"; PROTON=1
+        fi
+        [ -n "$LAUNCHER" ] || exit 0                   # picker cancelled
     else
         LAUNCHER="$SEL"; GAMEDIR="$(dirname "$SEL")"
+        case "${SEL,,}" in *.exe) PROTON=1 ;; esac
     fi
     REL="${LAUNCHER#"$GAMEDIR"/}"
     CMD=( /game/"$REL" )
+    # Proton picks the newest install itself; PROTON_VER/PROTON_DIR override it.
+    [ "$PROTON" = 1 ] && FLAG+=( "--proton${PROTON_VER:+=$PROTON_VER}" )
 fi
 
 BASE="$(basename "$GAMEDIR")"

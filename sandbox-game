@@ -1,25 +1,37 @@
 #!/usr/bin/env bash
-# sandbox-game [--wayland] [--name NAME] GAMEDIR CMD...
+# sandbox-game [--wayland] [--name NAME] [--proton[=VER]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace)
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
 #     - GAMEDIR is presented at /game as an overlay; the pristine install is
 #       never modified, all writes are captured
 #   Everything the game writes ends up under ONE folder:
-#     ~/game-sandboxes/NAME/  ->  home/  (writes to $HOME: prefix, configs, saves)
-#                                 rw/    (writes into the install dir at /game)
+#     ~/game-sandboxes/NAME/  ->  home/   (writes to $HOME: configs, saves)
+#                                 rw/     (writes into the install dir at /game)
+#                                 compat/ (--proton: the Wine prefix, under pfx/)
 #
 #   --wayland   force SDL onto native Wayland (SDL_VIDEODRIVER=wayland), no X.
 #               Only for engines whose SDL has a Wayland backend -- NOT stock
 #               Ren'Py, whose bundled SDL is x11/Xwayland only.
+#               With --proton it selects Proton's winewayland driver instead
+#               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
+#               stock Valve Proton ignores it and stays on Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
+#   --proton    run CMD as a Windows program under Proton: CMD is the .exe and
+#               its args, and the sandbox cwd becomes the .exe's own directory.
+#               =VER picks a Proton by name substring or by path; without it the
+#               newest one found in the usual Steam locations wins. $PROTON_DIR
+#               overrides the search entirely. The prefix is built fresh under
+#               compat/, so your real Steam prefixes are never touched, and the
+#               Proton install itself is mounted read-only.
 #
 #   Default (no --wayland) runs on Xwayland and binds your X cookie so the
 #   client is authorised.
 #
 # CMD references the game at /game, e.g.:
 #   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
-#   sandbox-game /mnt/General-HDD/Games/games/Witcher3  wine /game/witcher3.exe
+#   sandbox-game --proton /mnt/General-HDD/Games/games/Witcher3 /game/witcher3.exe
+#   sandbox-game --proton=GE-Proton11 ~/Games/Foo /game/bin/foo.exe -windowed
 set -euo pipefail
 
 # Nicer names for directories whose basename is ugly. Key = on-disk basename.
@@ -39,19 +51,21 @@ derive_name() {
 }
 
 # ---- args ------------------------------------------------------------------
-WAYLAND=0; NAME=""; EXTRA_RO=()
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --name)      NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
+        --proton)    PROTON_SPEC="auto"; shift ;;
+        --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --)          shift; break ;;
         -*)          echo "unknown option: $1" >&2; exit 1 ;;
         *)           break ;;
     esac
 done
-GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] GAMEDIR CMD...}")"; shift
+GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proton[=VER]] GAMEDIR CMD...}")"; shift
 [ "$#" -ge 1 ] || { echo "need a command to run" >&2; exit 1; }
 NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 
@@ -60,15 +74,86 @@ mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
 
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 WL="${WAYLAND_DISPLAY:-wayland-0}"
+CHDIR=/game
+
+# ---- proton ----------------------------------------------------------------
+# Where Steam keeps compatibility tools, native install and flatpak alike.
+proton_roots() {
+    printf '%s\n' \
+        "$HOME/.local/share/Steam/compatibilitytools.d" \
+        "$HOME/.steam/root/compatibilitytools.d" \
+        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d" \
+        "$HOME/.local/share/Steam/steamapps/common" \
+        "$HOME/.steam/root/steamapps/common" \
+        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common" \
+        /usr/share/steam/compatibilitytools.d
+}
+
+# A Proton is any directory holding an executable `proton` script -- that test
+# also rejects the plain Wine builds people drop into compatibilitytools.d.
+# Newest wins, ranked by the unix timestamp that leads the `version` file.
+find_proton() {                       # $1 = auto | name substring | path
+    local spec="$1" root d base ver best="" best_t=-1
+    [ "$spec" = auto ] || [ ! -x "${spec%/}/proton" ] || { printf '%s\n' "${spec%/}"; return; }
+    while IFS= read -r root; do
+        [ -d "$root" ] || continue
+        for d in "$root"/*/; do
+            d="${d%/}"; base="$(basename "$d")"
+            [ -x "$d/proton" ] || continue
+            [ "$spec" = auto ] || [[ "${base,,}" == *"${spec,,}"* ]] || continue
+            ver="$(cut -d' ' -f1 "$d/version" 2>/dev/null || true)"
+            [[ "$ver" =~ ^[0-9]+$ ]] || ver=0
+            if [ "$ver" -gt "$best_t" ]; then best_t="$ver"; best="$d"; fi
+        done
+    done < <(proton_roots)
+    printf '%s\n' "$best"
+}
+
+PROTON=""; PROTON_ARGS=()
+if [ -n "$PROTON_SPEC" ]; then
+    PROTON="${PROTON_DIR:-$(find_proton "$PROTON_SPEC")}"
+    [ -n "$PROTON" ] && [ -x "$PROTON/proton" ] || {
+        [ "$PROTON_SPEC" = auto ] && echo "no Proton install found" >&2 \
+                                  || echo "no Proton install matching '$PROTON_SPEC'" >&2
+        echo "looked for a dir containing an executable 'proton' under:" >&2
+        proton_roots | while IFS= read -r r; do echo "  $r" >&2; done
+        echo "override with PROTON_DIR=/path/to/proton-install" >&2; exit 1; }
+    mkdir -p "$CAP/compat" "$CAP/steam"
+    # STEAM_COMPAT_CLIENT_INSTALL_PATH is read unconditionally by proton's
+    # setup_prefix(), so it has to exist -- but it is only mined for optional
+    # legacycompat/steamclient*.dll, which a non-Steam game does not want.
+    # An empty dir keeps the real Steam install out of the sandbox.
+    PROTON_ARGS=(
+        --ro-bind "$PROTON" /proton
+        --bind "$CAP/compat" /compat
+        --bind "$CAP/steam"  /steamclient
+        --setenv STEAM_COMPAT_DATA_PATH          /compat
+        --setenv STEAM_COMPAT_CLIENT_INSTALL_PATH /steamclient
+        --setenv STEAM_COMPAT_INSTALL_PATH       /game
+    )
+    # Games routinely load assets relative to the cwd, so land in the exe's dir.
+    case "$1" in /*) CHDIR="$(dirname "$1")" ;; esac
+    set -- /proton/proton run "$@"
+fi
 
 # ---- video backend ---------------------------------------------------------
 # Default = Xwayland: bind the X socket AND the auth cookie, otherwise Xwayland
 # refuses the client ("Authorization required, but no authorization protocol").
 # --wayland instead forces native Wayland (no X) for engines that support it.
-VIDEO_ENV=(); XSOCK_ARGS=()
+VIDEO_ENV=(); XSOCK_ARGS=(); WANT_X=1
 if [ "$WAYLAND" = 1 ]; then
-    VIDEO_ENV=( --setenv SDL_VIDEODRIVER wayland )
-else
+    if [ -n "$PROTON" ]; then
+        # SDL_VIDEODRIVER would be inherited by the *Windows* SDL inside the
+        # prefix, which has no wayland backend and would fail to init video.
+        # Proton's own switch for winewayland is the compat config instead --
+        # and since builds that lack it silently stay on winex11.drv, keep X
+        # bound as well so those still get a display.
+        VIDEO_ENV=( --setenv STEAM_COMPAT_CONFIG wayland )
+    else
+        VIDEO_ENV=( --setenv SDL_VIDEODRIVER wayland ); WANT_X=0
+    fi
+fi
+if [ "$WANT_X" = 1 ]; then
     XSOCK_ARGS=( --ro-bind-try /tmp/.X11-unix /tmp/.X11-unix )
     XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
     [ -f "$XAUTH_HOST" ] && XSOCK_ARGS+=(
@@ -117,7 +202,8 @@ BWRAP=( bwrap
     --setenv HOME "$HOME"
     "${VIDEO_ENV[@]}"
     "${OVERLAY_ARGS[@]}"
-    --chdir /game
+    "${PROTON_ARGS[@]}"
+    --chdir "$CHDIR"
 )
 
 if [ -n "$CLEANUP" ]; then
