@@ -193,14 +193,32 @@ if [ -n "$MKXP_SPEC" ]; then
     # game has to be named outright. Seed the config from the runtime's own
     # commented one and then leave it alone, so per-game tweaks (fontSub, RTP,
     # soundfont) survive the next launch.
+    # The preload wrappers are what let a Windows-only game run at all: without
+    # win32_wrap the stock Win32API dlopen()s the DLL the game names and dies
+    # with "Failed loading kernel32". They are additive shims, and win32_wrap is
+    # Ancurio's, so mkxp_wrap has to precede it to supply the older names it
+    # expects. Absolute paths are honoured, which keeps them in the read-only
+    # runtime instead of forcing them into the game's own tree.
+    mkxp_preload() {
+        local f first=1
+        echo '    "preloadScript": ['
+        for f in ruby_classic_wrap mkxp_wrap win32_wrap; do
+            [ -f "$MKXP/scripts/preload/$f.rb" ] || continue
+            [ "$first" = 1 ] || echo ','
+            printf '        "/mkxp/scripts/preload/%s.rb"' "$f"; first=0
+        done
+        echo; echo '    ],'
+    }
     if [ ! -f "$CAP/mkxp.json" ]; then
         if [ "$(head -n1 "$MKXP/mkxp.json" 2>/dev/null)" = "{" ]; then
             { echo '{'
               echo '    // added by sandbox-game: the game is bind-mounted at /game'
               echo '    "gameFolder": "/game",'
+              mkxp_preload
               tail -n +2 "$MKXP/mkxp.json"; } > "$CAP/mkxp.json"
         else
-            printf '{\n    "gameFolder": "/game"\n}\n' > "$CAP/mkxp.json"
+            { echo '{'; mkxp_preload
+              echo '    "gameFolder": "/game"'; echo '}'; } > "$CAP/mkxp.json"
         fi
     fi
     MKXP_ARGS=(
