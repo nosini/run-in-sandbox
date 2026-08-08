@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sandbox-game [--wayland] [--name NAME] [--proton[=VER]] GAMEDIR CMD...
+# sandbox-game [--wayland] [--name NAME] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace)
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
@@ -9,6 +9,8 @@
 #     ~/game-sandboxes/NAME/  ->  home/   (writes to $HOME: configs, saves)
 #                                 rw/     (writes into the install dir at /game)
 #                                 compat/ (--proton: the Wine prefix, under pfx/)
+#                                 mkxp.json (--mkxp: the runtime config, yours
+#                                            to edit -- only created if absent)
 #
 #   --wayland   force SDL onto native Wayland (SDL_VIDEODRIVER=wayland), no X.
 #               Only for engines whose SDL has a Wayland backend -- NOT stock
@@ -24,7 +26,15 @@
 #               overrides the search entirely. The prefix is built fresh under
 #               compat/, so your real Steam prefixes are never touched, and the
 #               Proton install itself is mounted read-only.
+#   --mkxp      run an RPG Maker XP/VX/VX Ace game natively under mkxp-z, no
+#               Wine involved. CMD is optional and normally omitted: the
+#               runtime is the program. =DIR names the mkxp-z install, else
+#               ~/.local/share/mkxp* and friends are searched; $MKXP_DIR wins.
+#               mkxp-z resolves everything relative to its own binary, never
+#               the cwd, so the game is handed over as "gameFolder": "/game"
+#               in a generated config bound over the runtime's own mkxp.json.
 #
+
 #   Default (no --wayland) runs on Xwayland and binds your X cookie so the
 #   client is authorised.
 #
@@ -32,6 +42,7 @@
 #   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
 #   sandbox-game --proton /mnt/General-HDD/Games/games/Witcher3 /game/witcher3.exe
 #   sandbox-game --proton=GE-Proton11 ~/Games/Foo /game/bin/foo.exe -windowed
+#   sandbox-game --mkxp /mnt/General-HDD/Games/games/SomeVXAceGame
 set -euo pipefail
 
 # Nicer names for directories whose basename is ugly. Key = on-disk basename.
@@ -51,7 +62,7 @@ derive_name() {
 }
 
 # ---- args ------------------------------------------------------------------
-WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
@@ -59,14 +70,19 @@ while [ "$#" -gt 0 ]; do
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
         --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
+        --mkxp)      MKXP_SPEC="auto"; shift ;;
+        --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --)          shift; break ;;
         -*)          echo "unknown option: $1" >&2; exit 1 ;;
         *)           break ;;
     esac
 done
-GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proton[=VER]] GAMEDIR CMD...}")"; shift
-[ "$#" -ge 1 ] || { echo "need a command to run" >&2; exit 1; }
+[ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
+    echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
+GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...}")"; shift
+# --mkxp supplies its own command: the runtime is the program.
+[ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || { echo "need a command to run" >&2; exit 1; }
 NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 
 CAP="$HOME/game-sandboxes/$NAME"
@@ -136,6 +152,64 @@ if [ -n "$PROTON_SPEC" ]; then
     set -- /proton/proton run "$@"
 fi
 
+# ---- mkxp-z ----------------------------------------------------------------
+# An mkxp-z install is a directory holding the runtime binary next to its
+# stdlib/ and scripts/; the CI artifacts unpack exactly like that, so dropping
+# one in ~/.local/share/ as-is is enough. First hit wins.
+# Both helpers report "not found" as a non-zero return, so every caller has to
+# keep that out of set -e's way: find over a missing dir fails the pipeline
+# under pipefail, and an assignment inherits that status.
+find_mkxp() {                         # $1 = auto | path -> install dir
+    local spec="$1" d
+    if [ "$spec" != auto ]; then
+        mkxp_bin "${spec%/}" >/dev/null && printf '%s\n' "${spec%/}"
+        return 0
+    fi
+    for d in "$HOME/.local/share"/mkxp*/ "$HOME/.local/lib"/mkxp*/ \
+             "$HOME"/mkxp*/ "$HOME/Games"/mkxp*/ /opt/mkxp*/; do
+        d="${d%/}"
+        if [ -d "$d" ] && mkxp_bin "$d" >/dev/null; then printf '%s\n' "$d"; return 0; fi
+    done
+    return 0
+}
+mkxp_bin() {                          # $1 = install dir -> binary name, if any
+    local b
+    b="$(find "$1" -maxdepth 1 -type f -name 'mkxp*' -perm -u+x 2>/dev/null | sort | head -n1 || true)"
+    [ -n "$b" ] || return 1
+    basename "$b"
+}
+
+MKXP=""; MKXP_ARGS=()
+if [ -n "$MKXP_SPEC" ]; then
+    MKXP="${MKXP_DIR:-$(find_mkxp "$MKXP_SPEC")}"
+    MKXP_BIN="$([ -n "$MKXP" ] && mkxp_bin "$MKXP" || true)"
+    [ -n "$MKXP_BIN" ] || {
+        [ "$MKXP_SPEC" = auto ] && echo "no mkxp-z runtime found" >&2 \
+                                || echo "no mkxp-z runtime at '$MKXP_SPEC'" >&2
+        echo "looked for a dir with an executable mkxp* binary under:" >&2
+        echo "  ~/.local/share/mkxp*  ~/.local/lib/mkxp*  ~/mkxp*  ~/Games/mkxp*  /opt/mkxp*" >&2
+        echo "override with MKXP_DIR=/path/to/mkxp-z-install" >&2; exit 1; }
+    # mkxp-z resolves gameFolder against its own binary, never the cwd, so the
+    # game has to be named outright. Seed the config from the runtime's own
+    # commented one and then leave it alone, so per-game tweaks (fontSub, RTP,
+    # soundfont) survive the next launch.
+    if [ ! -f "$CAP/mkxp.json" ]; then
+        if [ "$(head -n1 "$MKXP/mkxp.json" 2>/dev/null)" = "{" ]; then
+            { echo '{'
+              echo '    // added by sandbox-game: the game is bind-mounted at /game'
+              echo '    "gameFolder": "/game",'
+              tail -n +2 "$MKXP/mkxp.json"; } > "$CAP/mkxp.json"
+        else
+            printf '{\n    "gameFolder": "/game"\n}\n' > "$CAP/mkxp.json"
+        fi
+    fi
+    MKXP_ARGS=(
+        --ro-bind "$MKXP" /mkxp
+        --ro-bind "$CAP/mkxp.json" /mkxp/mkxp.json
+    )
+    set -- "/mkxp/$MKXP_BIN" "$@"
+fi
+
 # ---- video backend ---------------------------------------------------------
 # Default = Xwayland: bind the X socket AND the auth cookie, otherwise Xwayland
 # refuses the client ("Authorization required, but no authorization protocol").
@@ -203,6 +277,7 @@ BWRAP=( bwrap
     "${VIDEO_ENV[@]}"
     "${OVERLAY_ARGS[@]}"
     "${PROTON_ARGS[@]}"
+    "${MKXP_ARGS[@]}"
     --chdir "$CHDIR"
 )
 

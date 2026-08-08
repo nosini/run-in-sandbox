@@ -1,0 +1,4 @@
+# mkxp-z runtime: a ~50 MB third-party CI artifact, not part of this project.
+# Install it to ~/.local/share/mkxp-z/ (or set MKXP_DIR); a copy kept here for
+# convenience should not end up in history.
+mkxp-z/

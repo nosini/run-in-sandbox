@@ -3,6 +3,7 @@
 # writes captured under ~/game-sandboxes/<name>/). Auto-detects:
 #   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
 #   * Ren'Py / native    -> right-click the game folder or its .sh launcher
+#   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
 # Install as TWO menu entries (same file); the "(Wayland)" copy passes --wayland
@@ -15,6 +16,10 @@
 # Proton likewise: newest install wins, override with PROTON_VER=GE-Proton11
 # (name substring) or PROTON_DIR=/path/to/proton-install. The prefix is built
 # fresh under ~/game-sandboxes/<name>/compat/, never your real Steam one.
+# mkxp-z is looked for in ~/.local/share/mkxp*, ~/mkxp*, /opt/mkxp*; unpack the
+# release directory there whole (the binary needs its stdlib/ beside it) or set
+# MKXP_DIR=/path. Its config lands in ~/game-sandboxes/<name>/mkxp.json and is
+# yours to edit -- that is where a soundfont, RTP paths or fontSub would go.
 # Errors show in a zenity dialog; full output logs to
 #   ~/game-sandboxes/<name>-lastrun.log
 set -uo pipefail
@@ -35,6 +40,16 @@ SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
 
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
+
+# RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
+# names the runtime it wants; the data files and encrypted archives catch dumps
+# that arrived without one. MV/MZ never match -- those are the NW.js case above.
+is_rgss() {
+    [ -f "$1/Game.ini" ] &&
+        grep -qiE '^[[:space:]]*Library[[:space:]]*=[[:space:]]*RGSS' "$1/Game.ini" && return 0
+    [ -n "$(find "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
+            -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null)" ]
+}
 
 # Windows games ship a heap of .exe beside the real one; drop the usual
 # installers and helpers, but only while something else is left to run.
@@ -68,7 +83,7 @@ pick() {                                       # $1 = dir to strip, $@ = paths
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
-RO=(); CMD=(); GAMEDIR=""; PROTON=0
+RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0
 
 # ---- figure out what was selected -----------------------------------------
 APPDIR=""
@@ -112,29 +127,44 @@ if [ -n "$APPDIR" ]; then
         exec "$d/$1" "$2" --ozone-platform=x11
     ' _ "$NW_NAME" "$APP_IN" )
 else
-    # ----- Ren'Py / native (.sh), else Windows (.exe) under Proton -----
+    # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
     # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
     # in the same folder, and running the Linux build beats emulating the other.
+    # RGSS comes next, so an RPG Maker VX Ace game runs natively under mkxp-z
+    # rather than dragging its Game.exe through Wine.
+    LAUNCHER=""
     if [ -d "$SEL" ]; then
         GAMEDIR="${SEL%/}"
         mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
         if [ "${#shs[@]}" -gt 0 ]; then
             LAUNCHER="$(pick "$GAMEDIR" "${shs[@]}")"
+            [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
+        elif is_rgss "$GAMEDIR"; then
+            MKXP=1
         else
             mapfile -t exes < <(find_exes "$GAMEDIR")
             [ "${#exes[@]}" -gt 0 ] \
-                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a .sh launcher and a .exe."
-            LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"; PROTON=1
+                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, an RGSS game, a .sh launcher and a .exe."
+            LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
+            [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
+            PROTON=1
         fi
-        [ -n "$LAUNCHER" ] || exit 0                   # picker cancelled
     else
         LAUNCHER="$SEL"; GAMEDIR="$(dirname "$SEL")"
-        case "${SEL,,}" in *.exe) PROTON=1 ;; esac
+        # Game.exe inside an RGSS folder is still an mkxp-z game.
+        case "${SEL,,}" in
+            *.exe) if is_rgss "$GAMEDIR"; then MKXP=1; else PROTON=1; fi ;;
+        esac
     fi
-    REL="${LAUNCHER#"$GAMEDIR"/}"
-    CMD=( /game/"$REL" )
-    # Proton picks the newest install itself; PROTON_VER/PROTON_DIR override it.
-    [ "$PROTON" = 1 ] && FLAG+=( "--proton${PROTON_VER:+=$PROTON_VER}" )
+    if [ "$MKXP" = 1 ]; then
+        # The runtime is the program, so there is no launcher to name.
+        FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" ); CMD=()
+    else
+        REL="${LAUNCHER#"$GAMEDIR"/}"
+        CMD=( /game/"$REL" )
+        # Proton picks the newest install itself; PROTON_VER/PROTON_DIR override it.
+        [ "$PROTON" = 1 ] && FLAG+=( "--proton${PROTON_VER:+=$PROTON_VER}" )
+    fi
 fi
 
 BASE="$(basename "$GAMEDIR")"
