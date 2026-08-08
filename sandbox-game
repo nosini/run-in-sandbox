@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# sandbox-game [--wayland] [--name NAME] GAMEDIR CMD...
+#   Runs CMD inside an isolated bwrap sandbox:
+#     - no network (--unshare-all includes the net namespace)
+#     - real $HOME absent; a fresh $HOME is redirected to the capture dir
+#     - GAMEDIR is presented at /game as an overlay; the pristine install is
+#       never modified, all writes are captured
+#   Everything the game writes ends up under ONE folder:
+#     ~/game-sandboxes/NAME/  ->  home/  (writes to $HOME: prefix, configs, saves)
+#                                 rw/    (writes into the install dir at /game)
+#
+#   --wayland   force SDL onto native Wayland (SDL_VIDEODRIVER=wayland), no X.
+#               Only for engines whose SDL has a Wayland backend -- NOT stock
+#               Ren'Py, whose bundled SDL is x11/Xwayland only.
+#   --name NAME override the sandbox name (else derived from the game dir).
+#
+#   Default (no --wayland) runs on Xwayland and binds your X cookie so the
+#   client is authorised.
+#
+# CMD references the game at /game, e.g.:
+#   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
+#   sandbox-game /mnt/General-HDD/Games/games/Witcher3  wine /game/witcher3.exe
+set -euo pipefail
+
+# Nicer names for directories whose basename is ugly. Key = on-disk basename.
+declare -A NAME_MAP=(
+    # ["Doki Doki Literature Club"]="ddlc"
+    # ["NIKKE"]="nikke"
+)
+
+derive_name() {
+    local base; base="$(basename "$1")"
+    if [ -n "${NAME_MAP[$base]:-}" ]; then printf '%s\n' "${NAME_MAP[$base]}"; return; fi
+    base="${base,,}"
+    base="${base//[^a-z0-9._-]/-}"
+    while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
+    base="${base#-}"; base="${base%-}"
+    printf '%s\n' "${base:-game}"
+}
+
+# ---- args ------------------------------------------------------------------
+WAYLAND=0; NAME=""; EXTRA_RO=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --wayland)   WAYLAND=1; shift ;;
+        --name)      NAME="$2"; shift 2 ;;
+        --name=*)    NAME="${1#--name=}"; shift ;;
+        --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
+        --)          shift; break ;;
+        -*)          echo "unknown option: $1" >&2; exit 1 ;;
+        *)           break ;;
+    esac
+done
+GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] GAMEDIR CMD...}")"; shift
+[ "$#" -ge 1 ] || { echo "need a command to run" >&2; exit 1; }
+NAME="${NAME:-$(derive_name "$GAMEDIR")}"
+
+CAP="$HOME/game-sandboxes/$NAME"
+mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
+
+RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+WL="${WAYLAND_DISPLAY:-wayland-0}"
+
+# ---- video backend ---------------------------------------------------------
+# Default = Xwayland: bind the X socket AND the auth cookie, otherwise Xwayland
+# refuses the client ("Authorization required, but no authorization protocol").
+# --wayland instead forces native Wayland (no X) for engines that support it.
+VIDEO_ENV=(); XSOCK_ARGS=()
+if [ "$WAYLAND" = 1 ]; then
+    VIDEO_ENV=( --setenv SDL_VIDEODRIVER wayland )
+else
+    XSOCK_ARGS=( --ro-bind-try /tmp/.X11-unix /tmp/.X11-unix )
+    XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
+    [ -f "$XAUTH_HOST" ] && XSOCK_ARGS+=(
+        --ro-bind "$XAUTH_HOST" /tmp/.Xauthority
+        --setenv XAUTHORITY /tmp/.Xauthority )
+fi
+
+# ---- overlay for the game's own install dir --------------------------------
+# Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
+# back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
+OVERLAY_ARGS=(); CLEANUP=""
+if bwrap --help 2>&1 | grep -q -- --overlay; then
+    OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
+else
+    command -v fuse-overlayfs >/dev/null || {
+        echo "bwrap lacks --overlay and fuse-overlayfs is not installed" >&2
+        echo "install fuse-overlayfs (openSUSE: zypper in fuse-overlayfs)" >&2; exit 1; }
+    fuse-overlayfs -o \
+        "lowerdir=$GAMEDIR,upperdir=$CAP/rw,workdir=$CAP/work" "$CAP/merged"
+    CLEANUP="$CAP/merged"
+    OVERLAY_ARGS=( --bind "$CAP/merged" /game )
+fi
+cleanup() { [ -n "$CLEANUP" ] && { fusermount3 -u "$CLEANUP" 2>/dev/null \
+              || fusermount -u "$CLEANUP" 2>/dev/null || true; }; }
+trap cleanup EXIT
+
+BWRAP=( bwrap
+    --unshare-all --die-with-parent --new-session
+    --ro-bind /usr /usr
+    --ro-bind /etc /etc
+    --ro-bind /sys /sys
+    --symlink usr/lib   /lib
+    --symlink usr/lib64 /lib64
+    --symlink usr/bin   /bin
+    --symlink usr/sbin  /sbin
+    --proc /proc
+    --dev-bind /dev /dev
+    --tmpfs /tmp
+    "${XSOCK_ARGS[@]}"
+    --perms 0700 --tmpfs "$RT"
+    --ro-bind "$RT/$WL" "$RT/$WL"
+    --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
+    --ro-bind-try "$RT/pulse" "$RT/pulse"
+    "${EXTRA_RO[@]}"
+    --bind "$CAP/home" "$HOME"
+    --setenv HOME "$HOME"
+    "${VIDEO_ENV[@]}"
+    "${OVERLAY_ARGS[@]}"
+    --chdir /game
+)
+
+if [ -n "$CLEANUP" ]; then
+    # fuse mount is live: run bwrap as a child so the EXIT trap can unmount it.
+    "${BWRAP[@]}" "$@"; rc=$?; cleanup; trap - EXIT; exit "$rc"
+else
+    trap - EXIT
+    exec "${BWRAP[@]}" "$@"
+fi

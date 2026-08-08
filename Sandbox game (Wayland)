@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Nautilus script: right-click a game and run it sandboxed (no net, home hidden,
+# writes captured under ~/game-sandboxes/<name>/). Auto-detects:
+#   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
+#   * Ren'Py / native    -> right-click the game folder or its .sh launcher
+#
+# Install as TWO menu entries (same file); the "(Wayland)" copy passes --wayland
+# for native SDL Wayland games (ignored for RPGM, which always uses x11 ozone):
+#   D=~/.local/share/nautilus/scripts
+#   install -Dm755 Sandbox-game "$D/Sandbox game"
+#   install -Dm755 Sandbox-game "$D/Sandbox game (Wayland)"
+#
+# NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
+# Errors show in a zenity dialog; full output logs to
+#   ~/game-sandboxes/<name>-lastrun.log
+set -uo pipefail
+
+SANDBOX="$HOME/.local/bin/sandbox-game"
+[ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
+msg() { command -v zenity >/dev/null && zenity --info  --no-wrap --text="$1" 2>/dev/null \
+            || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
+            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+[ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
+
+FLAG=(); case "${0,,}" in *wayland*) FLAG=(--wayland) ;; esac
+
+SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
+[ -n "$SEL" ] || SEL="$(pwd)"
+SEL="$(realpath "$SEL")"
+[ -e "$SEL" ] || die "Selection not found:\n$SEL"
+
+is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
+
+RO=(); CMD=(); GAMEDIR=""
+
+# ---- figure out what was selected -----------------------------------------
+APPDIR=""
+if [ -d "$SEL" ]; then
+    if   is_nwapp "$SEL";        then APPDIR="$SEL"
+    elif is_nwapp "$SEL/www";    then APPDIR="$SEL/www"
+    fi
+else
+    case "$(basename "$SEL")" in
+        index.html|package.json) APPDIR="$(dirname "$SEL")" ;;
+    esac
+fi
+
+if [ -n "$APPDIR" ]; then
+    # ----- RPG Maker / NW.js -----
+    FLAG=()                                   # NW.js uses x11 ozone; force X path
+    if [ "$(basename "$APPDIR")" = www ]; then
+        GAMEDIR="$(dirname "$APPDIR")"; APP_IN="/game/www"
+    else
+        GAMEDIR="$APPDIR";              APP_IN="/game"
+    fi
+    NW_DIR="${NWJS_DIR:-}"
+    if [ -z "$NW_DIR" ]; then
+        for base in ~/.config/nvm ~/.local/share/nwjs ~/nwjs; do
+            [ -d "$base" ] || continue
+            NW_DIR="$(find "$base" -type d -name 'nwjs-*linux*' 2>/dev/null | sort -V | tail -n1)"
+            [ -n "$NW_DIR" ] && break
+        done
+    fi
+    [ -n "$NW_DIR" ] && [ -x "$NW_DIR/nw" ] \
+        || die "NW.js runtime not found under ~/.config/nvm (or set NWJS_DIR=...)."
+    NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
+    RO=( --ro "$NW_DIR" /nwjs )
+    # Inside the sandbox: rebuild the runtime dir with nw renamed to the game,
+    # then exec it against the app. $1=name $2=app-path
+    CMD=( sh -c '
+        set -e
+        d=/tmp/nwrun; mkdir -p "$d"
+        cp /nwjs/nw "$d/$1"
+        for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
+        exec "$d/$1" "$2" --ozone-platform=x11
+    ' _ "$NW_NAME" "$APP_IN" )
+else
+    # ----- Ren'Py / native (.sh) -----
+    if [ -d "$SEL" ]; then
+        GAMEDIR="${SEL%/}"
+        mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
+        case "${#shs[@]}" in
+            0) die "Not an RPGM/NW.js app and no .sh launcher at:\n$GAMEDIR\n\nWine/Proton games: launch from the CLI." ;;
+            1) LAUNCHER="${shs[0]}" ;;
+            *) LAUNCHER="$(printf '%s\n' "${shs[@]}" \
+                   | zenity --list --title="Pick launcher" --column="Launcher" --width=700 --height=400 2>/dev/null)"
+               [ -n "$LAUNCHER" ] || exit 0 ;;
+        esac
+    else
+        LAUNCHER="$SEL"; GAMEDIR="$(dirname "$SEL")"
+    fi
+    REL="${LAUNCHER#"$GAMEDIR"/}"
+    CMD=( /game/"$REL" )
+fi
+
+BASE="$(basename "$GAMEDIR")"
+mkdir -p "$HOME/game-sandboxes"
+LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
+
+msg "Launching ${BASE}…"
+if "$SANDBOX" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
+    exit 0
+else
+    rc=$?
+    if command -v zenity >/dev/null; then
+        { echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
+          | zenity --text-info --title="sandbox-game failed (${BASE})" \
+                   --width=1000 --height=650 2>/dev/null
+    else
+        notify-send "sandbox-game failed (${BASE})" "exit $rc — see $LOG" 2>/dev/null
+    fi
+    exit "$rc"
+fi
