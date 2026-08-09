@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# sandbox-game [--wayland] [--name NAME] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
+# sandbox-game [--wayland] [--name NAME] [--mangohud]
+#              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace)
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
@@ -19,6 +20,11 @@
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
 #               stock Valve Proton ignores it and stays on Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
+#   --mangohud  show the MangoHud overlay. Your ~/.config/MangoHud is bound
+#               back in read-only -- $HOME is redirected, so without that the
+#               fps_limit and per-executable .conf files silently stop
+#               applying. Exporting MANGOHUD=1 opts in just the same.
+#               64-bit only unless mangohud-32bit is installed.
 #   --proton    run CMD as a Windows program under Proton: CMD is the .exe and
 #               its args, and the sandbox cwd becomes the .exe's own directory.
 #               =VER picks a Proton by name substring or by path; without it the
@@ -62,10 +68,14 @@ derive_name() {
 }
 
 # ---- args ------------------------------------------------------------------
-WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""
+# MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
+# to it here would switch the overlay off for anyone who exports MANGOHUD=1.
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0
+[ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
+        --mangohud)  MHUD=1; shift ;;
         --name)      NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
@@ -228,6 +238,24 @@ if [ -n "$MKXP_SPEC" ]; then
     set -- "/mkxp/$MKXP_BIN" "$@"
 fi
 
+# ---- mangohud --------------------------------------------------------------
+# Wrap last, so the overlay also covers whatever proton/mkxp put in front. The
+# packaged wrapper is the supported entry point: it exports MANGOHUD=1 for the
+# Vulkan layer and prepends the GL shim to LD_PRELOAD, keeping the linker's
+# literal $LIB token so the same string serves 32- and 64-bit children.
+MANGOHUD_ARGS=()
+if [ "$MHUD" = 1 ]; then
+    command -v mangohud >/dev/null || {
+        echo "mangohud not found (openSUSE: zypper in mangohud)" >&2; exit 1; }
+    CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
+    if [ -d "$CFG" ]; then
+        MANGOHUD_ARGS=( --ro-bind "$CFG" "$HOME/.config/MangoHud" )
+        # MangoHud prefers $XDG_CONFIG_HOME, which survives into the sandbox.
+        [ "$CFG" = "$HOME/.config/MangoHud" ] || MANGOHUD_ARGS+=( --ro-bind "$CFG" "$CFG" )
+    fi
+    set -- mangohud "$@"
+fi
+
 # ---- video backend ---------------------------------------------------------
 # Default = Xwayland: bind the X socket AND the auth cookie, otherwise Xwayland
 # refuses the client ("Authorization required, but no authorization protocol").
@@ -296,6 +324,7 @@ BWRAP=( bwrap
     "${OVERLAY_ARGS[@]}"
     "${PROTON_ARGS[@]}"
     "${MKXP_ARGS[@]}"
+    "${MANGOHUD_ARGS[@]}"
     --chdir "$CHDIR"
 )
 

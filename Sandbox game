@@ -6,11 +6,14 @@
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
-# Install as TWO menu entries (same file); the "(Wayland)" copy passes --wayland
-# for native SDL Wayland games (ignored for RPGM, which always uses x11 ozone):
+# Install as several menu entries (same file), which dispatch on their own name:
+# a "(Wayland)" copy passes --wayland for native SDL Wayland games (ignored for
+# RPGM, which always uses x11 ozone), a "(MangoHud)" copy passes --mangohud, and
+# a name holding both words gets both:
 #   D=~/.local/share/nautilus/scripts
 #   install -Dm755 Sandbox-game "$D/Sandbox game"
 #   install -Dm755 Sandbox-game "$D/Sandbox game (Wayland)"
+#   install -Dm755 Sandbox-game "$D/Sandbox game (MangoHud)"
 #
 # NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
 # Proton likewise: newest install wins, override with PROTON_VER=GE-Proton11
@@ -33,6 +36,8 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
 FLAG=(); case "${0,,}" in *wayland*) FLAG=(--wayland) ;; esac
+# Kept out of FLAG, which the NW.js branch clears to drop --wayland.
+MHFLAG=(); case "${0,,}" in *mangohud*) MHFLAG=(--mangohud) ;; esac
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
@@ -172,7 +177,7 @@ mkdir -p "$HOME/game-sandboxes"
 LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
 
 msg "Launching ${BASE}…"
-if "$SANDBOX" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
+if "$SANDBOX" "${FLAG[@]}" "${MHFLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
     exit 0
 else
     rc=$?
