@@ -1,0 +1,57 @@
+# shellcheck shell=bash
+# Sourced by the Nautilus scripts -- not executable, and deliberately not in the
+# scripts directory, where Nautilus would list it as a menu entry of its own.
+#
+#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+#
+# Everything here has to give the same answer in the launcher and in the
+# preferences dialog. Keying a game one way while launching it another means
+# saved settings quietly never apply, so the shared parts live in one file.
+
+CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
+
+# Per-game settings win over the defaults, and both over the built-in fallback.
+# Read rather than sourced: these files are edited by hand as often as by the
+# dialog, and a stray line should not run as code.
+cfg_get() {                                    # $1 = key, $2 = fallback
+    local f v
+    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
+        [ -f "$f" ] || continue
+        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$f" | tail -n1)"
+        # Trailing blanks survive that substitution, and a file saved with CRLF
+        # leaves a \r that would make "1" compare unequal to 1 -- invisibly.
+        v="${v%"${v##*[![:space:]]}"}"
+        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    done
+    printf '%s\n' "$2"
+}
+
+is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
+
+# Map a Nautilus selection onto the game. RPG Maker MV/MZ is the awkward one:
+# the app lives in "www" but the game -- and so the sandbox, and the settings --
+# is the folder above it, and either may be what got right-clicked.
+# Sets R_APPDIR (the NW.js app, empty when it is not one) and R_GAMEDIR.
+# shellcheck disable=SC2034  # both are outputs, read by whoever sourced this
+resolve_selection() {                          # $1 = selected path
+    local sel="$1"
+    R_APPDIR=""; R_GAMEDIR=""
+    if [ -d "$sel" ]; then
+        if   is_nwapp "$sel";     then R_APPDIR="${sel%/}"
+        elif is_nwapp "$sel/www"; then R_APPDIR="${sel%/}/www"
+        fi
+    else
+        case "$(basename "$sel")" in
+            index.html|package.json) R_APPDIR="$(dirname "$sel")" ;;
+        esac
+    fi
+    if [ -n "$R_APPDIR" ] && [ "$(basename "$R_APPDIR")" = www ]; then
+        R_GAMEDIR="$(dirname "$R_APPDIR")"
+    elif [ -n "$R_APPDIR" ]; then
+        R_GAMEDIR="$R_APPDIR"
+    elif [ -d "$sel" ]; then
+        R_GAMEDIR="${sel%/}"
+    else
+        R_GAMEDIR="$(dirname "$sel")"
+    fi
+}

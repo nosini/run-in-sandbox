@@ -15,6 +15,10 @@
 #   D=~/.local/share/nautilus/scripts
 #   install -Dm755 "Sandbox game" "$D/Sandbox game"
 #   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
+#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+# The library holds the parts both scripts must agree on and is sourced from
+# beside sandbox-game; it stays out of the scripts dir, where Nautilus would
+# offer it as a menu entry.
 #
 # NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
 # Proton: the saved version wins, else the newest install; PROTON_DIR=/path
@@ -36,27 +40,14 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
             || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
-CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
-
-# Per-game settings win over the defaults, and both over the built-in fallback.
-# Read rather than sourced: these files are edited by hand as often as by the
-# preferences dialog, and a stray line should not run as code.
-cfg_get() {                                    # $1 = key, $2 = fallback
-    local f v
-    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
-        [ -f "$f" ] || continue
-        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$f" | tail -n1)"
-        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
-    done
-    printf '%s\n' "$2"
-}
+LIB="$(dirname "$SANDBOX")/sandbox-game-lib"
+# shellcheck source=sandbox-game-lib
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found beside sandbox-game:\n$LIB"
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
 SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
-
-is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
 # RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
 # names the runtime it wants; the data files and encrypted archives catch dumps
@@ -103,25 +94,15 @@ pick() {                                       # $1 = dir to strip, $@ = paths
 RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_WAYLAND=1
 
 # ---- figure out what was selected -----------------------------------------
-APPDIR=""
-if [ -d "$SEL" ]; then
-    if   is_nwapp "$SEL";        then APPDIR="$SEL"
-    elif is_nwapp "$SEL/www";    then APPDIR="$SEL/www"
-    fi
-else
-    case "$(basename "$SEL")" in
-        index.html|package.json) APPDIR="$(dirname "$SEL")" ;;
-    esac
-fi
+# Shared with the preferences dialog, so both agree on which game this is.
+resolve_selection "$SEL"
+APPDIR="$R_APPDIR"
 
 if [ -n "$APPDIR" ]; then
     # ----- RPG Maker / NW.js -----
     ALLOW_WAYLAND=0                           # NW.js uses x11 ozone; force X path
-    if [ "$(basename "$APPDIR")" = www ]; then
-        GAMEDIR="$(dirname "$APPDIR")"; APP_IN="/game/www"
-    else
-        GAMEDIR="$APPDIR";              APP_IN="/game"
-    fi
+    GAMEDIR="$R_GAMEDIR"
+    if [ "$(basename "$APPDIR")" = www ]; then APP_IN="/game/www"; else APP_IN="/game"; fi
     NW_DIR="${NWJS_DIR:-}"
     if [ -z "$NW_DIR" ]; then
         for base in ~/.config/nvm ~/.local/share/nwjs ~/nwjs; do
@@ -149,9 +130,8 @@ else
     # in the same folder, and running the Linux build beats emulating the other.
     # RGSS comes next, so an RPG Maker VX Ace game runs natively under mkxp-z
     # rather than dragging its Game.exe through Wine.
-    LAUNCHER=""
+    LAUNCHER=""; GAMEDIR="$R_GAMEDIR"
     if [ -d "$SEL" ]; then
-        GAMEDIR="${SEL%/}"
         mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
         if [ "${#shs[@]}" -gt 0 ]; then
             LAUNCHER="$(pick "$GAMEDIR" "${shs[@]}")"
@@ -167,7 +147,7 @@ else
             PROTON=1
         fi
     else
-        LAUNCHER="$SEL"; GAMEDIR="$(dirname "$SEL")"
+        LAUNCHER="$SEL"
         # Game.exe inside an RGSS folder is still an mkxp-z game.
         case "${SEL,,}" in
             *.exe) if is_rgss "$GAMEDIR"; then MKXP=1; else PROTON=1; fi ;;
@@ -193,7 +173,8 @@ FLAG=()
 if [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 elif [ "$PROTON" = 1 ]; then
-    PV="$(cfg_get proton auto)"
+    # An exported PROTON_VER still wins, matching NWJS_DIR/MKXP_DIR/PROTON_DIR.
+    PV="${PROTON_VER:-$(cfg_get proton auto)}"
     if [ "$PV" = auto ]; then FLAG+=( --proton ); else FLAG+=( "--proton=$PV" ); fi
 fi
 

@@ -14,12 +14,11 @@
 #   D=~/.local/share/nautilus/scripts
 #   install -Dm755 "Sandbox game" "$D/Sandbox game"
 #   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
+#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
 #
 # The files are plain key=value and meant to be hand-editable:
 #   wayland=0|1   mangohud=0|1   proton=auto|<install name>
 set -uo pipefail
-
-CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
@@ -28,25 +27,21 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 command -v zenity >/dev/null || die "zenity is needed for the preferences dialog."
 
+LIB="$(dirname "$SANDBOX")/sandbox-game-lib"
+# shellcheck source=sandbox-game-lib
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found beside sandbox-game:\n$LIB"
+
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
 SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
-[ -d "$SEL" ] || SEL="$(dirname "$SEL")"       # picked a launcher, mean its game
-GAMEDIR="${SEL%/}"
+# Same mapping the launcher uses, so a game gets one key however it was picked
+# -- an NW.js "www" folder belongs to the game above it.
+resolve_selection "$SEL"
+GAMEDIR="$R_GAMEDIR"
 BASE="$(basename "$GAMEDIR")"
 NAME="$("$SANDBOX" --print-name "$GAMEDIR")" \
     || die "sandbox-game could not derive a name for:\n$GAMEDIR"
-
-cfg_get() {                                    # $1 = key, $2 = fallback
-    local f v
-    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
-        [ -f "$f" ] || continue
-        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$f" | tail -n1)"
-        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
-    done
-    printf '%s\n' "$2"
-}
 
 # ---- build the menus -------------------------------------------------------
 # zenity combos have no "select this one" switch: they open on their first
@@ -74,8 +69,14 @@ mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
 # combo would silently reopen on something else and quietly change the setting.
 mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
 
-mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W")
 mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON")
+
+# NW.js pins itself to x11 ozone, so the launcher discards the Wayland choice
+# for these. Offering it anyway would take the setting and a confirmation for
+# something that can never take effect; say so and leave the stored value be.
+V_NA="Xwayland (forced: NW.js is x11 only)"
+if [ -n "$R_APPDIR" ]; then V_ALL=( "$V_NA" )
+else                        mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W"); fi
 
 S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
 SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
@@ -108,7 +109,10 @@ if [ "$F_SCOPE" = "$S_CLEAR" ]; then
     exit 0
 fi
 
-[ "$F_VIDEO"  = "$V_W"  ] && W=1 || W=0
+# The forced entry carries no choice, so keep whatever was stored before.
+if [ "$F_VIDEO" = "$V_NA" ]; then W="$WAYLAND_NOW"
+elif [ "$F_VIDEO" = "$V_W" ]; then W=1
+else W=0; fi
 [ "$F_MHUD"   = "$M_ON" ] && M=1 || M=0
 [ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
 
