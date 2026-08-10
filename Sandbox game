@@ -100,7 +100,13 @@ APPDIR="$R_APPDIR"
 
 if [ -n "$APPDIR" ]; then
     # ----- RPG Maker / NW.js -----
-    ALLOW_WAYLAND=0                           # NW.js uses x11 ozone; force X path
+    # NW.js runs on Wayland perfectly well outside this sandbox. What it cannot
+    # do is run without a D-Bus session bus: Chromium's wayland backend segfaults
+    # on startup when there is none, reproducibly, while its x11 backend does not
+    # care. Handing a game the session bus would open the keyring, the portals
+    # and gvfs to it, which is most of what this sandbox exists to prevent, so
+    # the trade is x11 instead. See --ozone-platform=x11 below.
+    ALLOW_WAYLAND=0
     GAMEDIR="$R_GAMEDIR"
     if [ "$(basename "$APPDIR")" = www ]; then APP_IN="/game/www"; else APP_IN="/game"; fi
     NW_DIR="${NWJS_DIR:-}"
@@ -122,7 +128,7 @@ if [ -n "$APPDIR" ]; then
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
         for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
-        exec "$d/$1" "$2" --ozone-platform=x11
+        exec "$d/$1" "$2" --ozone-platform=x11   # not a limitation of NW.js; see above
     ' _ "$NW_NAME" "$APP_IN" )
 else
     # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
