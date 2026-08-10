@@ -91,7 +91,7 @@ pick() {                                       # $1 = dir to strip, $@ = paths
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
-RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_WAYLAND=1
+RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_WAYLAND=1; ALLOW_MANGOHUD=1
 
 # ---- figure out what was selected -----------------------------------------
 # Shared with the preferences dialog, so both agree on which game this is.
@@ -107,6 +107,11 @@ if [ -n "$APPDIR" ]; then
     # and gvfs to it, which is most of what this sandbox exists to prevent, so
     # the trade is x11 instead. See --ozone-platform=x11 below.
     ALLOW_WAYLAND=0
+    # MangoHud is out for the same practical reason: its GL shim is LD_PRELOADed
+    # into every child, and Chromium spawns a zygote and its own sandboxed
+    # renderers. The window then never comes up and the process hangs until it
+    # is killed. An FPS overlay on a 2D RPG Maker game is no loss.
+    ALLOW_MANGOHUD=0
     GAMEDIR="$R_GAMEDIR"
     if [ "$(basename "$APPDIR")" = www ]; then APP_IN="/game/www"; else APP_IN="/game"; fi
     NW_DIR="${NWJS_DIR:-}"
@@ -175,7 +180,7 @@ BASE="$(basename "$GAMEDIR")"
 NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" || NAME=""
 FLAG=()
 [ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
-[ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
+[ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
 if [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 elif [ "$PROTON" = 1 ]; then

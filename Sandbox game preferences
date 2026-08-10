@@ -69,15 +69,19 @@ mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
 # combo would silently reopen on something else and quietly change the setting.
 mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
 
-mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON")
-
-# The launcher keeps NW.js on x11: Chromium's wayland backend needs a D-Bus
-# session bus and the sandbox withholds one. Offering the choice anyway would
-# take a setting, and a confirmation, for something that cannot take effect --
-# so say why, and leave whatever was stored alone.
+# NW.js takes neither of these, so offering them would take a setting, and a
+# confirmation, for something that cannot take effect. Say why instead, and
+# leave whatever was stored alone -- the same game may be launched by another
+# route later. Wayland: Chromium's backend wants a D-Bus session bus the
+# sandbox withholds. MangoHud: its preloaded shim hangs Chromium's zygote.
 V_NA="Xwayland (forced: no D-Bus in the sandbox)"
-if [ -n "$R_APPDIR" ]; then V_ALL=( "$V_NA" )
-else                        mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W"); fi
+M_NA="Off (forced: hangs NW.js)"
+if [ -n "$R_APPDIR" ]; then
+    V_ALL=( "$V_NA" ); M_ALL=( "$M_NA" )
+else
+    mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W")
+    mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON")
+fi
 
 S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
 SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
@@ -114,7 +118,9 @@ fi
 if [ "$F_VIDEO" = "$V_NA" ]; then W="$WAYLAND_NOW"
 elif [ "$F_VIDEO" = "$V_W" ]; then W=1
 else W=0; fi
-[ "$F_MHUD"   = "$M_ON" ] && M=1 || M=0
+if [ "$F_MHUD" = "$M_NA" ]; then M="$MHUD_NOW"
+elif [ "$F_MHUD" = "$M_ON" ]; then M=1
+else M=0; fi
 [ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
 
 if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
