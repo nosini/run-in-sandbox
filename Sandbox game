@@ -6,19 +6,20 @@
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
-# Install as several menu entries (same file), which dispatch on their own name:
-# a "(Wayland)" copy passes --wayland for native SDL Wayland games (ignored for
-# RPGM, which always uses x11 ozone), a "(MangoHud)" copy passes --mangohud, and
-# a name holding both words gets both:
+# Wayland, MangoHud and the Proton version come from saved preferences, so there
+# is one launcher rather than a menu entry per combination. Set them with the
+# "Sandbox game preferences" script; per-game settings win over the defaults:
+#   ~/.config/sandbox-game/games/<name>
+#   ~/.config/sandbox-game/defaults
+#
 #   D=~/.local/share/nautilus/scripts
-#   install -Dm755 Sandbox-game "$D/Sandbox game"
-#   install -Dm755 Sandbox-game "$D/Sandbox game (Wayland)"
-#   install -Dm755 Sandbox-game "$D/Sandbox game (MangoHud)"
+#   install -Dm755 "Sandbox game" "$D/Sandbox game"
+#   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
 #
 # NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
-# Proton likewise: newest install wins, override with PROTON_VER=GE-Proton11
-# (name substring) or PROTON_DIR=/path/to/proton-install. The prefix is built
-# fresh under ~/game-sandboxes/<name>/compat/, never your real Steam one.
+# Proton: the saved version wins, else the newest install; PROTON_DIR=/path
+# overrides outright. The prefix is built fresh under
+# ~/game-sandboxes/<name>/compat/, never your real Steam one.
 # mkxp-z is looked for in ~/.local/share/mkxp*, ~/mkxp*, /opt/mkxp*; unpack the
 # release directory there whole (the binary needs its stdlib/ beside it) or set
 # MKXP_DIR=/path. Its config lands in ~/game-sandboxes/<name>/mkxp.json and is
@@ -35,9 +36,20 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
             || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
-FLAG=(); case "${0,,}" in *wayland*) FLAG=(--wayland) ;; esac
-# Kept out of FLAG, which the NW.js branch clears to drop --wayland.
-MHFLAG=(); case "${0,,}" in *mangohud*) MHFLAG=(--mangohud) ;; esac
+CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
+
+# Per-game settings win over the defaults, and both over the built-in fallback.
+# Read rather than sourced: these files are edited by hand as often as by the
+# preferences dialog, and a stray line should not run as code.
+cfg_get() {                                    # $1 = key, $2 = fallback
+    local f v
+    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
+        [ -f "$f" ] || continue
+        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$f" | tail -n1)"
+        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    done
+    printf '%s\n' "$2"
+}
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
@@ -88,7 +100,7 @@ pick() {                                       # $1 = dir to strip, $@ = paths
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
-RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0
+RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_WAYLAND=1
 
 # ---- figure out what was selected -----------------------------------------
 APPDIR=""
@@ -104,7 +116,7 @@ fi
 
 if [ -n "$APPDIR" ]; then
     # ----- RPG Maker / NW.js -----
-    FLAG=()                                   # NW.js uses x11 ozone; force X path
+    ALLOW_WAYLAND=0                           # NW.js uses x11 ozone; force X path
     if [ "$(basename "$APPDIR")" = www ]; then
         GAMEDIR="$(dirname "$APPDIR")"; APP_IN="/game/www"
     else
@@ -162,22 +174,34 @@ else
         esac
     fi
     if [ "$MKXP" = 1 ]; then
-        # The runtime is the program, so there is no launcher to name.
-        FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" ); CMD=()
+        CMD=()            # the runtime is the program, so there is no launcher
     else
         REL="${LAUNCHER#"$GAMEDIR"/}"
         CMD=( /game/"$REL" )
-        # Proton picks the newest install itself; PROTON_VER/PROTON_DIR override it.
-        [ "$PROTON" = 1 ] && FLAG+=( "--proton${PROTON_VER:+=$PROTON_VER}" )
     fi
 fi
 
 BASE="$(basename "$GAMEDIR")"
+
+# ---- saved preferences -----------------------------------------------------
+# Keyed by the sandbox name so prefs and captured writes stay together, and
+# read only now that the dispatch above has settled which game this is.
+NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" || NAME=""
+FLAG=()
+[ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
+[ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
+if [ "$MKXP" = 1 ]; then
+    FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
+elif [ "$PROTON" = 1 ]; then
+    PV="$(cfg_get proton auto)"
+    if [ "$PV" = auto ]; then FLAG+=( --proton ); else FLAG+=( "--proton=$PV" ); fi
+fi
+
 mkdir -p "$HOME/game-sandboxes"
 LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
 
 msg "Launching ${BASE}…"
-if "$SANDBOX" "${FLAG[@]}" "${MHFLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
+if "$SANDBOX" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
     exit 0
 else
     rc=$?

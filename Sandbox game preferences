@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Nautilus script: right-click a game and choose how the sandbox should launch
+# it. "Sandbox game" then reads these back, so there is one launcher entry
+# rather than one per flag combination.
+#
+# Settings are per game and fall back to a shared set, so one fussy title can
+# pin its own Proton without dragging the rest of the library with it:
+#   ~/.config/sandbox-game/games/<name>   <- "This game only"
+#   ~/.config/sandbox-game/defaults       <- "All games"
+# The key is whatever sandbox-game files the sandbox under, so preferences and
+# captured writes stay in step even when two games share a folder name.
+#
+# Install beside the launcher:
+#   D=~/.local/share/nautilus/scripts
+#   install -Dm755 "Sandbox game" "$D/Sandbox game"
+#   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
+#
+# The files are plain key=value and meant to be hand-editable:
+#   wayland=0|1   mangohud=0|1   proton=auto|<install name>
+set -uo pipefail
+
+CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
+
+SANDBOX="$HOME/.local/bin/sandbox-game"
+[ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
+die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
+            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+[ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
+command -v zenity >/dev/null || die "zenity is needed for the preferences dialog."
+
+SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
+[ -n "$SEL" ] || SEL="$(pwd)"
+SEL="$(realpath "$SEL")"
+[ -e "$SEL" ] || die "Selection not found:\n$SEL"
+[ -d "$SEL" ] || SEL="$(dirname "$SEL")"       # picked a launcher, mean its game
+GAMEDIR="${SEL%/}"
+BASE="$(basename "$GAMEDIR")"
+NAME="$("$SANDBOX" --print-name "$GAMEDIR")" \
+    || die "sandbox-game could not derive a name for:\n$GAMEDIR"
+
+cfg_get() {                                    # $1 = key, $2 = fallback
+    local f v
+    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
+        [ -f "$f" ] || continue
+        v="$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$f" | tail -n1)"
+        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    done
+    printf '%s\n' "$2"
+}
+
+# ---- build the menus -------------------------------------------------------
+# zenity combos have no "select this one" switch: they open on their first
+# entry. So each list is rotated to put the current setting at the front.
+first() {                                      # $1 = current, rest = all values
+    local cur="$1" v; shift
+    printf '%s\n' "$cur"
+    for v in "$@"; do [ "$v" = "$cur" ] || printf '%s\n' "$v"; done
+}
+join_pipe() { local IFS='|'; printf '%s' "$*"; }
+
+WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
+PROTON_NOW="$(cfg_get proton auto)"
+
+V_X="Xwayland (default)"; V_W="Native Wayland"
+M_OFF="Off"; M_ON="On"
+P_AUTO="Newest installed (auto)"
+
+[ "$WAYLAND_NOW" = 1 ] && V_CUR="$V_W" || V_CUR="$V_X"
+[ "$MHUD_NOW"    = 1 ] && M_CUR="$M_ON" || M_CUR="$M_OFF"
+[ "$PROTON_NOW" = auto ] && P_CUR="$P_AUTO" || P_CUR="$PROTON_NOW"
+
+mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
+# A version pinned earlier and since uninstalled must still be offered, or the
+# combo would silently reopen on something else and quietly change the setting.
+mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
+
+mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W")
+mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON")
+
+S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
+SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
+
+OUT="$(zenity --forms --title="Sandbox preferences" \
+    --text="$BASE" --separator=$'\t' \
+    --add-combo="Video backend"    --combo-values="$(join_pipe "${V_ALL[@]}")" \
+    --add-combo="MangoHud overlay" --combo-values="$(join_pipe "${M_ALL[@]}")" \
+    --add-combo="Proton version"   --combo-values="$(join_pipe "${P_ALL[@]}")" \
+    --add-combo="Save for"         --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" \
+    2>/dev/null)" || exit 0                    # cancelled
+
+# Split with awk, not read: tab counts as IFS whitespace, so read would fold
+# consecutive tabs together and shift every field left of an empty one.
+fld() { awk -F'\t' -v n="$1" 'NR==1 {print $n}' <<<"$OUT"; }
+F_VIDEO="$(fld 1)"; F_MHUD="$(fld 2)"; F_PROTON="$(fld 3)"; F_SCOPE="$(fld 4)"
+
+# An untouched combo can come back empty on some zenity builds; keep the
+# current value rather than silently resetting it to the built-in default.
+[ -n "${F_VIDEO:-}"  ] || F_VIDEO="$V_CUR"
+[ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
+[ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
+[ -n "${F_SCOPE:-}"  ] || F_SCOPE="$S_GAME"
+
+# ---- save ------------------------------------------------------------------
+if [ "$F_SCOPE" = "$S_CLEAR" ]; then
+    rm -f "$CFGDIR/games/$NAME"
+    zenity --info --no-wrap --title="Sandbox preferences" \
+        --text="Cleared settings for <b>$BASE</b>.\nIt will use the defaults from now on." 2>/dev/null
+    exit 0
+fi
+
+[ "$F_VIDEO"  = "$V_W"  ] && W=1 || W=0
+[ "$F_MHUD"   = "$M_ON" ] && M=1 || M=0
+[ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
+
+if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
+else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
+
+mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
+{   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
+    echo "wayland=$W"
+    echo "mangohud=$M"
+    echo "proton=$P"
+} > "$TARGET" || die "Cannot write $TARGET"
+
+NOTE=""
+[ "$F_SCOPE" = "$S_ALL" ] && [ -f "$CFGDIR/games/$NAME" ] \
+    && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
+
+zenity --info --no-wrap --title="Sandbox preferences" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nMangoHud: $F_MHUD\nProton: $F_PROTON\n\n<tt>$TARGET</tt>$NOTE" \
+    2>/dev/null

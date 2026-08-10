@@ -67,15 +67,46 @@ derive_name() {
     printf '%s\n' "${base:-game}"
 }
 
+# ---- proton discovery ------------------------------------------------------
+# Where Steam keeps compatibility tools, native install and flatpak alike. Kept
+# up here so --list-proton can answer before a game is even named; the menu that
+# offers these versions has no business restating the search paths.
+proton_roots() {
+    printf '%s\n' \
+        "$HOME/.local/share/Steam/compatibilitytools.d" \
+        "$HOME/.steam/root/compatibilitytools.d" \
+        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d" \
+        "$HOME/.local/share/Steam/steamapps/common" \
+        "$HOME/.steam/root/steamapps/common" \
+        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common" \
+        /usr/share/steam/compatibilitytools.d
+}
+
+list_protons() {                      # every install found, newest first
+    local root d ver
+    while IFS= read -r root; do
+        [ -d "$root" ] || continue
+        for d in "$root"/*/; do
+            d="${d%/}"
+            [ -x "$d/proton" ] || continue
+            ver="$(cut -d' ' -f1 "$d/version" 2>/dev/null || true)"
+            [[ "$ver" =~ ^[0-9]+$ ]] || ver=0
+            printf '%s\t%s\n' "$ver" "$(basename "$d")"
+        done
+    done < <(proton_roots) | sort -rn -k1,1 | cut -f2 | awk '!seen[$0]++'
+}
+
 # ---- args ------------------------------------------------------------------
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
-WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
+        --print-name) PRINT_NAME=1; shift ;;
+        --list-proton) list_protons; exit 0 ;;
         --name)      NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
@@ -92,8 +123,12 @@ done
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
 GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...}")"; shift
 # --mkxp supplies its own command: the runtime is the program.
-[ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || { echo "need a command to run" >&2; exit 1; }
+[ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
+    echo "need a command to run" >&2; exit 1; }
 NAME="${NAME:-$(derive_name "$GAMEDIR")}"
+# The sandbox name doubles as the key everything else files a game under, so
+# hand it out rather than have callers reimplement derive_name().
+[ "$PRINT_NAME" = 0 ] || { printf '%s\n' "$NAME"; exit 0; }
 
 CAP="$HOME/game-sandboxes/$NAME"
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
@@ -103,18 +138,6 @@ WL="${WAYLAND_DISPLAY:-wayland-0}"
 CHDIR=/game
 
 # ---- proton ----------------------------------------------------------------
-# Where Steam keeps compatibility tools, native install and flatpak alike.
-proton_roots() {
-    printf '%s\n' \
-        "$HOME/.local/share/Steam/compatibilitytools.d" \
-        "$HOME/.steam/root/compatibilitytools.d" \
-        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d" \
-        "$HOME/.local/share/Steam/steamapps/common" \
-        "$HOME/.steam/root/steamapps/common" \
-        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common" \
-        /usr/share/steam/compatibilitytools.d
-}
-
 # A Proton is any directory holding an executable `proton` script -- that test
 # also rejects the plain Wine builds people drop into compatibilitytools.d.
 # Newest wins, ranked by the unix timestamp that leads the `version` file.
