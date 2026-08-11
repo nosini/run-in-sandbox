@@ -301,6 +301,14 @@ if [ "$GS" = 1 ]; then
     command -v gamescope >/dev/null || {
         echo "gamescope not found (openSUSE: zypper in gamescope)" >&2; exit 1; }
     GS_CMD=( gamescope "${GS_ARGS[@]}" )
+    # gamescope serves no Wayland socket to its children unless asked, and
+    # Proton only reaches for winewayland.drv when it can see WAYLAND_DISPLAY.
+    # Without this the game quietly lands back on winex11.drv inside gamescope,
+    # STEAM_COMPAT_CONFIG=wayland notwithstanding -- and an SDL game pinned to
+    # the Wayland backend has nothing at all to talk to.
+    if [ "$WAYLAND" = 1 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
+        GS_CMD+=( --expose-wayland )
+    fi
     if [ "$MHUD" = 1 ]; then
         if command -v mangoapp >/dev/null; then
             GS_CMD+=( --mangoapp )

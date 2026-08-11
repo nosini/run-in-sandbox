@@ -56,6 +56,15 @@ first() {                                      # $1 = current, rest = all values
 }
 join_pipe() { local IFS='|'; printf '%s' "$*"; }
 
+# For offering "the size of your screen" in the gamescope menu. xrandr answers
+# through Xwayland on compositors that do not speak wlr-output-management.
+native_res() {
+    local r
+    r="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
+    [ -n "$r" ] || r="$(wlr-randr 2>/dev/null | awk '/current/ {print $1; exit}')"
+    [[ "$r" =~ ^[0-9]+x[0-9]+$ ]] && printf '%s\n' "$r"
+}
+
 WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
 PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
 
@@ -132,23 +141,67 @@ if [ "$F_MHUD" = "$M_NA" ]; then M="$MHUD_NOW"
 elif [ "$F_MHUD" = "$M_ON" ]; then M=1
 else M=0; fi
 [ "$F_GS" = "$G_ON" ] && G=1 || G=0
+
+# ---- gamescope options -----------------------------------------------------
+# Only worth asking once gamescope is on, so it is a second dialog rather than
+# four more fields nobody with it switched off would want. Resolution and
+# fullscreen are the two knobs; anything else in gamescope_args was put there
+# by hand and is parsed out, left alone, and put back.
+GA_OUT="$(cfg_get gamescope_args "")"
+if [ "$G" = 1 ]; then
+    GA_W=""; GA_H=""; GA_F=0; GA_REST=(); i=0
+    read -r -a GA_IN <<<"$GA_OUT"
+    while [ "$i" -lt "${#GA_IN[@]}" ]; do
+        case "${GA_IN[$i]}" in
+            -W|--output-width)  GA_W="${GA_IN[$((i+1))]:-}"; i=$((i+2)) ;;
+            -H|--output-height) GA_H="${GA_IN[$((i+1))]:-}"; i=$((i+2)) ;;
+            -f|--fullscreen)    GA_F=1; i=$((i+1)) ;;
+            *)                  GA_REST+=( "${GA_IN[$i]}" ); i=$((i+1)) ;;
+        esac
+    done
+
+    R_NONE="Game default (no override)"
+    R_CUR="$R_NONE"
+    [ -n "$GA_W" ] && [ -n "$GA_H" ] && R_CUR="${GA_W}x${GA_H}"
+    RES=( "$R_NONE" )
+    NATIVE="$(native_res)"
+    [ -n "$NATIVE" ] && RES+=( "$NATIVE" )
+    RES+=( 3840x2160 2560x1440 1920x1080 1600x900 1280x720 )
+    mapfile -t RES_ALL < <(first "$R_CUR" "${RES[@]}" | awk '!seen[$0]++')
+    [ "$GA_F" = 1 ] && FS_CUR="Yes" || FS_CUR="No"
+    mapfile -t FS_ALL < <(first "$FS_CUR" "Yes" "No")
+
+    GOUT="$(zenity --forms --title="Gamescope options" \
+        --text="$BASE" --separator=$'\t' \
+        --add-combo="Resolution" --combo-values="$(join_pipe "${RES_ALL[@]}")" \
+        --add-combo="Fullscreen" --combo-values="$(join_pipe "${FS_ALL[@]}")" \
+        2>/dev/null)"
+    # Backing out of this one keeps the options as they were rather than
+    # throwing away the main dialog's answers too.
+    if [ -n "$GOUT" ]; then
+        F_RES="$(awk -F'\t' 'NR==1 {print $1}' <<<"$GOUT")"
+        F_FS="$( awk -F'\t' 'NR==1 {print $2}' <<<"$GOUT")"
+        [ -n "$F_RES" ] || F_RES="$R_CUR"
+        [ -n "$F_FS"  ] || F_FS="$FS_CUR"
+        GA_NEW=()
+        [ "$F_RES" != "$R_NONE" ] && [[ "$F_RES" =~ ^([0-9]+)x([0-9]+)$ ]] \
+            && GA_NEW+=( -W "${BASH_REMATCH[1]}" -H "${BASH_REMATCH[2]}" )
+        [ "$F_FS" = Yes ] && GA_NEW+=( -f )
+        GA_NEW+=( "${GA_REST[@]}" )
+        GA_OUT="${GA_NEW[*]}"
+    fi
+fi
 [ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
 
 if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
 else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
-
-# gamescope_args is hand-edited only, so carry whatever this file already had
-# through the rewrite instead of quietly dropping it. Read from the target
-# itself, not through cfg_get, or a value inherited from the defaults would get
-# baked into a per-game file.
-GA_KEEP="$(sed -n 's/^[[:space:]]*gamescope_args[[:space:]]*=[[:space:]]*//p' "$TARGET" 2>/dev/null | tail -n1)"
 
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
     echo "wayland=$W"
     echo "mangohud=$M"
     echo "gamescope=$G"
-    [ -n "$GA_KEEP" ] && echo "gamescope_args=$GA_KEEP"
+    [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
     echo "proton=$P"
 } > "$TARGET" || die "Cannot write $TARGET"
 
@@ -157,5 +210,5 @@ NOTE=""
     && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
 
 zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nMangoHud: $F_MHUD\nGamescope: $F_GS\nProton: $F_PROTON\n\n<tt>$TARGET</tt>$NOTE" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nMangoHud: $F_MHUD\nGamescope: $F_GS${GA_OUT:+ <tt>($GA_OUT)</tt>}\nProton: $F_PROTON\n\n<tt>$TARGET</tt>$NOTE" \
     2>/dev/null
