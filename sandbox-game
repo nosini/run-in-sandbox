@@ -277,11 +277,17 @@ fi
 # packaged wrapper is the supported entry point: it exports MANGOHUD=1 for the
 # Vulkan layer and prepends the GL shim to LD_PRELOAD, keeping the linker's
 # literal $LIB token so the same string serves 32- and 64-bit children.
-MANGOHUD_ARGS=()
+MANGOHUD_ARGS=(); MHUD_VIA_APP=0
 if [ "$MHUD" = 1 ]; then
-    # Under gamescope the overlay is mangoapp's job, but either way it reads the
-    # same config, so bind it whichever route the overlay takes.
-    [ "$GS" = 1 ] || command -v mangohud >/dev/null || {
+    # Under gamescope the overlay is normally mangoapp's job -- except when the
+    # Wayland socket is exposed as well. mangoapp is a GLFW client: given a
+    # WAYLAND_DISPLAY it takes the Wayland path, libdecor cannot find the
+    # globals gamescope offers, it falls back to X11, fails there too, and the
+    # reaper restarts it forever. Exposing that socket is the whole reason
+    # winewayland works, so keep it and preload the shim into the game instead,
+    # against gamescope's general advice. Either route reads the same config.
+    [ "$GS" = 1 ] && [ "$WAYLAND" = 0 ] && MHUD_VIA_APP=1
+    [ "$MHUD_VIA_APP" = 1 ] || command -v mangohud >/dev/null || {
         echo "mangohud not found (openSUSE: zypper in mangohud)" >&2; exit 1; }
     CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
     if [ -d "$CFG" ]; then
@@ -289,7 +295,7 @@ if [ "$MHUD" = 1 ]; then
         # MangoHud prefers $XDG_CONFIG_HOME, which survives into the sandbox.
         [ "$CFG" = "$HOME/.config/MangoHud" ] || MANGOHUD_ARGS+=( --ro-bind "$CFG" "$CFG" )
     fi
-    [ "$GS" = 1 ] || set -- mangohud "$@"
+    [ "$MHUD_VIA_APP" = 1 ] || set -- mangohud "$@"
 fi
 
 # ---- gamescope -------------------------------------------------------------
@@ -309,7 +315,7 @@ if [ "$GS" = 1 ]; then
     if [ "$WAYLAND" = 1 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
         GS_CMD+=( --expose-wayland )
     fi
-    if [ "$MHUD" = 1 ]; then
+    if [ "$MHUD_VIA_APP" = 1 ]; then
         if command -v mangoapp >/dev/null; then
             GS_CMD+=( --mangoapp )
         else
