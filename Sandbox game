@@ -181,6 +181,11 @@ NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" || NAME=""
 FLAG=()
 [ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
+if [ "$(cfg_get gamescope 0)" = 1 ]; then
+    # gamescope_args is hand-edited only; empty means gamescope's own defaults.
+    GA="$(cfg_get gamescope_args "")"
+    if [ -n "$GA" ]; then FLAG+=( "--gamescope=$GA" ); else FLAG+=( --gamescope ); fi
+fi
 if [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 elif [ "$PROTON" = 1 ]; then

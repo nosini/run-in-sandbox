@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sandbox-game [--wayland] [--name NAME] [--mangohud]
+# sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
 #              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace)
@@ -25,6 +25,14 @@
 #               fps_limit and per-executable .conf files silently stop
 #               applying. Exporting MANGOHUD=1 opts in just the same.
 #               64-bit only unless mangohud-32bit is installed.
+#   --gamescope run the game inside gamescope's nested compositor. =ARGS passes
+#               options through, e.g. --gamescope='-f -W 2560 -H 1440' (word
+#               split, so quote the lot). Together with --mangohud this becomes
+#               gamescope --mangoapp, which is what gamescope's own help says to
+#               use in place of wrapping the game in mangohud; that needs the
+#               separate mangoapp package. gamescope displays through the host
+#               Wayland socket and brings its own nested Xwayland for the game,
+#               so the host X server stays out of the sandbox in this mode.
 #   --proton    run CMD as a Windows program under Proton: CMD is the .exe and
 #               its args, and the sandbox cwd becomes the .exe's own directory.
 #               =VER picks a Proton by name substring or by path; without it the
@@ -100,11 +108,14 @@ list_protons() {                      # every install found, newest first
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
+GS=0; GS_ARGS=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
+        --gamescope) GS=1; shift ;;
+        --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
         --list-proton) list_protons; exit 0 ;;
         --name)      NAME="$2"; shift 2 ;;
@@ -268,7 +279,9 @@ fi
 # literal $LIB token so the same string serves 32- and 64-bit children.
 MANGOHUD_ARGS=()
 if [ "$MHUD" = 1 ]; then
-    command -v mangohud >/dev/null || {
+    # Under gamescope the overlay is mangoapp's job, but either way it reads the
+    # same config, so bind it whichever route the overlay takes.
+    [ "$GS" = 1 ] || command -v mangohud >/dev/null || {
         echo "mangohud not found (openSUSE: zypper in mangohud)" >&2; exit 1; }
     CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
     if [ -d "$CFG" ]; then
@@ -276,7 +289,28 @@ if [ "$MHUD" = 1 ]; then
         # MangoHud prefers $XDG_CONFIG_HOME, which survives into the sandbox.
         [ "$CFG" = "$HOME/.config/MangoHud" ] || MANGOHUD_ARGS+=( --ro-bind "$CFG" "$CFG" )
     fi
-    set -- mangohud "$@"
+    [ "$GS" = 1 ] || set -- mangohud "$@"
+fi
+
+# ---- gamescope -------------------------------------------------------------
+# Outermost of the lot, so the compositor owns whatever proton or mkxp put in
+# front of the game. Its --mangoapp is the supported way to get the overlay in
+# here: gamescope's own help says to use it instead of wrapping the game, and
+# doing both would draw the thing twice.
+if [ "$GS" = 1 ]; then
+    command -v gamescope >/dev/null || {
+        echo "gamescope not found (openSUSE: zypper in gamescope)" >&2; exit 1; }
+    GS_CMD=( gamescope "${GS_ARGS[@]}" )
+    if [ "$MHUD" = 1 ]; then
+        if command -v mangoapp >/dev/null; then
+            GS_CMD+=( --mangoapp )
+        else
+            # Not fatal: losing the overlay beats refusing to start the game.
+            echo "warning: --mangohud under gamescope needs the mangoapp package;" >&2
+            echo "         running without the overlay (openSUSE: zypper in mangoapp)" >&2
+        fi
+    fi
+    set -- "${GS_CMD[@]}" -- "$@"
 fi
 
 # ---- video backend ---------------------------------------------------------
@@ -295,6 +329,15 @@ if [ "$WAYLAND" = 1 ]; then
     else
         VIDEO_ENV=( --setenv SDL_VIDEODRIVER wayland ); WANT_X=0
     fi
+fi
+if [ "$GS" = 1 ]; then
+    # gamescope hosts its own Xwayland for the game and displays through the
+    # Wayland socket, so the host X server is not wanted. Its Xwayland does need
+    # to create a socket in /tmp/.X11-unix, and refuses a directory it does not
+    # own -- bind the host's and it arrives owned by nobody, leaving gamescope
+    # to fail with "not owned by root or us". Hand it an empty one instead.
+    WANT_X=0
+    XSOCK_ARGS=( --dir /tmp/.X11-unix )
 fi
 if [ "$WANT_X" = 1 ]; then
     XSOCK_ARGS=( --ro-bind-try /tmp/.X11-unix /tmp/.X11-unix )
