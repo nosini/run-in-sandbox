@@ -19,8 +19,12 @@
 # The files are plain key=value and meant to be hand-editable:
 #   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
 #   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
-# gamescope_args has no dialog field -- it is set by hand and carried through
-# saves untouched. Empty means gamescope's own defaults.
+#   env=K=V K=V ...                      e.g. WAYLANDDRV_PRIMARY_MONITOR=HDMI-1
+# Resolution and fullscreen get a second dialog once gamescope is on; the rest
+# of gamescope_args, and all of env, are set by hand and carried through saves
+# untouched. env exists because a game started from the file manager inherits
+# the file manager's environment, not the one in your shell. Values cannot
+# contain spaces, the list being split on them.
 set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
@@ -196,12 +200,18 @@ fi
 if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
 else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
 
+# env= has no dialog field either. Read it from the target itself rather than
+# through cfg_get, so a value inherited from the defaults is not baked into a
+# per-game file that would then stop following it.
+ENV_KEEP="$(sed -n 's/^[[:space:]]*env[[:space:]]*=[[:space:]]*//p' "$TARGET" 2>/dev/null | tail -n1)"
+
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
     echo "wayland=$W"
     echo "mangohud=$M"
     echo "gamescope=$G"
     [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
+    [ -n "$ENV_KEEP" ] && echo "env=$ENV_KEEP"
     echo "proton=$P"
 } > "$TARGET" || die "Cannot write $TARGET"
 

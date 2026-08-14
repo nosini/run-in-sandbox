@@ -186,6 +186,10 @@ if [ "$(cfg_get gamescope 0)" = 1 ]; then
     GA="$(cfg_get gamescope_args "")"
     if [ -n "$GA" ]; then FLAG+=( "--gamescope=$GA" ); else FLAG+=( --gamescope ); fi
 fi
+# env=K=V K=V ... -- a game launched from the file manager inherits its
+# environment, not a shell's, so anything the game needs has to be recorded.
+read -r -a CFG_ENV <<<"$(cfg_get env "")"
+for e in ${CFG_ENV[@]+"${CFG_ENV[@]}"}; do FLAG+=( "--env=$e" ); done
 if [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 elif [ "$PROTON" = 1 ]; then

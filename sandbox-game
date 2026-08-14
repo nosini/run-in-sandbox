@@ -20,6 +20,11 @@
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
 #               stock Valve Proton ignores it and stays on Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
+#   --env K=V   set a variable inside the sandbox; repeatable, and applied last
+#               so it wins over anything set above. The host environment is
+#               inherited as it stands -- but a game started from the file
+#               manager inherits the file manager's, not your shell's, which is
+#               what this is for (e.g. --env WAYLANDDRV_PRIMARY_MONITOR=HDMI-1).
 #   --mangohud  show the MangoHud overlay. Your ~/.config/MangoHud is bound
 #               back in read-only -- $HOME is redirected, so without that the
 #               fps_limit and per-executable .conf files silently stop
@@ -108,7 +113,7 @@ list_protons() {                      # every install found, newest first
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=()
+GS=0; GS_ARGS=(); ENV_ARGS=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -125,6 +130,10 @@ while [ "$#" -gt 0 ]; do
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
+        --env)       ENV_ARGS+=( --setenv "${2%%=*}" "${2#*=}" ); shift 2 ;;
+        --env=*)     _e="${1#--env=}"
+                     [ "$_e" = "${_e#*=}" ] && { echo "--env wants KEY=VALUE, got '$_e'" >&2; exit 1; }
+                     ENV_ARGS+=( --setenv "${_e%%=*}" "${_e#*=}" ); shift ;;
         --)          shift; break ;;
         -*)          echo "unknown option: $1" >&2; exit 1 ;;
         *)           break ;;
@@ -405,6 +414,7 @@ BWRAP=( bwrap
     "${PROTON_ARGS[@]}"
     "${MKXP_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
+    "${ENV_ARGS[@]}"                  # last, so these win over the above
     --chdir "$CHDIR"
 )
 
