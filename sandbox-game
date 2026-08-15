@@ -110,6 +110,13 @@ list_protons() {                      # every install found, newest first
 }
 
 # ---- args ------------------------------------------------------------------
+# Shared by both spellings of --env, so "--env FOO" is rejected as loudly as
+# "--env=FOO" instead of quietly setting FOO to itself.
+add_env() {                           # reads $_e as KEY=VALUE
+    [ "$_e" = "${_e#*=}" ] && { echo "--env wants KEY=VALUE, got '$_e'" >&2; exit 1; }
+    ENV_ARGS+=( --setenv "${_e%%=*}" "${_e#*=}" )
+}
+
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
@@ -130,10 +137,8 @@ while [ "$#" -gt 0 ]; do
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
-        --env)       ENV_ARGS+=( --setenv "${2%%=*}" "${2#*=}" ); shift 2 ;;
-        --env=*)     _e="${1#--env=}"
-                     [ "$_e" = "${_e#*=}" ] && { echo "--env wants KEY=VALUE, got '$_e'" >&2; exit 1; }
-                     ENV_ARGS+=( --setenv "${_e%%=*}" "${_e#*=}" ); shift ;;
+        --env)       _e="$2"; shift 2; add_env ;;
+        --env=*)     _e="${1#--env=}"; shift; add_env ;;
         --)          shift; break ;;
         -*)          echo "unknown option: $1" >&2; exit 1 ;;
         *)           break ;;
@@ -281,6 +286,15 @@ if [ -n "$MKXP_SPEC" ]; then
     set -- "/mkxp/$MKXP_BIN" "$@"
 fi
 
+# Will gamescope end up serving a Wayland socket to its children? Either
+# because --wayland asked for one, or because the flag was written into
+# gamescope_args by hand. Decided here, before anything reads it.
+GS_EXPOSE=0
+if [ "$GS" = 1 ]; then
+    [ "$WAYLAND" = 1 ] && GS_EXPOSE=1
+    [[ " ${GS_ARGS[*]} " == *" --expose-wayland "* ]] && GS_EXPOSE=1
+fi
+
 # ---- mangohud --------------------------------------------------------------
 # Wrap last, so the overlay also covers whatever proton/mkxp put in front. The
 # packaged wrapper is the supported entry point: it exports MANGOHUD=1 for the
@@ -295,7 +309,9 @@ if [ "$MHUD" = 1 ]; then
     # reaper restarts it forever. Exposing that socket is the whole reason
     # winewayland works, so keep it and preload the shim into the game instead,
     # against gamescope's general advice. Either route reads the same config.
-    [ "$GS" = 1 ] && [ "$WAYLAND" = 0 ] && MHUD_VIA_APP=1
+    # GS_EXPOSE, not WAYLAND: the flag can equally arrive by hand through
+    # gamescope_args, and mangoapp breaks on the socket however it got there.
+    [ "$GS" = 1 ] && [ "$GS_EXPOSE" = 0 ] && MHUD_VIA_APP=1
     [ "$MHUD_VIA_APP" = 1 ] || command -v mangohud >/dev/null || {
         echo "mangohud not found (openSUSE: zypper in mangohud)" >&2; exit 1; }
     CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
@@ -324,6 +340,9 @@ if [ "$GS" = 1 ]; then
     if [ "$WAYLAND" = 1 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
         GS_CMD+=( --expose-wayland )
     fi
+    # An inherited MANGOHUD=1 would light up MangoHud's Vulkan layer inside the
+    # game as well, drawing the overlay a second time next to mangoapp's.
+    [ "$MHUD_VIA_APP" = 1 ] && MANGOHUD_ARGS+=( --setenv MANGOHUD 0 )
     if [ "$MHUD_VIA_APP" = 1 ]; then
         if command -v mangoapp >/dev/null; then
             GS_CMD+=( --mangoapp )

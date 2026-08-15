@@ -137,11 +137,20 @@ if [ "$F_SCOPE" = "$S_CLEAR" ]; then
     exit 0
 fi
 
-# The forced entry carries no choice, so keep whatever was stored before.
-if [ "$F_VIDEO" = "$V_NA" ]; then W="$WAYLAND_NOW"
+if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
+else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
+
+# Values the dialog did not ask about have to come out of the file being
+# written, never out of cfg_get: its answer is the two scopes merged, and
+# writing that back would copy a game's setting into the defaults, or pin an
+# inherited default into a game that then stops following it.
+kept() { file_get "$TARGET" "$1" || printf '%s\n' "$2"; }
+
+# The forced entries carry no choice, so keep whatever this file already said.
+if [ "$F_VIDEO" = "$V_NA" ]; then W="$(kept wayland 0)"
 elif [ "$F_VIDEO" = "$V_W" ]; then W=1
 else W=0; fi
-if [ "$F_MHUD" = "$M_NA" ]; then M="$MHUD_NOW"
+if [ "$F_MHUD" = "$M_NA" ]; then M="$(kept mangohud 0)"
 elif [ "$F_MHUD" = "$M_ON" ]; then M=1
 else M=0; fi
 [ "$F_GS" = "$G_ON" ] && G=1 || G=0
@@ -151,7 +160,7 @@ else M=0; fi
 # four more fields nobody with it switched off would want. Resolution and
 # fullscreen are the two knobs; anything else in gamescope_args was put there
 # by hand and is parsed out, left alone, and put back.
-GA_OUT="$(cfg_get gamescope_args "")"
+GA_OUT="$(kept gamescope_args "")"
 if [ "$G" = 1 ]; then
     GA_W=""; GA_H=""; GA_F=0; GA_REST=(); i=0
     read -r -a GA_IN <<<"$GA_OUT"
@@ -197,13 +206,7 @@ if [ "$G" = 1 ]; then
 fi
 [ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
 
-if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
-else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
-
-# env= has no dialog field either. Read it from the target itself rather than
-# through cfg_get, so a value inherited from the defaults is not baked into a
-# per-game file that would then stop following it.
-ENV_KEEP="$(sed -n 's/^[[:space:]]*env[[:space:]]*=[[:space:]]*//p' "$TARGET" 2>/dev/null | tail -n1)"
+ENV_KEEP="$(kept env "")"        # no dialog field; carried through untouched
 
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"

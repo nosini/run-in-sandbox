@@ -201,8 +201,15 @@ fi
 mkdir -p "$HOME/game-sandboxes"
 LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
 
+# Withholding --mangohud is not enough to keep the overlay away from NW.js:
+# sandbox-game also opts in from an inherited MANGOHUD=1, and that variable
+# would reach the game regardless and switch on MangoHud's Vulkan layer. Drop
+# it outright for the engines that cannot survive it.
+RUN=( "$SANDBOX" )
+[ "$ALLOW_MANGOHUD" = 1 ] || RUN=( env -u MANGOHUD "$SANDBOX" )
+
 msg "Launching ${BASE}…"
-if "$SANDBOX" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
+if "${RUN[@]}" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
     exit 0
 else
     rc=$?
