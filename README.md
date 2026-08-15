@@ -2,8 +2,9 @@
 
 Run a downloaded game in a bwrap sandbox, from the file manager or the shell.
 
-Games from itch.io, F95, or a random archive are unpacked and run as your user
-with your whole home directory in reach. This puts one between them and you:
+Games from itch.io, a jam page, or a random archive are unpacked and run as your
+user with your whole home directory in reach. This puts one between them and
+you:
 
 - **No network.** `--unshare-all` takes the net namespace with it.
 - **No `$HOME`.** The real one is not bound at all; a fresh, empty one is
@@ -39,77 +40,130 @@ Then right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
 
 ## Dependencies
 
+Package names vary between distributions; the binary is what matters, and the
+names below are the common ones. Where a name differs sharply it is called out.
+
 ### Required
 
-| | Package (openSUSE) | Why |
+| Binary | Usual package | Why |
 |---|---|---|
 | `bwrap` | `bubblewrap` | the sandbox itself |
 | `bash` ≥ 4.0 | `bash` | `mapfile`, associative arrays, `${var,,}` |
 | `awk`, `sed`, `find`, `sort`, `realpath` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
 
 Nothing else is needed for the CLI. `bwrap` does not need to be setuid on any
-current distro — user namespaces cover it.
+current distribution — unprivileged user namespaces cover it. If yours disables
+them (`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on
+Ubuntu 24.04+), nothing here will run until that is lifted.
 
 ### Required for the Nautilus scripts
 
-| | Package | Why |
+| Binary | Usual package | Why |
 |---|---|---|
 | `nautilus` | `nautilus` | the scripts are Nautilus scripts |
 | `zenity` | `zenity` | launcher picker, error window, the whole preferences dialog |
-| `notify-send` | `libnotify-tools` | fallback when zenity is missing |
+| `notify-send` | `libnotify` / `libnotify-bin` / `libnotify-tools` | fallback when zenity is missing |
 
 The preferences dialog refuses to start without zenity. The launcher degrades to
 `notify-send` and, failing that, to silence.
 
+Only the two scripts are Nautilus-specific, and only for how they learn what was
+selected — `sandbox-game` itself has no GUI dependency at all. Another file
+manager with a scripts or custom-actions feature can call them the same way if
+it sets `NAUTILUS_SCRIPT_SELECTED_FILE_PATHS`; otherwise they fall back to the
+working directory.
+
 ### Per feature
 
-| Feature | Needs | Package |
+| Feature | Needs | Notes |
 |---|---|---|
-| overlay on a `bwrap` built without `--overlay` | `fuse-overlayfs` | `fuse-overlayfs` |
-| `--mangohud` | `mangohud` | `mangohud` |
-| MangoHud in a 32-bit game | the 32-bit libraries | `mangohud-32bit` |
-| `--gamescope` | `gamescope` | `gamescope` |
-| `--gamescope` **and** `--mangohud` | `mangoapp` | `mangoapp` |
-| resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr`, `wlr-randr` |
+| overlay on a `bwrap` built without `--overlay` | `fuse-overlayfs` | fallback only |
+| `--mangohud` | `mangohud` | |
+| MangoHud in a 32-bit game | the 32-bit libraries | `lib32-mangohud`, `mangohud-32bit`, `mangohud.i686`, `mangohud:i386` — pick your distro's spelling |
+| `--gamescope` | `gamescope` | |
+| `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
+| resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 
-`bwrap --overlay` is the preferred path and is compiled in on most distros
-(check with `bwrap --help | grep overlay`); `fuse-overlayfs` is only the
-fallback. Missing `mangoapp` is a warning, not an error — the game still starts,
-without the overlay.
+`bwrap --overlay` is the preferred path and is compiled in on most
+distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
+is only the fallback for builds that lack it. A missing `mangoapp` is a warning,
+not an error: the game still starts, without the overlay.
 
 ### Per engine
 
 None of these are packaged with the project; each is found at runtime, and only
 the ones you actually use need to exist.
 
-**RPG Maker MV/MZ — NW.js.** Any Linux NW.js build. Searched for under
-`~/.config/nvm`, `~/.local/share/nwjs` and `~/nwjs` as a directory named
-`nwjs-*linux*`, newest by version; `NWJS_DIR=/path` overrides. The `nw` npm
-package puts one in
-`~/.config/nvm/versions/node/*/lib/node_modules/nw/nwjs-*-linux-x64`, which the
-search finds as-is.
+#### RPG Maker MV/MZ — NW.js
 
-**Windows games — Proton.** Any Proton install, meaning any directory holding an
-executable `proton` script — that test also rejects the plain Wine builds people
-drop into `compatibilitytools.d`. Searched under Steam's
-`compatibilitytools.d` and `steamapps/common`, native and flatpak, plus
+Any Linux NW.js build. Searched for under `~/.config/nvm`,
+`~/.local/share/nwjs` and `~/nwjs` as a directory named `nwjs-*linux*`, newest
+by version; `NWJS_DIR=/path` overrides. Downloading a build from
+[nwjs.io](https://nwjs.io/) and unpacking it into `~/.local/share/nwjs/` works,
+as does `npm install -g nw`, which lands one at
+`.../node_modules/nw/nwjs-*-linux-x64` — the search finds that as-is.
+
+#### Windows games — Proton
+
+Any Proton install, meaning any directory holding an executable `proton`
+script — that test also rejects the plain Wine builds people drop into
+`compatibilitytools.d`. Searched under Steam's `compatibilitytools.d` and
+`steamapps/common`, native and Flatpak, plus
 `/usr/share/steam/compatibilitytools.d`; newest wins, ranked by the timestamp in
 each `version` file. `--proton=VER` matches by name substring or takes a path,
 and `PROTON_DIR=/path` overrides the search entirely. `sandbox-game
---list-proton` prints what it found. The prefix is always built fresh under the
-capture directory, so your real Steam prefixes are never touched, and the Proton
-install is mounted read-only.
+--list-proton` prints what it found.
 
-**RPG Maker XP/VX/VX Ace — mkxp-z.** A release of
-[mkxp-z](https://github.com/mkxp-z/mkxp-z) — a reimplementation of the RGSS
-runtimes, so these games run as native Linux programs with no Wine anywhere.
-Unpack the release directory whole into `~/.local/share/mkxp-z/`: the binary
-resolves `stdlib/`, `scripts/` and `mkxp.json` relative to *itself*, never the
-working directory, so it will not run without them beside it. Also searched
-under `~/.local/lib/mkxp*`, `~/mkxp*`, `~/Games/mkxp*` and `/opt/mkxp*`;
-`MKXP_DIR=/path` overrides. There are no official binaries — take a build
-artifact from the project's CI. Japanese games want `vlgothic-fonts` installed
-for `fontSub` to have anything to substitute.
+Steam does not have to be running, or even installed, as long as a Proton
+directory exists somewhere on the list — unpacking a Proton-GE release into
+`~/.steam/root/compatibilitytools.d/` is enough. The prefix is always built
+fresh under the capture directory, so existing Steam prefixes are never touched,
+and the Proton install is mounted read-only.
+
+#### RPG Maker XP/VX/VX Ace — mkxp-z
+
+[mkxp-z](https://github.com/mkxp-z/mkxp-z) reimplements the RGSS runtimes, so
+these games run as native Linux programs with no Wine anywhere.
+
+**Getting a binary is the awkward part.** The project publishes no tagged
+release builds — the binaries only exist as GitHub Actions artifacts. Open the
+[Actions tab](https://github.com/mkxp-z/mkxp-z/actions), pick a recent
+successful run, and take the Linux artifact from its Artifacts section. For
+reference, one such artifact is
+[actions/runs/31271704080/artifacts/9026102487](https://github.com/mkxp-z/mkxp-z/actions/runs/31271704080/artifacts/9026102487).
+
+Two things about those downloads:
+
+- **You must be signed in to GitHub.** Artifact links are not public. An
+  anonymous `curl` or `wget` gets an HTML login page saved under the name of a
+  zip, which then fails to unpack for no obvious reason. Download it in a
+  browser that is logged in.
+- **Artifacts expire**, 90 days after the run by default. A link that worked
+  once will eventually 404, including the one above — take a current run rather
+  than assuming an old link still resolves.
+
+Building from source is the other option, and the only one if you want something
+newer than the last successful CI run.
+
+Unpack the archive whole into `~/.local/share/mkxp-z/`, so the binary sits
+directly beside the rest:
+
+```
+~/.local/share/mkxp-z/
+├── mkxp-z.x86_64
+├── mkxp.json
+├── scripts/preload/
+└── stdlib/
+```
+
+That layout is not optional: mkxp-z resolves `stdlib/`, `scripts/` and
+`mkxp.json` relative to *its own binary*, never the working directory, so a
+binary moved out on its own will not start. Also searched under
+`~/.local/lib/mkxp*`, `~/mkxp*`, `~/Games/mkxp*` and `/opt/mkxp*`;
+`MKXP_DIR=/path` overrides.
+
+Japanese games want a Japanese font installed — VL Gothic is the usual one — for
+`fontSub` in `mkxp.json` to have anything to substitute.
 
 ## Usage
 
@@ -141,10 +195,10 @@ sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
 `CMD` refers to the game at `/game`, not at its path on disk:
 
 ```sh
-sandbox-game /mnt/Games/DDLC /game/DDLC.sh
-sandbox-game --proton /mnt/Games/Witcher3 /game/witcher3.exe
+sandbox-game ~/Games/SomeRenpyGame /game/SomeRenpyGame.sh
+sandbox-game --proton ~/Games/SomeWindowsGame /game/game.exe
 sandbox-game --proton=GE-Proton11 ~/Games/Foo /game/bin/foo.exe -windowed
-sandbox-game --mkxp /mnt/Games/SomeVXAceGame          # CMD omitted: the runtime is the program
+sandbox-game --mkxp ~/Games/SomeVXAceGame          # CMD omitted: the runtime is the program
 sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/game.x86_64
 ```
 
