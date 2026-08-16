@@ -27,6 +27,7 @@ via mkxp-z — no Wine), and Windows `.exe` games via Proton.
 ```sh
 D=~/.local/share/nautilus/scripts
 install -Dm755 sandbox-game              ~/.local/bin/sandbox-game
+install -Dm755 sandbox-attach            ~/.local/bin/sandbox-attach
 install -Dm644 sandbox-game-lib          ~/.local/bin/sandbox-game-lib
 install -Dm755 "Sandbox game"            "$D/Sandbox game"
 install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
@@ -83,6 +84,7 @@ working directory.
 | `--gamescope` | `gamescope` | |
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
+| `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
 distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
@@ -214,6 +216,54 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
+
+## Attaching to a running game
+
+Cheat Engine, `regedit` and `winetricks` are only useful if they can see the
+game — which means the same Wine session, not merely the same prefix on disk.
+Launching a second sandbox does not give you that: `--unshare-all` hands every
+launch its own PID and mount namespace, so the new process cannot see the game's
+processes, and Wine's server socket lives in `/tmp/.wine-$UID`, a tmpfs private
+to each sandbox. Same prefix, second wineserver, no contact.
+
+`sandbox-attach` joins the running sandbox's namespaces instead of creating new
+ones. No root: the user namespace is already yours to enter.
+
+```sh
+sandbox-attach --list                       # what is running
+
+# get the program in — the capture dir IS $HOME inside, so no restart is needed
+cp -r ~/Downloads/CheatEngine ~/game-sandboxes/witcher3/home/
+
+sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/CheatEngine/cheatengine-x86_64.exe
+```
+
+| Option | |
+|---|---|
+| `--list` | the running sandboxes: name, pid, and whether Proton is in play |
+| `--name NAME` | which one to attach to; optional when only one is running |
+| `--shell` | an interactive shell inside, to look around |
+| `--exec CMD...` | run a native Linux command inside instead of a Windows one |
+
+Paths under `~/game-sandboxes/<name>/home/` are translated to their location
+inside, so you can paste the host path you just copied to.
+
+Windows programs are started with Proton's own `wine` binary against the live
+prefix, deliberately **not** with `proton run` — that verb re-enters prefix
+setup, which has no business touching a prefix a game is currently using, and in
+practice it exits silently without starting anything.
+
+The attached program is as confined as the game: it joins the sandbox's network
+namespace too, so it has loopback and nothing else.
+
+Two caveats. Install Cheat Engine into the prefix while the game is *not*
+running (a normal `sandbox-game --proton <gamedir> /game/setup.exe`), or use a
+portable build copied in as above. And CE's kernel-mode features — DBVM, the
+driver — do not work under Wine; scanning, pointer maps and speedhack do.
+
+On a distribution with the Yama LSM set to `ptrace_scope=1`, a sibling process
+may not ptrace the game, which is how Wine reads its memory. Check with
+`sysctl kernel.yama.ptrace_scope`; absent or `0` is what this needs.
 
 ## What lands where
 

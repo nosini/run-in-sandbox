@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# sandbox-attach [--name NAME] [--list] [--shell|--exec] [CMD...]
+#   Launch a second program inside a sandbox that is already running, in the
+#   same Wine session as the game -- which is what Cheat Engine, regedit or
+#   winetricks need in order to see the game at all.
+#
+#   Starting a second sandbox-game would not do: --unshare-all gives every
+#   launch its own PID and mount namespace, so the new process could not see
+#   the game's processes, and Wine's server socket lives in /tmp/.wine-$UID,
+#   which is a tmpfs private to each sandbox. Same prefix on disk, second
+#   wineserver, no contact. So join the running namespaces instead of making
+#   new ones -- unprivileged, since the user namespace is ours to enter.
+#
+#   Windows programs are run with Proton's own wine binary against the live
+#   prefix, NOT with `proton run`: the run verb re-enters prefix setup, which
+#   has no business touching a prefix a game is currently using, and in
+#   practice it exits silently without starting anything.
+#
+#   sandbox-attach --list
+#   sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/CE/cheatengine-x86_64.exe
+#   sandbox-attach --shell                 # a shell inside, to look around
+#   sandbox-attach --exec -- ps -ef        # a native command inside
+#
+# Getting the program in there needs no restart: ~/game-sandboxes/NAME/home is
+# bind-mounted as $HOME inside, so anything copied there appears immediately.
+#   cp -r ~/Downloads/CheatEngine ~/game-sandboxes/witcher3/home/
+set -euo pipefail
+
+SELF="${0##*/}"
+usage() {
+    sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; $d'
+    exit "${1:-0}"
+}
+
+NAME=""; MODE=wine; LIST=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --list)   LIST=1; shift ;;
+        --shell)  MODE=shell; shift ;;
+        --exec)   MODE="exec"; shift ;;
+        --name)   NAME="$2"; shift 2 ;;
+        --name=*) NAME="${1#--name=}"; shift ;;
+        -h|--help) usage 0 ;;
+        --)       shift; break ;;
+        -*)       echo "$SELF: unknown option: $1" >&2; usage 1 >&2 ;;
+        *)        break ;;
+    esac
+done
+
+# ---- find the running sandboxes -------------------------------------------
+# A sandbox is a bwrap whose command line mentions the capture directory. Two
+# bwrap processes exist per launch and further ones may be nested, so the user
+# namespace -- not the pid -- identifies a sandbox. Anything still sharing our
+# own namespace is the outer half and cannot be joined into.
+#
+# Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
+SB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SEEN_NS=()
+scan() {
+    local p cmd ns name proton self_ns
+    self_ns="$(readlink /proc/self/ns/user)"
+    for p in /proc/[0-9]*; do
+        p="${p##*/}"
+        # Grouped so that 2>/dev/null also covers the shell's own complaint
+        # when the redirection fails -- processes come and go while we scan,
+        # and a game exiting mid-loop should not print anything.
+        cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null )" || continue
+        case "$cmd" in *bwrap*) ;; *) continue ;; esac
+        case "$cmd" in *game-sandboxes/*) ;; *) continue ;; esac
+        ns="$(readlink "/proc/$p/ns/user" 2>/dev/null)" || continue
+        [ "$ns" != "$self_ns" ] || continue
+        [[ " ${SEEN_NS[*]-} " == *" $ns "* ]] && continue
+        # First match only: the command line names the capture dir several
+        # times over (home, rw, work, compat), and a greedy match would land
+        # on the last one.
+        name="$(grep -o 'game-sandboxes/[^/]*/' <<<"$cmd" | head -n1)"
+        name="${name#game-sandboxes/}"; name="${name%/}"
+        [ -n "$name" ] || continue
+        case "$cmd" in *STEAM_COMPAT_DATA_PATH*) proton=1 ;; *) proton=0 ;; esac
+        SEEN_NS+=( "$ns" ); SB_PIDS+=( "$p" ); SB_NAMES+=( "$name" )
+        SB_PROTON+=( "$proton" )
+    done
+}
+scan
+
+if [ "$LIST" = 1 ]; then
+    [ "${#SB_PIDS[@]}" -gt 0 ] || { echo "no sandboxes running"; exit 0; }
+    printf '%-28s %-8s %s\n' NAME PID KIND
+    for i in "${!SB_PIDS[@]}"; do
+        [ "${SB_PROTON[$i]}" = 1 ] && k=proton || k=native
+        printf '%-28s %-8s %s\n' "${SB_NAMES[$i]}" "${SB_PIDS[$i]}" "$k"
+    done
+    exit 0
+fi
+
+[ "${#SB_PIDS[@]}" -gt 0 ] || { echo "$SELF: no sandbox is running" >&2; exit 1; }
+
+TARGET=""; TNAME=""; TPROTON=0
+if [ -n "$NAME" ]; then
+    for i in "${!SB_PIDS[@]}"; do
+        [ "${SB_NAMES[$i]}" = "$NAME" ] || continue
+        TARGET="${SB_PIDS[$i]}"; TNAME="${SB_NAMES[$i]}"; TPROTON="${SB_PROTON[$i]}"; break
+    done
+    [ -n "$TARGET" ] || { echo "$SELF: no running sandbox named '$NAME'" >&2
+                          echo "try: $SELF --list" >&2; exit 1; }
+elif [ "${#SB_PIDS[@]}" = 1 ]; then
+    TARGET="${SB_PIDS[0]}"; TNAME="${SB_NAMES[0]}"; TPROTON="${SB_PROTON[0]}"
+else
+    # Guessing between two running games would attach the debugger to the
+    # wrong one, so say which are open and stop.
+    echo "$SELF: several sandboxes are running -- pick one with --name:" >&2
+    for i in "${!SB_PIDS[@]}"; do echo "  ${SB_NAMES[$i]}" >&2; done
+    exit 1
+fi
+
+[ "$MODE" = shell ] || [ "$#" -gt 0 ] || { echo "$SELF: nothing to run" >&2; usage 1 >&2; }
+[ "$MODE" != wine ] || [ "$TPROTON" = 1 ] || {
+    echo "$SELF: '$TNAME' is not a Proton sandbox; use --exec for a native command" >&2
+    exit 1; }
+
+# The capture dir is $HOME inside, so a host path pointing into it is almost
+# certainly meant as the copy that now lives there. Translate rather than fail
+# with a path that plainly exists.
+CAPHOME="$HOME/game-sandboxes/$TNAME/home"
+ARGS=()
+for a in ${@+"$@"}; do
+    case "$a" in "$CAPHOME"/*) a="$HOME/${a#"$CAPHOME"/}" ;; esac
+    ARGS+=( "$a" )
+done
+
+# ---- what to run once inside ----------------------------------------------
+# nsenter carries our own environment in, which is the file manager's or the
+# shell's -- not the sandbox's. Rebuild it from a process already inside:
+# wineserver knows the prefix, the display and Proton's library paths, and is
+# there for exactly as long as the Wine session we are joining.
+INNER='
+set -e
+mode="$1"; shift
+donor="$(pgrep -x wineserver 2>/dev/null | head -n1 || true)"
+if [ -z "$donor" ]; then
+    read -r donor _ < /proc/1/task/1/children 2>/dev/null || donor=1
+fi
+[ -n "$donor" ] && [ -r "/proc/$donor/environ" ] || donor=1
+while IFS= read -r -d "" kv; do
+    case "${kv%%=*}" in
+        HOME|USER|LOGNAME|PATH|TERM|LANG|LC_*|\
+        DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|\
+        WINE*|PROTON*|STEAM_COMPAT_*|LD_LIBRARY_PATH|\
+        PULSE_*|SDL_*|DXVK_*|VKD3D_*|MESA_*|__*) export "$kv" ;;
+    esac
+done < "/proc/$donor/environ"
+: "${HOME:=/home/$(id -un)}"; export HOME
+: "${PATH:=/usr/bin:/bin}"; export PATH
+export WINEPREFIX="${WINEPREFIX:-/compat/pfx}"
+case "$mode" in
+    shell) exec /bin/bash -i ;;
+    exec)  exec "$@" ;;
+    wine)
+        [ -x /proton/files/bin/wine ] || {
+            echo "sandbox-attach: /proton/files/bin/wine not found inside" >&2; exit 1; }
+        exec /proton/files/bin/wine "$@" ;;
+esac
+'
+
+# -U -m -p are what make the game visible: its user, mount and pid namespaces.
+# -n -i -u come along so the attached program stays as confined as the game --
+# without -n in particular it would keep the host's network, quietly undoing
+# the one thing the sandbox is most for. --preserve-credentials because we are
+# not root and have nothing to drop.
+NS=( -U -m -p -n -i -u )
+[ -e "/proc/$TARGET/ns/cgroup" ] && NS+=( -C )
+
+exec nsenter -t "$TARGET" "${NS[@]}" --preserve-credentials -- \
+     env -i /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}
