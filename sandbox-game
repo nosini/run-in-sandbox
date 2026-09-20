@@ -71,15 +71,13 @@ declare -A NAME_MAP=(
 )
 
 derive_name() {
-    local base digest; base="$(basename "$1")"
-    base="${NAME_MAP[$base]:-$base}"
-    digest="$(printf '%s' "$1" | sha256sum)"
+    local base; base="$(basename "$1")"
+    if [ -n "${NAME_MAP[$base]:-}" ]; then printf '%s\n' "${NAME_MAP[$base]}"; return; fi
     base="${base,,}"
     base="${base//[^a-z0-9._-]/-}"
     while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
     base="${base#-}"; base="${base%-}"
-    base="${base:0:80}"
-    printf '%s-%s\n' "${base:-game}" "${digest:0:16}"
+    printf '%s\n' "${base:-game}"
 }
 
 # ---- proton discovery ------------------------------------------------------

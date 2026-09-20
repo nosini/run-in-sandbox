@@ -40,14 +40,17 @@ class SecurityTests(unittest.TestCase):
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
 
-    def test_names_separate_paths_and_canonicalize_aliases(self):
-        other = self.base / "other" / "Game"
-        other.mkdir(parents=True)
+    def test_name_derives_from_folder_and_rejects_traversal(self):
         alias = self.base / "alias"
         alias.symlink_to(self.game)
-        name = self.cli("--print-name", self.game).stdout
-        self.assertNotEqual(name, self.cli("--print-name", other).stdout)
-        self.assertEqual(name, self.cli("--print-name", alias).stdout)
+        name = self.cli("--print-name", self.game).stdout.strip()
+        # The folder name alone, so a sandbox stays findable by eye and keeps
+        # its saves when the library moves.
+        self.assertEqual(name, "game")
+        # realpath() resolves the selection, so a symlink is the same sandbox.
+        self.assertEqual(name, self.cli("--print-name", alias).stdout.strip())
+        # The name is a path component under ~/game-sandboxes, so it must not
+        # be able to climb out of it.
         for invalid in ("../escape", ".", "..", "/tmp/escape"):
             self.assertNotEqual(self.cli("--name", invalid, "--print-name",
                                          self.game, check=False).returncode, 0)

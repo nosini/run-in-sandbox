@@ -178,7 +178,7 @@ BASE="$(basename "$GAMEDIR")"
 # Keyed by the sandbox name so prefs and captured writes stay together, and
 # read only now that the dispatch above has settled which game this is.
 NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
-    || die "Cannot derive a sandbox identity for:\n$GAMEDIR"
+    || die "Cannot derive a sandbox name for:\n$GAMEDIR"
 FLAG=()
 [ "$(cfg_get audio 0)" = 1 ] && FLAG+=( --audio )
 HOST_X11="$(cfg_get host_x11 0)"
@@ -204,7 +204,7 @@ elif [ "$PROTON" = 1 ]; then
 fi
 
 mkdir -p "$HOME/game-sandboxes"
-LOG="$HOME/game-sandboxes/${NAME}-lastrun.log"
+LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
 
 # Withholding --mangohud is not enough to keep the overlay away from NW.js:
 # sandbox-game also opts in from an inherited MANGOHUD=1, and that variable

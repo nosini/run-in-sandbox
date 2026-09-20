@@ -55,7 +55,7 @@ names below are the common ones. Where a name differs sharply it is called out.
 |---|---|---|
 | `bwrap` | `bubblewrap` | the sandbox itself |
 | `bash` ≥ 4.0 | `bash` | `mapfile`, associative arrays, `${var,,}` |
-| `awk`, `sed`, `find`, `sort`, `realpath`, `sha256sum` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
+| `awk`, `sed`, `find`, `sort`, `realpath` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
 
 The default graphical mode also requires gamescope and a Wayland session.
 `--wayland` bypasses gamescope for native Wayland games; `--headless` requires
@@ -186,7 +186,7 @@ the Windows one, and an RPG Maker VX Ace game runs under mkxp-z rather than
 dragging its `Game.exe` through Wine. Several `.exe` candidates get a picker,
 with obvious junk (installers, crash handlers, redistributables) filtered out.
 
-Full output goes to `~/game-sandboxes/<name>-lastrun.log`, and a failure opens
+Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
 the last 80 lines in a window.
 
 **Sandbox game preferences** — the video backend, audio permission, MangoHud,
@@ -215,7 +215,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | Option | |
 |---|---|
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
-| `--name NAME` | explicit shared identity; otherwise the folder name plus a hash of its canonical full path |
+| `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--audio` | grant host audio, including microphone and monitor recording; off by default |
@@ -311,29 +311,6 @@ currently unavailable. Audio sockets are exposed only with `--audio`, which
 includes recording access and is also available in the preferences dialog.
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
 
-### Existing saves and preferences
-
-Default identities now look like `game-0123456789abcdef`. Different full paths
-get different identities, even when their folder names match. Symlink aliases
-of the same canonical path share an identity. Moving a game changes its identity.
-An explicit `--name` deliberately reuses an identity; do not share one across
-unrelated games.
-
-Old capture folders and preferences are left untouched and are **not** imported
-automatically, since a basename alone cannot identify which game owns them.
-With the game stopped, obtain its new name with:
-
-```sh
-sandbox-game --print-name /absolute/path/to/Game
-```
-
-After checking that the old saves belong to this game, rename its old
-`~/game-sandboxes/<old-name>/` directory to the printed name, and rename the
-matching `~/.config/sandbox-game/games/<old-name>` preferences file as well.
-Do this before the first launch with the new identity; if the destination already
-exists, back it up and reconcile the saves instead of nesting one folder inside
-another. For CLI use, `--name <old-name>` also explicitly selects the old state.
-
 ## Preferences file format
 
 ```
@@ -354,8 +331,10 @@ env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
 ```
 
-The key is the sandbox name, including the path hash, so games with the same
-folder name keep separate preferences and captured writes. `host_x11=1` opts
+The key is the sandbox name, so preferences and captured writes stay in step.
+Two games whose folders have the same name share a sandbox; give one of them
+`--name`, or an entry in `NAME_MAP` at the top of `sandbox-game`, to separate
+them. `host_x11=1` opts
 into the host X server and overrides the Wayland/gamescope choices; `audio=1`
 opts into host audio and recording. `gamescope=0` means automatic: X11 games
 still use a private gamescope instance unless `host_x11=1`.
