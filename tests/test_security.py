@@ -55,6 +55,20 @@ class SecurityTests(unittest.TestCase):
             self.assertNotEqual(self.cli("--name", invalid, "--print-name",
                                          self.game, check=False).returncode, 0)
 
+    def test_capture_folder_is_deletable_after_a_run(self):
+        name = self.cli("--print-name", self.game).stdout.strip()
+        self.run_guest("true")
+        capture = self.home / "game-sandboxes" / name
+        self.assertTrue(capture.is_dir())
+        # Overlayfs leaves workdir/work at mode 0000. Left alone it makes the
+        # whole capture folder undeletable in a file manager until chmod-ed.
+        stranded = capture / "work" / "work"
+        self.assertTrue(not stranded.exists()
+                        or os.access(stranded, os.R_OK | os.X_OK),
+                        f"{stranded} left inaccessible")
+        # The real complaint: this must not need a chmod first.
+        shutil.rmtree(capture)
+
     def test_environment_is_allowlisted_and_overrides_are_explicit(self):
         result = self.run_guest('test -z "${REVIEW_SECRET+x}"; '
                                 'test "$PATH" = /usr/bin:/bin; '

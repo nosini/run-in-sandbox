@@ -442,8 +442,23 @@ else
     CLEANUP="$CAP/merged"
     OVERLAY_ARGS=( --bind "$CAP/merged" /game )
 fi
-cleanup() { [ -n "$CLEANUP" ] && { fusermount3 -u "$CLEANUP" 2>/dev/null \
-              || fusermount -u "$CLEANUP" 2>/dev/null || true; }; }
+# Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
+# when the mount goes away. That is deliberate while mounted -- it holds
+# in-flight temporary files and nothing should look inside -- but afterwards it
+# is just an inaccessible directory you own, and it is what makes the whole
+# capture folder refuse to delete in a file manager until you chmod it by hand.
+# It is disposable once unmounted, so take it away.
+unwork() {
+    [ -d "$CAP/work/work" ] || return 0
+    chmod u+rwx "$CAP/work/work" 2>/dev/null || return 0
+    rm -rf "$CAP/work/work" 2>/dev/null || true
+}
+cleanup() {
+    [ -n "$CLEANUP" ] && { fusermount3 -u "$CLEANUP" 2>/dev/null \
+              || fusermount -u "$CLEANUP" 2>/dev/null || true; }
+    unwork
+    return 0
+}
 trap cleanup EXIT
 
 BWRAP=( bwrap
@@ -476,10 +491,10 @@ BWRAP=( bwrap
     --chdir "$CHDIR"
 )
 
-if [ -n "$CLEANUP" ]; then
-    # fuse mount is live: run bwrap as a child so the EXIT trap can unmount it.
-    "${BWRAP[@]}" "$@"; rc=$?; cleanup; trap - EXIT; exit "$rc"
-else
-    trap - EXIT
-    exec "${BWRAP[@]}" "$@"
-fi
+# Always a child rather than exec: the trap has to get a turn after the game
+# exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The
+# cost is one idle shell for the life of the game, and --die-with-parent
+# already means killing it takes the sandbox with it.
+"${BWRAP[@]}" "$@"; rc=$?
+cleanup; trap - EXIT
+exit "$rc"
