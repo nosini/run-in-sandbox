@@ -14,9 +14,14 @@ you:
 - **Everything in one folder.** `~/game-sandboxes/<name>/` holds the saves, the
   configs, the Wine prefix — delete it and the game is factory-fresh.
 
-It is not a security boundary against something actively trying to escape. It is
-a boundary against a game that reads too much, writes where it should not, or
-phones home.
+The default display uses gamescope's private Xwayland, the device filesystem is
+private, and the game's environment starts from an allowlist. Audio is disabled
+by default: `--audio` grants host sound playback **and microphone/monitor
+recording**. `--host-x11` explicitly grants access to other host X applications.
+Neither compatibility option should be enabled for a game you do not trust.
+
+This is not a complete security boundary against actively malicious software.
+The host kernel, graphics drivers and exposed display services remain shared.
 
 Four engines are handled without being told which is which: RPG Maker MV/MZ
 (NW.js), Ren'Py and other native `.sh` games, RPG Maker XP/VX/VX Ace (natively,
@@ -50,9 +55,11 @@ names below are the common ones. Where a name differs sharply it is called out.
 |---|---|---|
 | `bwrap` | `bubblewrap` | the sandbox itself |
 | `bash` ≥ 4.0 | `bash` | `mapfile`, associative arrays, `${var,,}` |
-| `awk`, `sed`, `find`, `sort`, `realpath` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
+| `awk`, `sed`, `find`, `sort`, `realpath`, `sha256sum` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
 
-Nothing else is needed for the CLI. `bwrap` does not need to be setuid on any
+The default graphical mode also requires gamescope and a Wayland session.
+`--wayland` bypasses gamescope for native Wayland games; `--headless` requires
+neither. `--host-x11` is an explicit, less isolated option for X11 sessions. `bwrap` does not need to be setuid on any
 current distribution — unprivileged user namespaces cover it. If yours disables
 them (`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on
 Ubuntu 24.04+), nothing here will run until that is lifted.
@@ -179,11 +186,11 @@ the Windows one, and an RPG Maker VX Ace game runs under mkxp-z rather than
 dragging its `Game.exe` through Wine. Several `.exe` candidates get a picker,
 with obvious junk (installers, crash handlers, redistributables) filtered out.
 
-Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
+Full output goes to `~/game-sandboxes/<name>-lastrun.log`, and a failure opens
 the last 80 lines in a window.
 
-**Sandbox game preferences** — the video backend, MangoHud, gamescope, and the
-Proton version, saved per game or as the library-wide default. Turning gamescope
+**Sandbox game preferences** — the video backend, audio permission, MangoHud,
+gamescope, and the Proton version, saved per game or as the library-wide default. Turning gamescope
 on opens a second dialog for resolution and fullscreen. This is why there is one
 launcher entry rather than one per flag combination.
 
@@ -191,7 +198,8 @@ launcher entry rather than one per flag combination.
 
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-             [--env K=V] [--ro SRC DST] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
+             [--host-x11|--headless] [--audio] [--env K=V] [--ro SRC DST]
+             [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 ```
 
 `CMD` refers to the game at `/game`, not at its path on disk:
@@ -207,9 +215,12 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | Option | |
 |---|---|
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
-| `--name NAME` | override the sandbox name, otherwise derived from the folder |
+| `--name NAME` | explicit shared identity; otherwise the folder name plus a hash of its canonical full path |
+| `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
+| `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
+| `--audio` | grant host audio, including microphone and monitor recording; off by default |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
-| `--gamescope[=ARGS]` | run inside gamescope's nested compositor; `ARGS` is word-split, so quote the lot |
+| `--gamescope[=ARGS]` | run inside gamescope's nested compositor (default for X11 games); `ARGS` is word-split, so quote the lot |
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
 | `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
@@ -231,6 +242,7 @@ ones. No root: the user namespace is already yours to enter.
 
 ```sh
 sandbox-attach --list                       # what is running
+# Replace witcher3 below with the name shown by --list.
 
 # get the program in — the capture dir IS $HOME inside, so no restart is needed
 cp -r ~/Downloads/CheatEngine ~/game-sandboxes/witcher3/home/
@@ -279,11 +291,48 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 and then left alone, so per-game tweaks — a soundfont, RTP paths, `fontSub` —
 survive the next start.
 
-The host environment is inherited as it stands (there is no `--clearenv`). The
-Wayland socket, PipeWire and PulseAudio sockets, and — on Xwayland — the X
-socket and your auth cookie are bound in. `~/.config/MangoHud` is bound back
-read-only under `--mangohud`, because `$HOME` is redirected and without it your
-`fps_limit` and per-executable configs would silently stop applying.
+The host environment is cleared. The launcher supplies `HOME`, user names, a
+fixed `/usr/bin:/bin` search path, private XDG directories, locale/timezone/terminal
+settings and the selected display variables. Tokens, session-bus addresses and
+loader overrides are not inherited; pass necessary game-specific settings with
+`--env KEY=VALUE`. Runtime discovery variables (`PROTON_DIR`, `MKXP_DIR`,
+`NWJS_DIR`) still work on the host, and `MANGOHUD=1` still selects the overlay.
+
+The default display exposes the Wayland socket for gamescope, which supplies a
+private Xwayland server. Native `--wayland` exposes no host X socket or cookie,
+including for Proton: builds lacking winewayland must use gamescope instead.
+`--host-x11` exposes the host X socket and cookie and does not expose Wayland.
+`--headless` exposes neither. No session D-Bus socket is provided.
+
+`/dev` and its shared memory are private. Graphical modes expose GPU devices only
+(`/dev/dri` and available NVIDIA device nodes). Host input, camera, sound and
+terminal devices are not exposed; controllers requiring raw device access are
+currently unavailable. Audio sockets are exposed only with `--audio`, which
+includes recording access and is also available in the preferences dialog.
+`~/.config/MangoHud` is mounted read-only under `--mangohud`.
+
+### Existing saves and preferences
+
+Default identities now look like `game-0123456789abcdef`. Different full paths
+get different identities, even when their folder names match. Symlink aliases
+of the same canonical path share an identity. Moving a game changes its identity.
+An explicit `--name` deliberately reuses an identity; do not share one across
+unrelated games.
+
+Old capture folders and preferences are left untouched and are **not** imported
+automatically, since a basename alone cannot identify which game owns them.
+With the game stopped, obtain its new name with:
+
+```sh
+sandbox-game --print-name /absolute/path/to/Game
+```
+
+After checking that the old saves belong to this game, rename its old
+`~/game-sandboxes/<old-name>/` directory to the printed name, and rename the
+matching `~/.config/sandbox-game/games/<old-name>` preferences file as well.
+Do this before the first launch with the new identity; if the destination already
+exists, back it up and reconcile the saves instead of nesting one folder inside
+another. For CLI use, `--name <old-name>` also explicitly selects the old state.
 
 ## Preferences file format
 
@@ -298,24 +347,29 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 wayland=0|1
 mangohud=0|1
 gamescope=0|1
+host_x11=0|1
+audio=0|1
 gamescope_args=-f -W 2560 -H 1440
 env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
 ```
 
-The key is the sandbox name, so preferences and captured writes stay in step
-even when two games share a folder name. Resolution and fullscreen get a dialog;
+The key is the sandbox name, including the path hash, so games with the same
+folder name keep separate preferences and captured writes. `host_x11=1` opts
+into the host X server and overrides the Wayland/gamescope choices; `audio=1`
+opts into host audio and recording. `gamescope=0` means automatic: X11 games
+still use a private gamescope instance unless `host_x11=1`.
+Resolution and fullscreen get a dialog;
 anything else in `gamescope_args`, and all of `env`, is set by hand and carried
 through saves untouched. `env` values cannot contain spaces — the list is split
 on them.
 
-`env` exists because a game started from the file manager inherits *the file
-manager's* environment, not the one in your shell, so anything a particular game
-needs has to be recorded rather than exported.
+`env` explicitly adds variables to the clean sandbox environment, including
+when launching from the file manager.
 
 ## Known rough edges
 
-**RPG Maker MV/MZ is pinned to Xwayland.** Not a limitation of NW.js, which runs
+**RPG Maker MV/MZ uses private Xwayland by default.** Not a limitation of NW.js, which runs
 on Wayland fine outside the sandbox. Chromium's Wayland backend segfaults on
 startup with no D-Bus session bus, reproducibly, while its X11 backend does not
 care. Handing a game the session bus would open the keyring, the portals and
@@ -330,8 +384,8 @@ RPG Maker game is no loss.
 
 **`--wayland` is not for every engine.** Stock Ren'Py's bundled SDL is
 x11/Xwayland only. Under `--proton` it sets `STEAM_COMPAT_CONFIG=wayland`, which
-GE, DW and CachyOS builds honour and stock Valve Proton ignores — so X stays
-bound in that case, rather than leaving those builds with no display at all.
+GE, DW and CachyOS builds honour. Builds without winewayland need the default
+gamescope mode; host X is never silently exposed as a fallback.
 
 **gamescope and the overlay.** `gamescope --mangoapp` is the supported way to
 get MangoHud in there, and is what gets used — except when the Wayland socket is
@@ -341,3 +395,15 @@ cannot find the globals gamescope offers, it falls back to X11, fails there too,
 and gamescope's reaper restarts it forever. In that combination the shim is
 preloaded into the game instead, against gamescope's general advice. Either
 route reads the same config.
+
+## Security regression checks
+
+Run on the host with Python 3 and bubblewrap installed:
+
+```sh
+python3 tests/test_security.py -v
+```
+
+The tests use temporary homes and captures. They exercise real filesystem and
+network isolation, environment filtering and namespace attachment; display and
+audio argument checks use recorders so they do not open windows or record sound.

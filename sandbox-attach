@@ -169,5 +169,7 @@ esac
 NS=( -U -m -p -n -i -u )
 [ -e "/proc/$TARGET/ns/cgroup" ] && NS+=( -C )
 
-exec nsenter -t "$TARGET" "${NS[@]}" --preserve-credentials -- \
+# Enter both the target root and a directory inside it. Keeping the host cwd
+# would leave a filesystem reference outside the sandbox even after chroot.
+exec nsenter -t "$TARGET" "${NS[@]}" --root --wdns=/ --preserve-credentials -- \
      env -i /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}

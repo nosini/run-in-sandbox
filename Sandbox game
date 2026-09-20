@@ -177,11 +177,16 @@ BASE="$(basename "$GAMEDIR")"
 # ---- saved preferences -----------------------------------------------------
 # Keyed by the sandbox name so prefs and captured writes stay together, and
 # read only now that the dispatch above has settled which game this is.
-NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" || NAME=""
+NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
+    || die "Cannot derive a sandbox identity for:\n$GAMEDIR"
 FLAG=()
-[ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
+[ "$(cfg_get audio 0)" = 1 ] && FLAG+=( --audio )
+HOST_X11="$(cfg_get host_x11 0)"
+[ "$HOST_X11" = 1 ] && FLAG+=( --host-x11 )
+[ "$HOST_X11" != 1 ] && [ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
-if [ "$(cfg_get gamescope 0)" = 1 ]; then
+if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] ||
+    [ "$ALLOW_WAYLAND" = 0 ] || [ "$(cfg_get wayland 0)" != 1 ]; }; then
     # gamescope_args is hand-edited only; empty means gamescope's own defaults.
     GA="$(cfg_get gamescope_args "")"
     if [ -n "$GA" ]; then FLAG+=( "--gamescope=$GA" ); else FLAG+=( --gamescope ); fi
@@ -199,7 +204,7 @@ elif [ "$PROTON" = 1 ]; then
 fi
 
 mkdir -p "$HOME/game-sandboxes"
-LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
+LOG="$HOME/game-sandboxes/${NAME}-lastrun.log"
 
 # Withholding --mangohud is not enough to keep the overlay away from NW.js:
 # sandbox-game also opts in from an inherited MANGOHUD=1, and that variable

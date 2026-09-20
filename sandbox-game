@@ -18,13 +18,11 @@
 #               Ren'Py, whose bundled SDL is x11/Xwayland only.
 #               With --proton it selects Proton's winewayland driver instead
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
-#               stock Valve Proton ignores it and stays on Xwayland.
+#               builds without that driver need --gamescope for Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
 #   --env K=V   set a variable inside the sandbox; repeatable, and applied last
-#               so it wins over anything set above. The host environment is
-#               inherited as it stands -- but a game started from the file
-#               manager inherits the file manager's, not your shell's, which is
-#               what this is for (e.g. --env WAYLANDDRV_PRIMARY_MONITOR=HDMI-1).
+#               so it wins over the clean environment and display defaults
+#               (e.g. --env WAYLANDDRV_PRIMARY_MONITOR=HDMI-1).
 #   --mangohud  show the MangoHud overlay. Your ~/.config/MangoHud is bound
 #               back in read-only -- $HOME is redirected, so without that the
 #               fps_limit and per-executable .conf files silently stop
@@ -54,8 +52,10 @@
 #               in a generated config bound over the runtime's own mkxp.json.
 #
 
-#   Default (no --wayland) runs on Xwayland and binds your X cookie so the
-#   client is authorised.
+#   Default uses gamescope's private Xwayland. --host-x11 opts into the host
+#   X server (other X clients can be observed/controlled). --headless exposes
+#   no display. --audio opts into host audio, including microphone/monitor
+#   recording; without it no audio sockets or sound devices are exposed.
 #
 # CMD references the game at /game, e.g.:
 #   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
@@ -71,13 +71,15 @@ declare -A NAME_MAP=(
 )
 
 derive_name() {
-    local base; base="$(basename "$1")"
-    if [ -n "${NAME_MAP[$base]:-}" ]; then printf '%s\n' "${NAME_MAP[$base]}"; return; fi
+    local base digest; base="$(basename "$1")"
+    base="${NAME_MAP[$base]:-$base}"
+    digest="$(printf '%s' "$1" | sha256sum)"
     base="${base,,}"
     base="${base//[^a-z0-9._-]/-}"
     while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
     base="${base#-}"; base="${base%-}"
-    printf '%s\n' "${base:-game}"
+    base="${base:0:80}"
+    printf '%s-%s\n' "${base:-game}" "${digest:0:16}"
 }
 
 # ---- proton discovery ------------------------------------------------------
@@ -120,11 +122,14 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=()
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; AUDIO=0; HEADLESS=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
+        --host-x11)  HOST_X11=1; shift ;;
+        --audio)     AUDIO=1; shift ;;
+        --headless)  HEADLESS=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
         --gamescope) GS=1; shift ;;
         --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
@@ -151,9 +156,24 @@ GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proto
 [ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }
 NAME="${NAME:-$(derive_name "$GAMEDIR")}"
+[[ "$NAME" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$NAME" != . ] && [ "$NAME" != .. ] || {
+    echo "invalid sandbox name: use letters, digits, underscores, dots and hyphens (not . or ..)" >&2
+    exit 1
+}
 # The sandbox name doubles as the key everything else files a game under, so
 # hand it out rather than have callers reimplement derive_name().
 [ "$PRINT_NAME" = 0 ] || { printf '%s\n' "$NAME"; exit 0; }
+
+# Never silently fall back to the host X server. Existing gamescope=0
+# preferences still get the safe default unless host X was explicitly allowed.
+if [ "$HEADLESS" = 1 ]; then
+    [ "$GS" = 0 ] && [ "$WAYLAND" = 0 ] && [ "$HOST_X11" = 0 ] || {
+        echo "--headless cannot be combined with display options" >&2; exit 1; }
+elif [ "$WAYLAND" = 0 ] && [ "$HOST_X11" = 0 ]; then
+    GS=1
+fi
+[ "$HOST_X11" = 0 ] || { [ "$GS" = 0 ] && [ "$WAYLAND" = 0 ]; } || {
+    echo "--host-x11 cannot be combined with --gamescope or --wayland" >&2; exit 1; }
 
 CAP="$HOME/game-sandboxes/$NAME"
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
@@ -317,8 +337,6 @@ if [ "$MHUD" = 1 ]; then
     CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
     if [ -d "$CFG" ]; then
         MANGOHUD_ARGS=( --ro-bind "$CFG" "$HOME/.config/MangoHud" )
-        # MangoHud prefers $XDG_CONFIG_HOME, which survives into the sandbox.
-        [ "$CFG" = "$HOME/.config/MangoHud" ] || MANGOHUD_ARGS+=( --ro-bind "$CFG" "$CFG" )
     fi
     [ "$MHUD_VIA_APP" = 1 ] || set -- mangohud "$@"
 fi
@@ -355,38 +373,60 @@ if [ "$GS" = 1 ]; then
     set -- "${GS_CMD[@]}" -- "$@"
 fi
 
-# ---- video backend ---------------------------------------------------------
-# Default = Xwayland: bind the X socket AND the auth cookie, otherwise Xwayland
-# refuses the client ("Authorization required, but no authorization protocol").
-# --wayland instead forces native Wayland (no X) for engines that support it.
-VIDEO_ENV=(); XSOCK_ARGS=(); WANT_X=1
-if [ "$WAYLAND" = 1 ]; then
-    if [ -n "$PROTON" ]; then
-        # SDL_VIDEODRIVER would be inherited by the *Windows* SDL inside the
-        # prefix, which has no wayland backend and would fail to init video.
-        # Proton's own switch for winewayland is the compat config instead --
-        # and since builds that lack it silently stay on winex11.drv, keep X
-        # bound as well so those still get a display.
-        VIDEO_ENV=( --setenv STEAM_COMPAT_CONFIG wayland )
+# ---- environment, display and devices --------------------------------------
+# Use explicit names, never prefixes such as AWS_* or even arbitrary LC_*:
+# shell sessions and file managers can carry credentials in their environment.
+BASE_ENV=( --clearenv --setenv PATH /usr/bin:/bin
+    --setenv HOME "$HOME" --setenv USER "$(id -un)" --setenv LOGNAME "$(id -un)"
+    --setenv XDG_CONFIG_HOME "$HOME/.config"
+    --setenv XDG_DATA_HOME "$HOME/.local/share"
+    --setenv XDG_CACHE_HOME "$HOME/.cache"
+    --setenv XDG_STATE_HOME "$HOME/.local/state"
+    --setenv XDG_RUNTIME_DIR "$RT" )
+for key in LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES LC_COLLATE LC_NUMERIC LC_TIME \
+           LC_MONETARY LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT \
+           LC_IDENTIFICATION TERM TZ; do
+    [ -z "${!key:-}" ] || BASE_ENV+=( --setenv "$key" "${!key}" )
+done
+VIDEO_ENV=(); XSOCK_ARGS=( --dir /tmp/.X11-unix ); DISPLAY_ARGS=(); AUDIO_ARGS=()
+DEVICE_ARGS=()
+if [ "$HEADLESS" = 0 ]; then
+    # No sound, input, camera, tty or host shared-memory mounts. Controllers
+    # that require raw device access must be granted separately in future.
+    [ ! -d /dev/dri ] || DEVICE_ARGS+=( --dev-bind /dev/dri /dev/dri )
+    # Proprietary NVIDIA uses additional devices outside /dev/dri.
+    for device in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+        [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
+    done
+    if [ "$HOST_X11" = 1 ]; then
+        XSOCK_ARGS=( --ro-bind /tmp/.X11-unix /tmp/.X11-unix )
+        VIDEO_ENV+=( --setenv DISPLAY "${DISPLAY:?--host-x11 needs DISPLAY}" )
+        XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
+        [ ! -f "$XAUTH_HOST" ] || XSOCK_ARGS+=(
+            --ro-bind "$XAUTH_HOST" /tmp/.Xauthority
+            --setenv XAUTHORITY /tmp/.Xauthority )
     else
-        VIDEO_ENV=( --setenv SDL_VIDEODRIVER wayland ); WANT_X=0
+        # Normalize absolute WAYLAND_DISPLAY values to a private socket path.
+        case "$WL" in /*) WL_HOST="$WL" ;; *) WL_HOST="$RT/$WL" ;; esac
+        [ -S "$WL_HOST" ] || {
+            echo "Wayland socket not found: $WL_HOST; use --headless or explicitly opt into --host-x11" >&2
+            exit 1
+        }
+        DISPLAY_ARGS=( --ro-bind "$WL_HOST" "$RT/wayland-0" )
+        VIDEO_ENV+=( --setenv WAYLAND_DISPLAY wayland-0 )
     fi
 fi
-if [ "$GS" = 1 ]; then
-    # gamescope hosts its own Xwayland for the game and displays through the
-    # Wayland socket, so the host X server is not wanted. Its Xwayland does need
-    # to create a socket in /tmp/.X11-unix, and refuses a directory it does not
-    # own -- bind the host's and it arrives owned by nobody, leaving gamescope
-    # to fail with "not owned by root or us". Hand it an empty one instead.
-    WANT_X=0
-    XSOCK_ARGS=( --dir /tmp/.X11-unix )
+if [ "$WAYLAND" = 1 ]; then
+    if [ -n "$PROTON" ]; then
+        VIDEO_ENV+=( --setenv STEAM_COMPAT_CONFIG wayland )
+    else
+        VIDEO_ENV+=( --setenv SDL_VIDEODRIVER wayland )
+    fi
 fi
-if [ "$WANT_X" = 1 ]; then
-    XSOCK_ARGS=( --ro-bind-try /tmp/.X11-unix /tmp/.X11-unix )
-    XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
-    [ -f "$XAUTH_HOST" ] && XSOCK_ARGS+=(
-        --ro-bind "$XAUTH_HOST" /tmp/.Xauthority
-        --setenv XAUTHORITY /tmp/.Xauthority )
+if [ "$AUDIO" = 1 ]; then
+    AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
+        --ro-bind-try "$RT/pulse" "$RT/pulse"
+        --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 fi
 
 # ---- overlay for the game's own install dir --------------------------------
@@ -410,6 +450,7 @@ trap cleanup EXIT
 
 BWRAP=( bwrap
     --unshare-all --die-with-parent --new-session
+    "${BASE_ENV[@]}"
     --ro-bind /usr /usr
     --ro-bind /etc /etc
     --ro-bind /sys /sys
@@ -418,13 +459,13 @@ BWRAP=( bwrap
     --symlink usr/bin   /bin
     --symlink usr/sbin  /sbin
     --proc /proc
-    --dev-bind /dev /dev
+    --dev /dev
+    "${DEVICE_ARGS[@]}"
     --tmpfs /tmp
     "${XSOCK_ARGS[@]}"
     --perms 0700 --tmpfs "$RT"
-    --ro-bind "$RT/$WL" "$RT/$WL"
-    --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
-    --ro-bind-try "$RT/pulse" "$RT/pulse"
+    "${DISPLAY_ARGS[@]}"
+    "${AUDIO_ARGS[@]}"
     "${EXTRA_RO[@]}"
     --bind "$CAP/home" "$HOME"
     --setenv HOME "$HOME"
