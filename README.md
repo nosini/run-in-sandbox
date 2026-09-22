@@ -51,7 +51,8 @@ curl -fsSLO https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.s
 less install.sh && bash install.sh
 ```
 
-`REF=<branch or tag>` installs something other than `main`. To remove the
+`REF=<branch or tag>` installs something other than `main`
+(`curl ... | REF=<tag> bash`). To remove the
 scripts again, `./install.sh --uninstall`, or through the pipe
 `... | bash -s -- --uninstall`. That leaves `~/game-sandboxes` (saves and Wine
 prefixes), your preferences and the shared tools folder alone.
@@ -88,10 +89,13 @@ names below are the common ones. Where a name differs sharply it is called out.
 
 The default graphical mode also requires gamescope and a Wayland session.
 `--wayland` bypasses gamescope for native Wayland games; `--headless` requires
-neither. `--host-x11` is an explicit, less isolated option for X11 sessions. `bwrap` does not need to be setuid on any
-current distribution — unprivileged user namespaces cover it. If yours disables
-them (`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on
-Ubuntu 24.04+), nothing here will run until that is lifted.
+neither. `--host-x11` is an explicit, less isolated option for X11 sessions.
+
+`bwrap` must **not** be the setuid build: `--disable-userns` does not work
+there, so every launch fails. No current distribution needs it, since
+unprivileged user namespaces cover what setuid was for. If yours disables them
+(`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on Ubuntu
+24.04+), nothing here will run until that is lifted.
 
 ### Required for the Nautilus scripts
 
@@ -352,8 +356,9 @@ The host environment is cleared. The launcher supplies `HOME`, user names, a
 fixed `/usr/bin:/bin` search path, private XDG directories, locale/timezone/terminal
 settings and the selected display variables. Tokens, session-bus addresses and
 loader overrides are not inherited; pass necessary game-specific settings with
-`--env KEY=VALUE`. Runtime discovery variables (`PROTON_DIR`, `MKXP_DIR`,
-`NWJS_DIR`) still work on the host, and `MANGOHUD=1` still selects the overlay.
+`--env KEY=VALUE`. Variables read on the host still work: the runtime
+discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR` and
+`SANDBOX_SECCOMP`, and `MANGOHUD=1` still selects the overlay.
 
 The default display exposes the Wayland socket for gamescope, which supplies a
 private Xwayland server. Native `--wayland` exposes no host X socket or cookie,
@@ -400,7 +405,7 @@ is 64-bit and `arch=40000003` 32-bit, and the two number syscalls differently;
 `ausyscall N` (from the audit package) or `ausyscall i386 N` names them.
 `clone3` is left out of the log: glibc tries it for every thread and falls
 back to `clone`, and its hits would bury everything else. Expect `clone` from
-a `bwrap` under gamescope too -- its image loader trying to sandbox itself.
+a `bwrap` under gamescope too — its image loader trying to sandbox itself.
 
 **Memory and task limits.** The sandbox runs in a transient systemd scope,
 `sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM and 4096 tasks. That
@@ -419,7 +424,7 @@ RPG Maker MV/MZ runs with Chromium's own sandbox switched off (`--no-sandbox`).
 It gives up nothing: Chromium builds that sandbox from the user namespaces
 forbidden here, and a page with Node.js in it could not be sandboxed anyway,
 since it can open files and start programs. NW.js 0.110 runs the same without
-the flag -- none of its processes carry a seccomp filter beyond this one -- so
+the flag — none of its processes carry a seccomp filter beyond this one — so
 it is passed only so that no build goes looking for a setuid helper.
 
 ## Preferences file format
@@ -444,14 +449,14 @@ proton=auto|<install name>
 The key is the sandbox name, so preferences and captured writes stay in step.
 Two games whose folders have the same name share a sandbox; give one of them
 `--name`, or an entry in `NAME_MAP` at the top of `sandbox-game`, to separate
-them. `host_x11=1` opts
-into the host X server and overrides the Wayland/gamescope choices.
-`gamescope=0` means automatic: X11 games
-still use a private gamescope instance unless `host_x11=1`.
-Resolution and fullscreen get a dialog;
-anything else in `gamescope_args`, and all of `env`, is set by hand and carried
-through saves untouched. `env` values cannot contain spaces — the list is split
-on them.
+them.
+
+`host_x11=1` opts into the host X server and overrides the Wayland/gamescope
+choices. `gamescope=0` means automatic: X11 games still use a private gamescope
+instance unless `host_x11=1`. Resolution and fullscreen get a dialog; anything
+else in `gamescope_args`, and all of `env`, is set by hand and carried through
+saves untouched. `env` values cannot contain spaces — the list is split on
+them.
 
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
@@ -467,7 +472,7 @@ gvfs to it, which is most of what this exists to prevent. A private empty
 implemented yet.
 
 **MangoHud is off for RPG Maker MV/MZ.** Its GL shim is `LD_PRELOAD`ed into
-every child, and Chromium spawns a zygote and its own sandboxed renderers — the
+every child, and Chromium spawns a zygote and its own renderer processes — the
 window never appears and the process hangs until killed. An FPS counter on a 2D
 RPG Maker game is no loss.
 
@@ -495,5 +500,10 @@ python3 tests/test_security.py -v
 
 The tests use temporary homes and captures. They exercise real filesystem and
 network isolation, the seccomp filter and the user-namespace block, environment
-filtering and namespace attachment; display and audio argument checks use
-recorders so they do not open windows or play sound.
+filtering, the read-only tools folder and namespace attachment; display and
+audio argument checks use recorders so they do not open windows or play sound.
+
+They run without the systemd scope, because their private runtime directory
+hides the user manager. The exception is the check that commands reach the
+game unaltered by `systemd-run`, which uses the real one, and skips when no
+user manager is reachable rather than pass having tested nothing.
