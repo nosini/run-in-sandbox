@@ -18,10 +18,12 @@ you:
   runaway game cannot take the desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
-private, and the game's environment starts from an allowlist. Audio is disabled
-by default: `--audio` grants host sound playback **and microphone/monitor
-recording**. `--host-x11` explicitly grants access to other host X applications.
-Neither compatibility option should be enabled for a game you do not trust.
+private, and the game's environment starts from an allowlist. Audio is always
+on, through the host's PipeWire and Pulse sockets. That includes **microphone
+and monitor recording**: sound servers do not split playback from capture, and
+too many games refuse to start without a sound device to withhold it.
+`--host-x11` explicitly grants access to other host X applications; do not
+enable it for a game you do not trust.
 
 This is not a complete security boundary against actively malicious software.
 The host kernel, graphics drivers and exposed display services remain shared.
@@ -196,8 +198,8 @@ with obvious junk (installers, crash handlers, redistributables) filtered out.
 Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
 the last 80 lines in a window.
 
-**Sandbox game preferences** — the video backend, audio permission, MangoHud,
-gamescope, and the Proton version, saved per game or as the library-wide default. Turning gamescope
+**Sandbox game preferences** — the video backend, MangoHud, gamescope, and
+the Proton version, saved per game or as the library-wide default. Turning gamescope
 on opens a second dialog for resolution and fullscreen. This is why there is one
 launcher entry rather than one per flag combination.
 
@@ -205,7 +207,7 @@ launcher entry rather than one per flag combination.
 
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-             [--host-x11|--headless] [--audio] [--env K=V] [--ro SRC DST]
+             [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 ```
 
@@ -225,7 +227,6 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
-| `--audio` | grant host audio, including microphone and monitor recording; off by default |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
 | `--gamescope[=ARGS]` | run inside gamescope's nested compositor (default for X11 games); `ARGS` is word-split, so quote the lot |
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
@@ -314,8 +315,8 @@ including for Proton: builds lacking winewayland must use gamescope instead.
 `/dev` and its shared memory are private. Graphical modes expose GPU devices only
 (`/dev/dri` and available NVIDIA device nodes). Host input, camera, sound and
 terminal devices are not exposed; controllers requiring raw device access are
-currently unavailable. Audio sockets are exposed only with `--audio`, which
-includes recording access and is also available in the preferences dialog.
+currently unavailable. Sound goes through the PipeWire and Pulse sockets, which
+are always exposed and carry recording access as well as playback.
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
 
 ## Kernel attack surface and resource limits
@@ -383,7 +384,6 @@ wayland=0|1
 mangohud=0|1
 gamescope=0|1
 host_x11=0|1
-audio=0|1
 gamescope_args=-f -W 2560 -H 1440
 env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
@@ -393,8 +393,8 @@ The key is the sandbox name, so preferences and captured writes stay in step.
 Two games whose folders have the same name share a sandbox; give one of them
 `--name`, or an entry in `NAME_MAP` at the top of `sandbox-game`, to separate
 them. `host_x11=1` opts
-into the host X server and overrides the Wayland/gamescope choices; `audio=1`
-opts into host audio and recording. `gamescope=0` means automatic: X11 games
+into the host X server and overrides the Wayland/gamescope choices.
+`gamescope=0` means automatic: X11 games
 still use a private gamescope instance unless `host_x11=1`.
 Resolution and fullscreen get a dialog;
 anything else in `gamescope_args`, and all of `env`, is set by hand and carried
@@ -443,5 +443,5 @@ python3 tests/test_security.py -v
 
 The tests use temporary homes and captures. They exercise real filesystem and
 network isolation, the seccomp filter and the user-namespace block, environment
-filtering and namespace attachment; display and
-audio argument checks use recorders so they do not open windows or record sound.
+filtering and namespace attachment; display and audio argument checks use
+recorders so they do not open windows or play sound.

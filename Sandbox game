@@ -184,7 +184,6 @@ BASE="$(basename "$GAMEDIR")"
 NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
     || die "Cannot derive a sandbox name for:\n$GAMEDIR"
 FLAG=()
-[ "$(cfg_get audio 0)" = 1 ] && FLAG+=( --audio )
 HOST_X11="$(cfg_get host_x11 0)"
 [ "$HOST_X11" = 1 ] && FLAG+=( --host-x11 )
 [ "$HOST_X11" != 1 ] && [ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )

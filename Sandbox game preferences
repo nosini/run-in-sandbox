@@ -18,7 +18,7 @@
 #
 # The files are plain key=value and meant to be hand-editable:
 #   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
-#   host_x11=0|1  audio=0|1             # explicit host-access permissions
+#   host_x11=0|1                        # explicit host X server access
 #   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
 #   env=K=V K=V ...                      e.g. WAYLANDDRV_PRIMARY_MONITOR=HDMI-1
 # Resolution and fullscreen get a second dialog once gamescope is on; the rest
@@ -74,9 +74,6 @@ PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
 
 V_X="Private Xwayland (gamescope)"; V_W="Native Wayland"
 V_HOST="Host X11 (allows access to other X apps)"
-A_OFF="Off"; A_ON="Host audio (allows microphone recording)"
-[ "$(cfg_get audio 0)" = 1 ] && A_CUR="$A_ON" || A_CUR="$A_OFF"
-mapfile -t A_ALL < <(first "$A_CUR" "$A_OFF" "$A_ON")
 M_OFF="Off"; M_ON="On"
 P_AUTO="Newest installed (auto)"
 
@@ -116,7 +113,6 @@ OUT="$(zenity --forms --title="Sandbox preferences" \
     --add-combo="MangoHud overlay" --combo-values="$(join_pipe "${M_ALL[@]}")" \
     --add-combo="Gamescope"        --combo-values="$(join_pipe "${G_ALL[@]}")" \
     --add-combo="Proton version"   --combo-values="$(join_pipe "${P_ALL[@]}")" \
-    --add-combo="Audio"           --combo-values="$(join_pipe "${A_ALL[@]}")" \
     --add-combo="Save for"         --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" \
     2>/dev/null)" || exit 0                    # cancelled
 
@@ -124,7 +120,7 @@ OUT="$(zenity --forms --title="Sandbox preferences" \
 # consecutive tabs together and shift every field left of an empty one.
 fld() { awk -F'\t' -v n="$1" 'NR==1 {print $n}' <<<"$OUT"; }
 F_VIDEO="$(fld 1)"; F_MHUD="$(fld 2)"; F_GS="$(fld 3)"
-F_PROTON="$(fld 4)"; F_AUDIO="$(fld 5)"; F_SCOPE="$(fld 6)"
+F_PROTON="$(fld 4)"; F_SCOPE="$(fld 5)"
 
 # An untouched combo can come back empty on some zenity builds; keep the
 # current value rather than silently resetting it to the built-in default.
@@ -132,7 +128,6 @@ F_PROTON="$(fld 4)"; F_AUDIO="$(fld 5)"; F_SCOPE="$(fld 6)"
 [ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
 [ -n "${F_GS:-}"     ] || F_GS="$G_CUR"
 [ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
-[ -n "${F_AUDIO:-}" ] || F_AUDIO="$A_CUR"
 [ -n "${F_SCOPE:-}"  ] || F_SCOPE="$S_GAME"
 
 # ---- save ------------------------------------------------------------------
@@ -162,7 +157,6 @@ else M=0; fi
 [ "$F_VIDEO" != "$V_X" ] || G=1
 [ "$F_VIDEO" = "$V_HOST" ] && HX=1 || HX=0
 [ "$HX" = 0 ] || G=0
-[ "$F_AUDIO" = "$A_ON" ] && A=1 || A=0
 
 # ---- gamescope options -----------------------------------------------------
 # Only worth asking once gamescope is on, so it is a second dialog rather than
@@ -221,7 +215,6 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
     echo "wayland=$W"
     echo "host_x11=$HX"
-    echo "audio=$A"
     echo "mangohud=$M"
     echo "gamescope=$G"
     [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
@@ -234,5 +227,5 @@ NOTE=""
     && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
 
 zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nAudio: $F_AUDIO\nMangoHud: $F_MHUD\nGamescope: $F_GS${GA_OUT:+ <tt>($GA_OUT)</tt>}\nProton: $F_PROTON\n\n<tt>$TARGET</tt>$NOTE" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nMangoHud: $F_MHUD\nGamescope: $F_GS${GA_OUT:+ <tt>($GA_OUT)</tt>}\nProton: $F_PROTON\n\n<tt>$TARGET</tt>$NOTE" \
     2>/dev/null

@@ -56,8 +56,9 @@
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
 #   X server (other X clients can be observed/controlled). --headless exposes
-#   no display. --audio opts into host audio, including microphone/monitor
-#   recording; without it no audio sockets or sound devices are exposed.
+#   no display. Audio always goes through the host's PipeWire and Pulse
+#   sockets -- enough games refuse to start without a sound device that
+#   withholding it broke more than it protected.
 #
 # CMD references the game at /game, e.g.:
 #   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
@@ -122,13 +123,12 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; AUDIO=0; HEADLESS=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --host-x11)  HOST_X11=1; shift ;;
-        --audio)     AUDIO=1; shift ;;
         --headless)  HEADLESS=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
         --gamescope) GS=1; shift ;;
@@ -388,11 +388,12 @@ for key in LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES LC_COLLATE LC_NUMERIC LC_TI
            LC_IDENTIFICATION TERM TZ; do
     [ -z "${!key:-}" ] || BASE_ENV+=( --setenv "$key" "${!key}" )
 done
-VIDEO_ENV=(); XSOCK_ARGS=( --dir /tmp/.X11-unix ); DISPLAY_ARGS=(); AUDIO_ARGS=()
+VIDEO_ENV=(); XSOCK_ARGS=( --dir /tmp/.X11-unix ); DISPLAY_ARGS=()
 DEVICE_ARGS=()
 if [ "$HEADLESS" = 0 ]; then
-    # No sound, input, camera, tty or host shared-memory mounts. Controllers
-    # that require raw device access must be granted separately in future.
+    # No sound, input, camera, tty or host shared-memory mounts: sound goes
+    # through the audio sockets below instead. Controllers that require raw
+    # device access must be granted separately in future.
     [ ! -d /dev/dri ] || DEVICE_ARGS+=( --dev-bind /dev/dri /dev/dri )
     # Proprietary NVIDIA uses additional devices outside /dev/dri.
     for device in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
@@ -423,11 +424,9 @@ if [ "$WAYLAND" = 1 ]; then
         VIDEO_ENV+=( --setenv SDL_VIDEODRIVER wayland )
     fi
 fi
-if [ "$AUDIO" = 1 ]; then
-    AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
-        --ro-bind-try "$RT/pulse" "$RT/pulse"
-        --setenv PULSE_SERVER "unix:$RT/pulse/native" )
-fi
+AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
+    --ro-bind-try "$RT/pulse" "$RT/pulse"
+    --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 
 # ---- overlay for the game's own install dir --------------------------------
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall

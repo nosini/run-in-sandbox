@@ -2,7 +2,7 @@
 """Run on the host: python3 -m unittest discover -s tests -v.
 
 Uses real bubblewrap for filesystem/namespace checks and temporary command
-recorders for display/audio policy checks, without opening a game window.
+recorders for display policy checks, without opening a game window.
 """
 import json
 import os
@@ -87,8 +87,6 @@ class SecurityTests(unittest.TestCase):
             'test ! -e "$HOME/host-secret"; '
             f'test ! -e /dev/shm/{shm.name}; '
             'test ! -e /dev/input; test ! -e /dev/snd; '
-            'test ! -e "$XDG_RUNTIME_DIR/pulse/native"; '
-            'test ! -e "$XDG_RUNTIME_DIR/pipewire-0"; '
             'test ! -e /tmp/.Xauthority; test -z "${DISPLAY+x}"; '
             'printf changed > /game/original; '
             'printf save > "$HOME/save"; readlink /proc/self/ns/net')
@@ -150,14 +148,13 @@ class SecurityTests(unittest.TestCase):
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join([
             "Host X11 (allows access to other X apps)", "Off", "On",
-            "Newest installed (auto)", "Host audio (allows microphone recording)",
-            "This game only"])
+            "Newest installed (auto)", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
                                 env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         name = self.cli("--print-name", self.game).stdout.strip()
         settings = (self.home / ".config" / "sandbox-game" / "games" / name).read_text()
-        for entry in ("host_x11=1", "audio=1", "wayland=0", "gamescope=0"):
+        for entry in ("host_x11=1", "wayland=0", "gamescope=0"):
             self.assertIn(entry, settings.splitlines())
 
     def test_proton_wayland_does_not_fall_back_to_host_x(self):
@@ -193,23 +190,22 @@ class SecurityTests(unittest.TestCase):
         self.env["DISPLAY"] = ":123"
         return json.loads(self.cli(*options, self.game, "/bin/true").stdout)
 
-    def test_default_display_is_private_and_audio_is_absent(self):
+    def test_default_display_is_private(self):
         args = self.recorded_args()
         self.assertIn("gamescope", args)
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertNotIn("DISPLAY", args)
-        self.assertNotIn(str(self.runtime / "pulse"), args)
-        self.assertNotIn(str(self.runtime / "pipewire-0"), args)
+        # Audio is always on: games that find no sound device refuse to start.
+        self.assertIn(str(self.runtime / "pulse"), args)
+        self.assertIn(str(self.runtime / "pipewire-0"), args)
         self.assertIn("--dev", args)
         for option in ("--unshare-user", "--disable-userns", "--seccomp"):
             self.assertIn(option, args)
 
-    def test_host_display_and_audio_require_explicit_options(self):
-        args = self.recorded_args("--host-x11", "--audio")
+    def test_host_display_requires_explicit_option(self):
+        args = self.recorded_args("--host-x11")
         self.assertNotIn("gamescope", args)
         self.assertIn("DISPLAY", args)
-        self.assertIn(str(self.runtime / "pulse"), args)
-        self.assertIn(str(self.runtime / "pipewire-0"), args)
         self.assertNotIn("WAYLAND_DISPLAY", args)
 
     def test_native_wayland_does_not_expose_host_x(self):
