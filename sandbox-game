@@ -3,6 +3,8 @@
 #              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace)
+#     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
+#       memory/task limits via a systemd scope
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
 #     - GAMEDIR is presented at /game as an overlay; the pristine install is
 #       never modified, all writes are captured
@@ -461,8 +463,42 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BWRAP=( bwrap
-    --unshare-all --die-with-parent --new-session
+# ---- seccomp ---------------------------------------------------------------
+# Compiled by sandbox-seccomp, which sits beside this script and says what it
+# blocks and why. Refuse to start without it rather than quietly run unfiltered.
+# bwrap reads the filter from an fd, so it is unlinked as soon as that is open.
+SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
+[ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
+[ -n "$SECCOMP" ] || { echo "sandbox-seccomp not found beside sandbox-game or on PATH" >&2; exit 1; }
+SECCOMP_BPF="$(mktemp)"
+"$SECCOMP" > "$SECCOMP_BPF" || { rm -f "$SECCOMP_BPF"
+    echo "could not build the seccomp filter; not starting unconfined" >&2; exit 1; }
+exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
+
+# ---- resource limits -------------------------------------------------------
+# A transient scope puts the whole sandbox in a cgroup of its own, so a leak or
+# a fork bomb runs into these ceilings instead of taking the desktop down, and
+# gives it a name: systemctl --user status|kill sandbox-game-NAME-PID.scope.
+# systemd-run execs bwrap in place, so --die-with-parent still means this shell.
+# Without a user manager to ask -- a bare TTY, some containers -- say so and go on:
+# this guards the desktop's responsiveness, not the game's reach.
+SCOPE=()
+if command -v systemd-run >/dev/null \
+   && systemd-run --user --scope --quiet --collect -- true 2>/dev/null; then
+    SCOPE=( systemd-run --user --scope --quiet --collect
+            --unit "sandbox-game-$NAME-$$"
+            -p MemoryMax=80% -p TasksMax=4096 -- )
+else
+    echo "warning: no systemd user manager; running without memory or task limits" >&2
+fi
+
+# --disable-userns shuts the door the kernel is most often attacked through:
+# without it the game could make a user namespace of its own, and with it every
+# capability that namespace confers. It needs --unshare-user outright, where
+# --unshare-all only tries, and bwrap confirms the door is shut before starting.
+BWRAP=( "${SCOPE[@]}" bwrap
+    --unshare-all --unshare-user --disable-userns --seccomp 9
+    --die-with-parent --new-session
     "${BASE_ENV[@]}"
     --ro-bind /usr /usr
     --ro-bind /etc /etc

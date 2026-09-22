@@ -99,6 +99,20 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual((capture / "home" / "save").read_text(), "save")
         self.assertEqual((capture / "rw" / "original").read_text(), "changed")
 
+    def test_guest_is_filtered_and_cannot_nest_user_namespaces(self):
+        # unshare -U is refused twice over, by --disable-userns and the filter.
+        # keyctl is refused by the filter alone: unfiltered, these arguments
+        # get EINVAL rather than EPERM. 250 is keyctl on x86_64, 288 on i386.
+        probe = ("import ctypes, errno, os, sys; "
+                 "nr = {'x86_64': 250, 'i686': 288}.get(os.uname().machine); "
+                 "l = ctypes.CDLL(None, use_errno=True); "
+                 "sys.exit(nr is not None and "
+                 "(l.syscall(nr, 0, 0, 0) != -1 or ctypes.get_errno() != errno.EPERM))")
+        result = self.run_guest('grep -q "^Seccomp:[[:space:]]*2" /proc/self/status; '
+                                '! unshare -U true 2>/dev/null; '
+                                f'python3 -c "{probe}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_attach_uses_target_root_and_cwd(self):
         (self.home / "host-secret").write_text("private")
         name = "attach-" + self.base.name
@@ -187,6 +201,8 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn(str(self.runtime / "pulse"), args)
         self.assertNotIn(str(self.runtime / "pipewire-0"), args)
         self.assertIn("--dev", args)
+        for option in ("--unshare-user", "--disable-userns", "--seccomp"):
+            self.assertIn(option, args)
 
     def test_host_display_and_audio_require_explicit_options(self):
         args = self.recorded_args("--host-x11", "--audio")

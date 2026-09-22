@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+# sandbox-seccomp            write the filter to stdout, as bwrap --seccomp wants
+# sandbox-seccomp CMD...     install it on this process and exec CMD
+#   The seccomp filter every sandbox runs under. The second form is how
+#   sandbox-attach brings a program into a running sandbox under the same
+#   filter as the game: nsenter cannot install one, and a program left
+#   unfiltered next to the game is one it could ptrace its way into.
+#
+#   SANDBOX_SECCOMP=log turns every block into a log entry and lets the call
+#   through: for finding out which rule a game trips over, never for playing.
+#   The kernel records each hit as an audit event; with auditd running,
+#     sudo ausearch -m SECCOMP -ts recent | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort | uniq -c
+#   counts them, and without it they land in the kernel log (journalctl -k).
+#   clone3 alone is still refused unlogged, see below.
+#
+# A denylist, starting from Flatpak's -- which Steam, Proton and Chromium
+# already run under -- plus what podman's default adds that a game has no use
+# for. Syscalls that need a capability (kexec, init_module, swapon, ...) are
+# left out: bwrap drops every capability, so the kernel refuses those already.
+# ptrace stays allowed: wineserver needs it to read another process's memory,
+# and so does anything attached with sandbox-attach.
+#
+# No socket address-family filter, although Flatpak and podman have one. On
+# i386, socket() still arrives through socketcall(), whose arguments sit behind
+# a pointer seccomp cannot follow, so the family is invisible there: filtering
+# it would cut every 32-bit program off from the display, and filtering only
+# the direct syscall is undone by one int 0x80 from 64-bit code.
+#
+# Talks to libseccomp directly through ctypes rather than its Python bindings:
+# the library is on every system that has systemd, the bindings are a separate
+# package that most do not install. libseccomp does the part that matters,
+# numbering each syscall per architecture: a 64-bit process can issue 32-bit
+# syscalls through int 0x80, so the i386 table has to be covered just as well.
+import ctypes
+import errno
+import os
+import sys
+
+EPERM, ENOSYS = errno.EPERM, errno.ENOSYS
+ACT_ALLOW, ACT_LOG = 0x7FFF0000, 0x7FFC0000
+CMP_MASKED_EQ = 7
+CLONE_NEWUSER = 0x10000000
+UFFD_USER_MODE_ONLY = 1
+ARCH_X86_64, ARCH_X86 = 0xC000003E, 0x40000003
+ARCH_AARCH64, ARCH_ARM = 0xC00000B7, 0x40000028
+# 32-bit userspace a native kernel runs as well. Any other architecture kills
+# the process outright, which is what libseccomp does with a foreign one.
+COMPAT = {ARCH_X86_64: ARCH_X86, ARCH_AARCH64: ARCH_ARM}
+
+
+def act_errno(err):
+    return 0x00050000 | (err & 0xFFFF)
+
+
+BLOCK = {
+    EPERM: [
+        # kernel log (KASLR leaks), dead or quota interfaces
+        "syslog", "uselib", "acct", "quotactl",
+        # the kernel keyring
+        "add_key", "keyctl", "request_key",
+        # NUMA page placement
+        "move_pages", "mbind", "get_mempolicy", "set_mempolicy",
+        "set_mempolicy_home_node", "migrate_pages",
+        # namespaces and mounts -- nested user namespaces are also switched
+        # off by bwrap --disable-userns; this is the second lock on that door.
+        # Not setns or chroot, which Flatpak also blocks: sandbox-attach puts
+        # this filter on before nsenter, which needs both, and neither is any
+        # use to a game that has no capabilities in any namespace.
+        "unshare", "mount", "umount", "umount2", "pivot_root",
+        # from podman's default: large, frequently exploited, never needed
+        "bpf", "perf_event_open",
+    ],
+    # ENOSYS, so callers take their fallback instead of failing outright.
+    ENOSYS: [
+        # seccomp cannot see into clone3's struct, so it cannot check for
+        # CLONE_NEWUSER there; glibc falls back to clone, which it can.
+        "clone3",
+        "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "fspick",
+        "mount_setattr",
+        "io_uring_setup", "io_uring_enter", "io_uring_register",
+    ],
+}
+
+
+class ArgCmp(ctypes.Structure):
+    _fields_ = [("arg", ctypes.c_uint), ("op", ctypes.c_int),
+                ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
+
+
+def load_lib():
+    lib = ctypes.CDLL("libseccomp.so.2")
+    lib.seccomp_init.restype = ctypes.c_void_p
+    lib.seccomp_init.argtypes = [ctypes.c_uint32]
+    lib.seccomp_arch_native.restype = ctypes.c_uint32
+    lib.seccomp_arch_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
+    lib.seccomp_rule_add_array.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint,
+        ctypes.POINTER(ArgCmp)]
+    lib.seccomp_export_bpf.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.seccomp_load.argtypes = [ctypes.c_void_p]
+    return lib
+
+
+def build(lib):
+    ctx = lib.seccomp_init(ACT_ALLOW)
+    if not ctx:
+        sys.exit("sandbox-seccomp: seccomp_init failed")
+    compat = COMPAT.get(lib.seccomp_arch_native())
+    if compat is not None:
+        rc = lib.seccomp_arch_add(ctx, compat)
+        if rc < 0 and rc != -errno.EEXIST:
+            sys.exit(f"sandbox-seccomp: cannot add 32-bit arch: {os.strerror(-rc)}")
+
+    def rule(action, name, *cmps):
+        nr = lib.seccomp_syscall_resolve_name(name.encode())
+        if nr == -1:            # older libseccomp than the syscall: skip it
+            return
+        arr = (ArgCmp * len(cmps))(*cmps) if cmps else None
+        rc = lib.seccomp_rule_add_array(ctx, action, nr, len(cmps), arr)
+        if rc < 0:
+            sys.exit(f"sandbox-seccomp: rule for {name}: {os.strerror(-rc)}")
+
+    log = os.environ.get("SANDBOX_SECCOMP") == "log"
+    if log:
+        print("sandbox-seccomp: SANDBOX_SECCOMP=log -- logging, NOT blocking",
+              file=sys.stderr)
+
+    # glibc tries clone3 for every thread it starts and falls back on ENOSYS,
+    # so logging it would bury every other hit under thousands of these.
+    def act(err, name=None):
+        return ACT_LOG if log and name != "clone3" else act_errno(err)
+
+    for err, names in BLOCK.items():
+        for name in names:
+            rule(act(err, name), name)
+    rule(act(EPERM), "clone",
+         ArgCmp(0, CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
+    # userfaultfd only when it would handle faults taken inside the kernel:
+    # that is the part exploits use, to stall the kernel mid-copy and win a
+    # race. Wine uses the user-mode-only kind to track write watches, and
+    # falls back to something slower when refused altogether.
+    rule(act(EPERM), "userfaultfd",
+         ArgCmp(0, CMP_MASKED_EQ, UFFD_USER_MODE_ONLY, 0))
+    return ctx
+
+
+def main():
+    lib = load_lib()
+    ctx = build(lib)
+    if len(sys.argv) > 1:
+        rc = lib.seccomp_load(ctx)
+        if rc < 0:
+            sys.exit(f"sandbox-seccomp: cannot install the filter: {os.strerror(-rc)}")
+        try:
+            os.execvp(sys.argv[1], sys.argv[1:])
+        except OSError as e:
+            sys.exit(f"sandbox-seccomp: {sys.argv[1]}: {e.strerror}")
+    if sys.stdout.isatty():
+        sys.exit("sandbox-seccomp: refusing to write a binary filter to a terminal")
+    sys.stdout.flush()
+    rc = lib.seccomp_export_bpf(ctx, sys.stdout.fileno())
+    if rc < 0:
+        sys.exit(f"sandbox-seccomp: cannot export the filter: {os.strerror(-rc)}")
+
+
+if __name__ == "__main__":
+    main()

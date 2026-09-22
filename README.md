@@ -13,6 +13,9 @@ you:
   overlay, so the copy on disk is never modified and every write is captured.
 - **Everything in one folder.** `~/game-sandboxes/<name>/` holds the saves, the
   configs, the Wine prefix — delete it and the game is factory-fresh.
+- **Less kernel to aim at.** No nested user namespaces, a seccomp filter
+  over the syscalls a game never needs, and memory and task limits, so a
+  runaway game cannot take the desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is disabled
@@ -33,6 +36,7 @@ via mkxp-z — no Wine), and Windows `.exe` games via Proton.
 D=~/.local/share/nautilus/scripts
 install -Dm755 sandbox-game              ~/.local/bin/sandbox-game
 install -Dm755 sandbox-attach            ~/.local/bin/sandbox-attach
+install -Dm755 sandbox-seccomp           ~/.local/bin/sandbox-seccomp
 install -Dm644 sandbox-game-lib          ~/.local/bin/sandbox-game-lib
 install -Dm755 "Sandbox game"            "$D/Sandbox game"
 install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
@@ -53,8 +57,10 @@ names below are the common ones. Where a name differs sharply it is called out.
 
 | Binary | Usual package | Why |
 |---|---|---|
-| `bwrap` | `bubblewrap` | the sandbox itself |
+| `bwrap` ≥ 0.8 | `bubblewrap` | the sandbox itself; 0.8 added `--disable-userns` |
 | `bash` ≥ 4.0 | `bash` | `mapfile`, associative arrays, `${var,,}` |
+| `python3` | `python3` | `sandbox-seccomp` compiles the filter with it |
+| `libseccomp.so.2` | `libseccomp2` / `libseccomp` | the filter compiler, loaded through ctypes; every systemd install has it, and the Python bindings are *not* needed |
 | `awk`, `sed`, `find`, `sort`, `realpath` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
 
 The default graphical mode also requires gamescope and a Wayland session.
@@ -92,6 +98,7 @@ working directory.
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
+| memory and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
 distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
@@ -311,6 +318,57 @@ currently unavailable. Audio sockets are exposed only with `--audio`, which
 includes recording access and is also available in the preferences dialog.
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
 
+## Kernel attack surface and resource limits
+
+**No nested user namespaces.** `bwrap --disable-userns` stops the game from
+creating a user namespace of its own. Unprivileged user namespaces are among
+the most commonly exploited ways into the kernel: inside one, a process holds
+every capability, which puts netfilter, mounts and much else in reach. bwrap
+checks that the door is shut before it starts the game.
+
+**A seccomp filter**, compiled by `sandbox-seccomp` on every launch and handed
+to bwrap. It starts from Flatpak's denylist, which Steam, Proton and Chromium
+already run under, and adds what podman's default blocks that a game has no use
+for: `bpf`, `perf_event_open`, `io_uring_*`, kernel-mode `userfaultfd`, the
+kernel keyring, new-style mount calls, and namespace creation as a second lock
+behind `--disable-userns`. Both the 64-bit and the i386 syscall tables are covered,
+since 64-bit code can make 32-bit syscalls too. `sandbox-seccomp` holds the
+list and the reasons behind it. There is no socket address-family filter,
+because on i386 it cannot be enforced (see the comment there). The launcher
+refuses to start if the filter cannot be built.
+
+If a game breaks and the filter is a suspect, run it once from the shell with
+`SANDBOX_SECCOMP=log`: every rule then logs instead of blocking. With auditd
+running, count the hits with
+
+```sh
+sudo ausearch -m SECCOMP -ts recent | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort | uniq -c
+```
+
+(without auditd they go to the kernel log, `journalctl -k`). `arch=c000003e`
+is 64-bit and `arch=40000003` 32-bit, and the two number syscalls differently;
+`ausyscall N` (from the audit package) or `ausyscall i386 N` names them.
+`clone3` is left out of the log: glibc tries it for every thread and falls
+back to `clone`, and its hits would bury everything else. Expect `clone` from
+a `bwrap` under gamescope too -- its image loader trying to sandbox itself.
+
+**Memory and task limits.** The sandbox runs in a transient systemd scope,
+`sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM and 4096 tasks. That
+turns a leak or a fork bomb into a dead game instead of a frozen desktop, and
+gives you a handle on it:
+
+```sh
+systemctl --user list-units 'sandbox-game-*'
+systemctl --user kill sandbox-game-<name>-<pid>.scope
+```
+
+`sandbox-attach` puts the program it brings in under the same filter, and into
+the same scope when there is one.
+
+RPG Maker MV/MZ runs with Chromium's own sandbox switched off (`--no-sandbox`):
+it is built on the user namespaces this one forbids, and without them NW.js dies
+looking for a setuid helper. The sandbox around it is the one that matters here.
+
 ## Preferences file format
 
 ```
@@ -384,5 +442,6 @@ python3 tests/test_security.py -v
 ```
 
 The tests use temporary homes and captures. They exercise real filesystem and
-network isolation, environment filtering and namespace attachment; display and
+network isolation, the seccomp filter and the user-namespace block, environment
+filtering and namespace attachment; display and
 audio argument checks use recorders so they do not open windows or record sound.

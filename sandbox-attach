@@ -169,7 +169,25 @@ esac
 NS=( -U -m -p -n -i -u )
 [ -e "/proc/$TARGET/ns/cgroup" ] && NS+=( -C )
 
+# The game's seccomp filter is not inherited by anything nsenter starts, and an
+# unfiltered program beside the game is one the game could ptrace its way into.
+# So the filter goes on here, before nsenter, never to be off inside: it leaves
+# nsenter the setns and chroot it needs, which the game has no capability for.
+SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
+[ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
+[ -n "$SECCOMP" ] || { echo "$SELF: sandbox-seccomp not found beside $SELF or on PATH" >&2; exit 1; }
+
+# Join the game's cgroup as well, so its memory and task limits cover what is
+# attached too, and stopping the scope stops both. Best effort: the scope is
+# only there when sandbox-game found a systemd user manager to ask for one.
+CG="$(sed -n 's/^0:://p' "/proc/$TARGET/cgroup" 2>/dev/null || true)"
+case "$CG" in
+    */sandbox-game-*.scope)
+        { echo 0 >"/sys/fs/cgroup$CG/cgroup.procs"; } 2>/dev/null \
+            || echo "$SELF: warning: could not join $CG; running outside its limits" >&2 ;;
+esac
+
 # Enter both the target root and a directory inside it. Keeping the host cwd
 # would leave a filesystem reference outside the sandbox even after chroot.
-exec nsenter -t "$TARGET" "${NS[@]}" --root --wdns=/ --preserve-credentials -- \
+exec "$SECCOMP" nsenter -t "$TARGET" "${NS[@]}" --root --wdns=/ --preserve-credentials -- \
      env -i /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}
