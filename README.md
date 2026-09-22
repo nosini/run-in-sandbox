@@ -35,18 +35,39 @@ via mkxp-z — no Wine), and Windows `.exe` games via Proton.
 ## Install
 
 ```sh
-D=~/.local/share/nautilus/scripts
-install -Dm755 sandbox-game              ~/.local/bin/sandbox-game
-install -Dm755 sandbox-attach            ~/.local/bin/sandbox-attach
-install -Dm755 sandbox-seccomp           ~/.local/bin/sandbox-seccomp
-install -Dm644 sandbox-game-lib          ~/.local/bin/sandbox-game-lib
-install -Dm755 "Sandbox game"            "$D/Sandbox game"
-install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
+curl -fsSL https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.sh | bash
 ```
 
-`sandbox-game-lib` is mode 644 and goes in `~/.local/bin`, not the scripts
-directory: it holds the parts the launcher and the preferences dialog must agree
-on, and Nautilus lists anything in that directory as a menu entry of its own.
+That downloads the current `main` and installs it for your user; no root, and
+nothing outside `~/.local`. From a checkout, `./install.sh` installs that
+checkout instead. Either way, running it again updates in place, and it warns
+about anything missing from the [dependencies](#dependencies) below.
+
+Piping a script from the internet into a shell runs whatever the server sends.
+To read it first:
+
+```sh
+curl -fsSLO https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.sh
+less install.sh && bash install.sh
+```
+
+`REF=<branch or tag>` installs something other than `main`. To remove the
+scripts again, `./install.sh --uninstall`, or through the pipe
+`... | bash -s -- --uninstall`. That leaves `~/game-sandboxes` (saves and Wine
+prefixes), your preferences and the shared tools folder alone.
+
+What goes where:
+
+| File | Installed to |
+|---|---|
+| `sandbox-game`, `sandbox-attach`, `sandbox-seccomp` | `~/.local/bin/` |
+| `sandbox-game-lib` (mode 644) | `~/.local/bin/` |
+| `Sandbox game`, `Sandbox game preferences` | `~/.local/share/nautilus/scripts/` |
+| (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
+
+`sandbox-game-lib` goes beside `sandbox-game`, not in the scripts directory: it
+holds the parts the launcher and the preferences dialog must agree on, and
+Nautilus lists anything in that directory as a menu entry of its own.
 
 Then right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
 
