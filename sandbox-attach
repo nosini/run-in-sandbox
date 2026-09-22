@@ -16,14 +16,21 @@
 #   has no business touching a prefix a game is currently using, and in
 #   practice it exits silently without starting anything.
 #
+#   Without --name it attaches to the only sandbox running, or asks which one
+#   when there are several. Without a program it starts Cheat Engine from the
+#   shared tools folder, which every sandbox has read-only at /tools:
+#     ~/.local/share/sandbox-game/tools/     ($SANDBOX_TOOLS_DIR overrides)
+#
+#   sandbox-attach                         # Cheat Engine, into the running game
 #   sandbox-attach --list
-#   sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/CE/cheatengine-x86_64.exe
+#   sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/setup.exe
 #   sandbox-attach --shell                 # a shell inside, to look around
 #   sandbox-attach --exec -- ps -ef        # a native command inside
 #
-# Getting the program in there needs no restart: ~/game-sandboxes/NAME/home is
-# bind-mounted as $HOME inside, so anything copied there appears immediately.
-#   cp -r ~/Downloads/CheatEngine ~/game-sandboxes/witcher3/home/
+# Host paths into the tools folder or ~/game-sandboxes/NAME/home -- which is
+# $HOME inside -- are translated to where they appear in there. Anything copied
+# into that home shows up at once; the tools folder is only mounted at launch,
+# so a game started before it existed has to be restarted to see it.
 set -euo pipefail
 
 SELF="${0##*/}"
@@ -33,6 +40,8 @@ usage() {
 }
 
 NAME=""; MODE=wine; LIST=0
+# Must match sandbox-game, which mounts this folder at /tools.
+TOOLS="${SANDBOX_TOOLS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sandbox-game/tools}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --list)   LIST=1; shift ;;
@@ -104,28 +113,64 @@ if [ -n "$NAME" ]; then
                           echo "try: $SELF --list" >&2; exit 1; }
 elif [ "${#SB_PIDS[@]}" = 1 ]; then
     TARGET="${SB_PIDS[0]}"; TNAME="${SB_NAMES[0]}"; TPROTON="${SB_PROTON[0]}"
-else
+elif [ -t 0 ] && [ -t 2 ]; then
     # Guessing between two running games would attach the debugger to the
-    # wrong one, so say which are open and stop.
+    # wrong one. At a terminal, ask.
+    LABELS=()
+    for i in "${!SB_PIDS[@]}"; do
+        [ "${SB_PROTON[$i]}" = 1 ] && k=proton || k=native
+        LABELS+=( "${SB_NAMES[$i]} ($k)" )
+    done
+    PS3="Attach to which sandbox? "; PICK=""
+    select label in "${LABELS[@]}"; do
+        [ -n "${label:-}" ] && { PICK=$((REPLY - 1)); break; }
+        echo "pick a number from the list" >&2
+    done
+    [ -n "$PICK" ] || exit 1                   # Ctrl-D
+    TARGET="${SB_PIDS[$PICK]}"; TNAME="${SB_NAMES[$PICK]}"; TPROTON="${SB_PROTON[$PICK]}"
+else
+    # And anywhere else, say which are open and stop.
     echo "$SELF: several sandboxes are running -- pick one with --name:" >&2
     for i in "${!SB_PIDS[@]}"; do echo "  ${SB_NAMES[$i]}" >&2; done
     exit 1
 fi
 
-[ "$MODE" = shell ] || [ "$#" -gt 0 ] || { echo "$SELF: nothing to run" >&2; usage 1 >&2; }
 [ "$MODE" != wine ] || [ "$TPROTON" = 1 ] || {
     echo "$SELF: '$TNAME' is not a Proton sandbox; use --exec for a native command" >&2
     exit 1; }
+# No program named: Cheat Engine is what this is for nine times out of ten.
+# The 64-bit build handles 32-bit games too, so it wins when both are there.
+if [ "$MODE" = wine ] && [ "$#" -eq 0 ]; then
+    for exe in cheatengine-x86_64.exe cheatengine-i386.exe; do
+        CE="$(find "$TOOLS" -maxdepth 3 -type f -iname "$exe" 2>/dev/null | sort | head -n1 || true)"
+        [ -z "$CE" ] || break
+    done
+    [ -n "$CE" ] || {
+        echo "$SELF: nothing to run, and no Cheat Engine found under $TOOLS" >&2
+        echo "unpack it there (e.g. \"$TOOLS/Cheat Engine/\"), or name a program" >&2
+        exit 1; }
+    set -- "$CE"
+fi
+[ "$MODE" = shell ] || [ "$#" -gt 0 ] || { echo "$SELF: nothing to run" >&2; usage 1 >&2; }
 
-# The capture dir is $HOME inside, so a host path pointing into it is almost
-# certainly meant as the copy that now lives there. Translate rather than fail
-# with a path that plainly exists.
+# The capture dir is $HOME inside and the tools folder is /tools, so a host
+# path into either is almost certainly meant as the copy visible in there.
+# Translate rather than fail with a path that plainly exists.
 CAPHOME="$HOME/game-sandboxes/$TNAME/home"
-ARGS=()
+ARGS=(); WANT_TOOLS=0
 for a in ${@+"$@"}; do
-    case "$a" in "$CAPHOME"/*) a="$HOME/${a#"$CAPHOME"/}" ;; esac
+    case "$a" in
+        "$CAPHOME"/*) a="$HOME/${a#"$CAPHOME"/}" ;;
+        "$TOOLS"/*)   a="/tools/${a#"$TOOLS"/}"; WANT_TOOLS=1 ;;
+    esac
     ARGS+=( "$a" )
 done
+# Mounts are fixed at launch, so a game started before the tools folder
+# existed -- or by an older sandbox-game -- has none. Say that, rather than
+# leave Wine to report a missing file with a path that exists on the host.
+[ "$WANT_TOOLS" = 0 ] || [ -d "/proc/$TARGET/root/tools" ] || {
+    echo "$SELF: '$TNAME' has no /tools -- it was started before $TOOLS existed;" >&2
+    echo "restart the game to mount it" >&2; exit 1; }
 
 # ---- what to run once inside ----------------------------------------------
 # nsenter carries our own environment in, which is the file manager's or the

@@ -6,6 +6,8 @@
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
 #       memory/task limits via a systemd scope
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
+#     - the shared tools folder (Cheat Engine and the like; see sandbox-attach)
+#       is mounted read-only at /tools, when it exists
 #     - GAMEDIR is presented at /game as an overlay; the pristine install is
 #       never modified, all writes are captured
 #   Everything the game writes ends up under ONE folder:
@@ -462,6 +464,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ---- shared tools ----------------------------------------------------------
+# One copy of Cheat Engine and the like for every game, rather than one per
+# capture dir; sandbox-attach runs them from /tools. Read-only is the point:
+# writable, it would let one game plant code in a tool that then runs inside
+# every other game's sandbox.
+TOOLS="${SANDBOX_TOOLS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sandbox-game/tools}"
+TOOLS_ARGS=()
+[ ! -d "$TOOLS" ] || TOOLS_ARGS=( --ro-bind "$TOOLS" /tools )
+
 # ---- seccomp ---------------------------------------------------------------
 # Compiled by sandbox-seccomp, which sits beside this script and says what it
 # blocks and why. Refuse to start without it rather than quietly run unfiltered.
@@ -514,6 +525,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     --perms 0700 --tmpfs "$RT"
     "${DISPLAY_ARGS[@]}"
     "${AUDIO_ARGS[@]}"
+    "${TOOLS_ARGS[@]}"
     "${EXTRA_RO[@]}"
     --bind "$CAP/home" "$HOME"
     --setenv HOME "$HOME"

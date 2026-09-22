@@ -29,8 +29,11 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR"):
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "XDG_DATA_HOME"):
             self.env.pop(key, None)
+        # A tools folder of the test's own, never the real one.
+        self.tools = self.base / "tools"
+        self.env["SANDBOX_TOOLS_DIR"] = str(self.tools)
 
     def cli(self, *args, check=True):
         return subprocess.run([str(ROOT / "sandbox-game"), *map(str, args)],
@@ -111,8 +114,20 @@ class SecurityTests(unittest.TestCase):
                                 f'python3 -c "{probe}"')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_shared_tools_are_read_only(self):
+        # Shared by every sandbox, so a game that could write here could plant
+        # code that later runs inside every other game's sandbox.
+        (self.tools / "Cheat Engine").mkdir(parents=True)
+        (self.tools / "Cheat Engine" / "ce.exe").write_text("tool")
+        result = self.run_guest('test "$(cat "/tools/Cheat Engine/ce.exe")" = tool; '
+                                '! touch "/tools/Cheat Engine/planted" 2>/dev/null')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.tools / "Cheat Engine" / "planted").exists())
+
     def test_attach_uses_target_root_and_cwd(self):
         (self.home / "host-secret").write_text("private")
+        self.tools.mkdir()
+        (self.tools / "tool").write_text("tool")
         name = "attach-" + self.base.name
         proc = subprocess.Popen(
             [str(ROOT / "sandbox-game"), "--headless", "--name", name,
@@ -128,7 +143,9 @@ class SecurityTests(unittest.TestCase):
             [str(ROOT / "sandbox-attach"), "--name", name, "--exec", "--",
              "/bin/sh", "-ec", 'test "$(pwd)" = /; test -d /game; '
              'test ! -e "$HOME/host-secret"; test -z "${REVIEW_SECRET+x}"; '
-             'printf attached > "$HOME/attached"'],
+             # A host path into the tools folder arrives as its /tools path.
+             'test "$(cat "$0")" = tool; '
+             'printf attached > "$HOME/attached"', str(self.tools / "tool")],
             env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.home / "game-sandboxes" / name / "home" / "attached").is_file())

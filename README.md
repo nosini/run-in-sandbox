@@ -248,25 +248,55 @@ to each sandbox. Same prefix, second wineserver, no contact.
 `sandbox-attach` joins the running sandbox's namespaces instead of creating new
 ones. No root: the user namespace is already yours to enter.
 
+### Cheat Engine
+
+Unpack a portable Cheat Engine once into the shared tools folder:
+
+```
+~/.local/share/sandbox-game/tools/
+└── Cheat Engine/
+    ├── cheatengine-x86_64.exe
+    └── ...
+```
+
+Every sandbox started from then on has that folder read-only at `/tools`, so
+one copy serves the whole library. Then, with the game running:
+
+```sh
+sandbox-attach
+```
+
+With no program named, it starts `cheatengine-x86_64.exe` from the tools folder
+(or `cheatengine-i386.exe` if that is all there is), searched up to three
+levels deep, so the subfolder can be called anything. With one game running it
+attaches to that; with several it asks which. In Cheat Engine, open the process
+list (the computer icon) and pick the game.
+
+Read-only is deliberate: a game that could write to a folder every sandbox
+shares could plant code in a tool that later runs inside every other game's
+sandbox. Games started before the folder existed don't have it, and
+`sandbox-attach` says to restart them. `SANDBOX_TOOLS_DIR=/path` moves the
+folder; set it for `sandbox-game` and `sandbox-attach` alike.
+
+### Anything else
+
 ```sh
 sandbox-attach --list                       # what is running
-# Replace witcher3 below with the name shown by --list.
-
-# get the program in — the capture dir IS $HOME inside, so no restart is needed
-cp -r ~/Downloads/CheatEngine ~/game-sandboxes/witcher3/home/
-
-sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/CheatEngine/cheatengine-x86_64.exe
+sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/regedit-fix.exe
+sandbox-attach --shell                      # a shell inside, to look around
 ```
 
 | Option | |
 |---|---|
 | `--list` | the running sandboxes: name, pid, and whether Proton is in play |
-| `--name NAME` | which one to attach to; optional when only one is running |
+| `--name NAME` | which one to attach to; without it, the only one running, or a menu of them |
 | `--shell` | an interactive shell inside, to look around |
 | `--exec CMD...` | run a native Linux command inside instead of a Windows one |
 
-Paths under `~/game-sandboxes/<name>/home/` are translated to their location
-inside, so you can paste the host path you just copied to.
+Host paths under `~/game-sandboxes/<name>/home/` and the tools folder are
+translated to where they appear inside (`$HOME` and `/tools`), so you can paste
+the host path. The capture home is live: anything copied into it shows up in
+the running game at once.
 
 Windows programs are started with Proton's own `wine` binary against the live
 prefix, deliberately **not** with `proton run` — that verb re-enters prefix
@@ -276,10 +306,8 @@ practice it exits silently without starting anything.
 The attached program is as confined as the game: it joins the sandbox's network
 namespace too, so it has loopback and nothing else.
 
-Two caveats. Install Cheat Engine into the prefix while the game is *not*
-running (a normal `sandbox-game --proton <gamedir> /game/setup.exe`), or use a
-portable build copied in as above. And CE's kernel-mode features — DBVM, the
-driver — do not work under Wine; scanning, pointer maps and speedhack do.
+CE's kernel-mode features — DBVM, the driver — do not work under Wine;
+scanning, pointer maps and speedhack do.
 
 On a distribution with the Yama LSM set to `ptrace_scope=1`, a sibling process
 may not ptrace the game, which is how Wine reads its memory. Check with
