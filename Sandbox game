@@ -129,9 +129,11 @@ if [ -n "$APPDIR" ]; then
     RO=( --ro "$NW_DIR" /nwjs )
     # Inside the sandbox: rebuild the runtime dir with nw renamed to the game,
     # then exec it against the app. $1=name $2=app-path
-    # --no-sandbox: Chromium builds its own sandbox from user namespaces, which
-    # sandbox-game switches off, and without them it dies looking for a setuid
-    # helper instead. The sandbox around it is the one that counts here.
+    # --no-sandbox costs nothing measurable: NW.js 0.110 was checked running
+    # without it, and none of its processes carried a seccomp filter beyond
+    # sandbox-game's own. Chromium's sandbox needs the user namespaces that
+    # sandbox-game switches off, and a Node-enabled page cannot be sandboxed
+    # anyway. Passed so that no NW.js build goes looking for a setuid helper.
     CMD=( sh -c '
         set -e
         d=/tmp/nwrun; mkdir -p "$d"

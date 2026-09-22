@@ -394,9 +394,12 @@ systemctl --user kill sandbox-game-<name>-<pid>.scope
 `sandbox-attach` puts the program it brings in under the same filter, and into
 the same scope when there is one.
 
-RPG Maker MV/MZ runs with Chromium's own sandbox switched off (`--no-sandbox`):
-it is built on the user namespaces this one forbids, and without them NW.js dies
-looking for a setuid helper. The sandbox around it is the one that matters here.
+RPG Maker MV/MZ runs with Chromium's own sandbox switched off (`--no-sandbox`).
+It gives up nothing: Chromium builds that sandbox from the user namespaces
+forbidden here, and a page with Node.js in it could not be sandboxed anyway,
+since it can open files and start programs. NW.js 0.110 runs the same without
+the flag -- none of its processes carry a seccomp filter beyond this one -- so
+it is passed only so that no build goes looking for a setuid helper.
 
 ## Preferences file format
 
