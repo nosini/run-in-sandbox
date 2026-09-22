@@ -80,6 +80,23 @@ class SecurityTests(unittest.TestCase):
                                 "--env", "EXPLICIT=yes")
         self.assertEqual(result.returncode, 0)
 
+    def test_command_reaches_the_game_as_written(self):
+        # systemd-run expands ${VAR} in its command line unless told not to,
+        # which blanked `b=${f##*/}` in the NW.js launch script.
+        # Only systemd-run does that, and it is only in the way when the
+        # launcher can reach the user manager -- through the real runtime dir,
+        # not the private one the other tests use. Without it this would pass
+        # having tested nothing, so skip instead.
+        if "XDG_RUNTIME_DIR" not in os.environ:
+            self.skipTest("no XDG_RUNTIME_DIR, so no systemd user manager")
+        self.env["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
+        literal = "${f##*/} ${HOME} ${REVIEW_SECRET+x}"
+        result = self.cli("--headless", self.game, "/bin/sh", "-c",
+                          'printf %s "$0"', literal)
+        if "no systemd user manager" in result.stderr:
+            self.skipTest("systemd user manager unreachable; scope not used")
+        self.assertEqual(result.stdout, literal)
+
     def test_home_devices_network_and_overlay_are_isolated(self):
         (self.home / "host-secret").write_text("private")
         (self.game / "original").write_text("original")

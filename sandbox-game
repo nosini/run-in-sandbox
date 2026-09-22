@@ -497,7 +497,14 @@ if command -v systemd-run >/dev/null \
    && systemd-run --user --scope --quiet --collect -- true 2>/dev/null; then
     SCOPE=( systemd-run --user --scope --quiet --collect
             --unit "sandbox-game-$NAME-$$"
-            -p MemoryMax=80% -p TasksMax=4096 -- )
+            -p MemoryMax=80% -p TasksMax=4096 )
+    # systemd-run 254+ expands ${VAR} in the command it runs, as unit files
+    # do, and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch
+    # script arrived as `b=`. The command line is ours, not a unit's; hand it
+    # over as written. Older versions neither expand nor know the switch.
+    systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
+        && SCOPE+=( --expand-environment=no )
+    SCOPE+=( -- )
 else
     echo "warning: no systemd user manager; running without memory or task limits" >&2
 fi
