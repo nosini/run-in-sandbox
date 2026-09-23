@@ -463,13 +463,12 @@ when launching from the file manager.
 
 ## Known rough edges
 
-**RPG Maker MV/MZ uses private Xwayland by default.** Not a limitation of NW.js, which runs
-on Wayland fine outside the sandbox. Chromium's Wayland backend segfaults on
-startup with no D-Bus session bus, reproducibly, while its X11 backend does not
-care. Handing a game the session bus would open the keyring, the portals and
-gvfs to it, which is most of what this exists to prevent. A private empty
-`dbus-daemon --session` per launch does fix it and exposes nothing; it is not
-implemented yet.
+**RPG Maker MV/MZ on native Wayland runs without a D-Bus session bus.** The
+sandbox never provides one: it would open the keyring, the portals and gvfs to
+the game. NW.js 0.110 and 0.116 both run on Wayland without it, but one game
+(unrecorded) was once seen to segfault at startup on Wayland for want of a bus,
+while X11 was fine. If a game does that, set its video backend back to private
+Xwayland.
 
 **MangoHud is off for RPG Maker MV/MZ.** Its GL shim is `LD_PRELOAD`ed into
 every child, and Chromium spawns a zygote and its own renderer processes — the

@@ -92,7 +92,7 @@ pick() {                                       # $1 = dir to strip, $@ = paths
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
-RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_WAYLAND=1; ALLOW_MANGOHUD=1
+RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_MANGOHUD=1
 
 # ---- figure out what was selected -----------------------------------------
 # Shared with the preferences dialog, so both agree on which game this is.
@@ -101,14 +101,7 @@ APPDIR="$R_APPDIR"
 
 if [ -n "$APPDIR" ]; then
     # ----- RPG Maker / NW.js -----
-    # NW.js runs on Wayland perfectly well outside this sandbox. What it cannot
-    # do is run without a D-Bus session bus: Chromium's wayland backend segfaults
-    # on startup when there is none, reproducibly, while its x11 backend does not
-    # care. Handing a game the session bus would open the keyring, the portals
-    # and gvfs to it, which is most of what this sandbox exists to prevent, so
-    # the trade is x11 instead. See --ozone-platform=x11 below.
-    ALLOW_WAYLAND=0
-    # MangoHud is out for the same practical reason: its GL shim is LD_PRELOADed
+    # MangoHud is out for NW.js: its GL shim is LD_PRELOADed
     # into every child, and Chromium spawns a zygote and its own sandboxed
     # renderers. The window then never comes up and the process hangs until it
     # is killed. An FPS overlay on a 2D RPG Maker game is no loss.
@@ -128,7 +121,8 @@ if [ -n "$APPDIR" ]; then
     NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
     RO=( --ro "$NW_DIR" /nwjs )
     # Inside the sandbox: rebuild the runtime dir with nw renamed to the game,
-    # then exec it against the app. $1=name $2=app-path
+    # then exec it against the app. $1=name $2=app-path $3=ozone platform,
+    # appended below once the display preferences are known.
     # --no-sandbox costs nothing measurable: NW.js 0.110 was checked running
     # without it, and none of its processes carried a seccomp filter beyond
     # sandbox-game's own. Chromium's sandbox needs the user namespaces that
@@ -139,7 +133,7 @@ if [ -n "$APPDIR" ]; then
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
         for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
-        exec "$d/$1" "$2" --ozone-platform=x11 --no-sandbox   # x11: see above
+        exec "$d/$1" "$2" --ozone-platform="$3" --no-sandbox
     ' _ "$NW_NAME" "$APP_IN" )
 else
     # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
@@ -188,13 +182,23 @@ NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
 FLAG=()
 HOST_X11="$(cfg_get host_x11 0)"
 [ "$HOST_X11" = 1 ] && FLAG+=( --host-x11 )
-[ "$HOST_X11" != 1 ] && [ "$ALLOW_WAYLAND" = 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && FLAG+=( --wayland )
+WL=0
+[ "$HOST_X11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
+[ "$WL" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
-if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] ||
-    [ "$ALLOW_WAYLAND" = 0 ] || [ "$(cfg_get wayland 0)" != 1 ]; }; then
+if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] || [ "$WL" = 0 ]; }; then
     # gamescope_args is hand-edited only; empty means gamescope's own defaults.
     GA="$(cfg_get gamescope_args "")"
     if [ -n "$GA" ]; then FLAG+=( "--gamescope=$GA" ); else FLAG+=( --gamescope ); fi
+fi
+# NW.js picks its backend by flag, not from the environment, so tell it what
+# was chosen: native Wayland (the host's, or gamescope's exposed socket), else
+# X11 (gamescope's private Xwayland, or the host X server).
+# There is no session bus in the sandbox. A Wayland crash for want of one was
+# seen once (2026-08, game unrecorded) but not with 0.110 or 0.116 since; if a
+# game does crash on Wayland, switching it back to Xwayland is the way out.
+if [ -n "$APPDIR" ]; then
+    if [ "$WL" = 1 ]; then CMD+=( wayland ); else CMD+=( x11 ); fi
 fi
 # env=K=V K=V ... -- a game launched from the file manager inherits its
 # environment, not a shell's, so anything the game needs has to be recorded.

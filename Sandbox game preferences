@@ -87,18 +87,11 @@ mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
 # combo would silently reopen on something else and quietly change the setting.
 mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
 
-# NW.js needs Xwayland because its Wayland backend expects a D-Bus session
-# bus. Offer private Xwayland or explicit host X, but never native Wayland.
-# MangoHud's preload shim hangs Chromium's zygote, so that choice stays off.
+mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W" "$V_HOST")
+# MangoHud's preload shim hangs Chromium's zygote, so for NW.js it stays off.
 M_NA="Off (forced: hangs NW.js)"
-if [ -n "$R_APPDIR" ]; then
-    [ "$V_CUR" = "$V_HOST" ] || V_CUR="$V_X"
-    mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_HOST")
-    M_ALL=( "$M_NA" )
-else
-    mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W" "$V_HOST")
-    mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON")
-fi
+if [ -n "$R_APPDIR" ]; then M_ALL=( "$M_NA" )
+else mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON"); fi
 
 G_OFF="Automatic (required for private Xwayland)"; G_ON="On"
 [ "$GS_NOW" = 1 ] && G_CUR="$G_ON" || G_CUR="$G_OFF"
@@ -147,7 +140,7 @@ else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BAS
 # inherited default into a game that then stops following it.
 kept() { file_get "$TARGET" "$1" || printf '%s\n' "$2"; }
 
-# The forced entries carry no choice, so keep whatever this file already said.
+# The forced entry carries no choice, so keep whatever this file already said.
 if [ "$F_VIDEO" = "$V_W" ]; then W=1
 else W=0; fi
 if [ "$F_MHUD" = "$M_NA" ]; then M="$(kept mangohud 0)"
