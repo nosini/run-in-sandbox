@@ -146,6 +146,10 @@ by version; `NWJS_DIR=/path` overrides. Downloading a build from
 as does `npm install -g nw`, which lands one at
 `.../node_modules/nw/nwjs-*-linux-x64` — the search finds that as-is.
 
+RPG Maker ships `package.json` with an empty `"name"`, which NW.js refuses to
+start with. The launcher fills it in with the game's folder name; the edited
+copy is a captured write in `rw/`, and a name that is already set is left alone.
+
 #### Windows games — Proton
 
 Any Proton install, meaning any directory holding an executable `proton`

@@ -120,9 +120,32 @@ if [ -n "$APPDIR" ]; then
         || die "NW.js runtime not found under ~/.config/nvm (or set NWJS_DIR=...)."
     NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
     RO=( --ro "$NW_DIR" /nwjs )
-    # Inside the sandbox: rebuild the runtime dir with nw renamed to the game,
-    # then exec it against the app. $1=name $2=app-path $3=ozone platform,
-    # appended below once the display preferences are known.
+    # RPG Maker leaves "name" empty in package.json, and NW.js will not start
+    # without one: the profile directory (localStorage, which is where some
+    # games keep their saves) is named after it. Fill in NW_NAME, which is the
+    # same on every launch. It runs inside the sandbox, so the edited copy
+    # lands in the capture's rw/ and the install stays untouched. Only an
+    # empty or missing top-level name is replaced; a file that does not parse
+    # is left for NW.js to complain about.
+    read -r -d '' NW_FIX_NAME <<'EOF' || true
+import json, os, sys
+path, name = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8-sig") as f:
+        pkg = json.load(f)
+except (OSError, ValueError):
+    sys.exit()
+if isinstance(pkg, dict) and not str(pkg.get("name") or "").strip():
+    pkg["name"] = name
+    # Replaced rather than rewritten: a read-only package.json is common.
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(pkg, f, indent=2, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+EOF
+    # Inside the sandbox: name the app, rebuild the runtime dir with nw
+    # renamed to the game, then exec it against the app. $1=name $2=app-path
+    # $3=the fix above $4=ozone platform, appended below once the display
+    # preferences are known.
     # --no-sandbox costs nothing measurable: NW.js 0.110 was checked running
     # without it, and none of its processes carried a seccomp filter beyond
     # sandbox-game's own. Chromium's sandbox needs the user namespaces that
@@ -130,11 +153,12 @@ if [ -n "$APPDIR" ]; then
     # anyway. Passed so that no NW.js build goes looking for a setuid helper.
     CMD=( sh -c '
         set -e
+        [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" || true
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
         for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
-        exec "$d/$1" "$2" --ozone-platform="$3" --no-sandbox
-    ' _ "$NW_NAME" "$APP_IN" )
+        exec "$d/$1" "$2" --ozone-platform="$4" --no-sandbox
+    ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_NAME" )
 else
     # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
     # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
