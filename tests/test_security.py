@@ -202,6 +202,42 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertIn("STEAM_COMPAT_CONFIG", args)
 
+    def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
+        # "game" and "game-2": a prefix match would take the wrong one down.
+        import time
+        def launch(name):
+            proc = subprocess.Popen(
+                [str(ROOT / "sandbox-game"), "--headless", "--name", name,
+                 self.game, "/bin/sh", "-c", "touch /tmp/up; exec sleep 60"],
+                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(proc.stderr.close)
+            self.addCleanup(proc.kill)
+            # Up once its bwrap is: that is what --stop goes looking for.
+            home = self.home / "game-sandboxes" / name / "home"
+            for _ in range(100):
+                if subprocess.run(["pgrep", "-f", f"bwrap .*--bind {home} "],
+                                  capture_output=True).stdout:
+                    return proc
+                time.sleep(0.1)
+            self.fail(f"{name} did not start: {proc.stderr.read()}")
+        first = launch("game")
+        second = launch("game-2")
+        time.sleep(0.3)
+
+        missing = self.cli("--stop", "no-such-game", check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("no running sandbox named 'no-such-game'", missing.stderr)
+
+        self.assertEqual(self.cli("--stop", "game").stdout.strip(), "stopped game")
+        first.wait(timeout=10)
+        self.assertEqual(first.returncode, 0, first.stderr.read())
+        self.assertFalse((self.home / "game-sandboxes" / "game" / ".stopped").exists())
+        self.assertIsNone(second.poll(), "stopping 'game' also ended 'game-2'")
+
+        self.assertEqual(self.cli("--stop-all").stdout.strip(), "stopped game-2")
+        second.wait(timeout=10)
+        self.assertEqual(second.returncode, 0)
+
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""
         bindir = self.base / "bin"

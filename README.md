@@ -238,6 +238,7 @@ launcher entry rather than one per flag combination.
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
+sandbox-game --stop NAME | --stop-all
 ```
 
 `CMD` refers to the game at `/game`, not at its path on disk:
@@ -264,6 +265,8 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
+| `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
+| `--stop-all` | the same, for every running sandbox |
 
 ## Attaching to a running game
 
@@ -418,8 +421,11 @@ gives you a handle on it:
 
 ```sh
 systemctl --user list-units 'sandbox-game-*'
-systemctl --user kill sandbox-game-<name>-<pid>.scope
+systemctl --user status sandbox-game-<name>-<pid>.scope   # memory and task use
 ```
+
+To end a sandbox, `sandbox-game --stop NAME` is simpler and works without
+systemd too.
 
 `sandbox-attach` puts the program it brings in under the same filter, and into
 the same scope when there is one.

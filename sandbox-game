@@ -62,6 +62,12 @@
 #   sockets -- enough games refuse to start without a sound device that
 #   withholding it broke more than it protected.
 #
+# sandbox-game --stop NAME | --stop-all
+#   End a running sandbox outright: the game, Wine and anything sandbox-attach
+#   started in there, all at once. For a game that hangs, or will not let go
+#   of the screen. Names are as `sandbox-attach --list` shows them. The launch
+#   it ends exits 0, so the file manager does not report it as a crash.
+#
 # CMD references the game at /game, e.g.:
 #   sandbox-game /mnt/General-HDD/Games/games/DDLC  /game/DDLC.sh
 #   sandbox-game --proton /mnt/General-HDD/Games/games/Witcher3 /game/witcher3.exe
@@ -114,6 +120,57 @@ list_protons() {                      # every install found, newest first
     done < <(proton_roots) | sort -rn -k1,1 | cut -f2 | awk '!seen[$0]++'
 }
 
+# ---- stop ------------------------------------------------------------------
+# A sandbox's outer bwrap runs in our own namespaces and is the parent of its
+# pid 1. Killing it lets --die-with-parent take pid 1 down, and the kernel
+# then kills everything else in that pid namespace -- the game, wineserver,
+# gamescope and anything sandbox-attach put in there. The capture's home is
+# how a sandbox is recognised: `--bind ~/game-sandboxes/NAME/home $HOME`.
+outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
+    local p self_ns args i name
+    self_ns="$(readlink /proc/self/ns/user)"
+    for p in /proc/[0-9]*; do
+        p="${p##*/}"
+        [ "$(readlink "/proc/$p/ns/user" 2>/dev/null)" = "$self_ns" ] || continue
+        # Grouped so a process exiting mid-scan does not print anything.
+        { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
+        [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
+        name=""
+        for ((i = 1; i < ${#args[@]}; i++)); do
+            [ "${args[i-1]}" = --bind ] || continue
+            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
+            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
+        done
+        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        [ -z "$1" ] || [ "$name" = "$1" ] || continue
+        printf '%s %s\n' "$p" "$name"
+    done
+}
+
+stop_sandboxes() {                    # $1 = NAME, empty for all
+    local found pids=() names=() p n
+    found="$(outer_bwraps "$1")"
+    [ -n "$found" ] || {
+        [ -n "$1" ] && echo "no running sandbox named '$1'" >&2 \
+                    || echo "no sandboxes running" >&2
+        return 1; }
+    while read -r p n; do pids+=( "$p" ); names+=( "$n" ); done <<<"$found"
+    # Tells the launching sandbox-game this was asked for, so it exits 0 and
+    # the file manager does not report a failure. The capture dir itself is
+    # not mounted in the sandbox, so the game cannot fake or clear this.
+    for n in "${names[@]}"; do : > "$HOME/game-sandboxes/$n/.stopped"; done
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    # Games get no say in this -- a hung one would not answer anyway -- but
+    # give bwrap a moment to go on TERM before insisting.
+    for _ in $(seq 50); do
+        for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && break; p=""; done
+        [ -n "$p" ] || break
+        sleep 0.1
+    done
+    kill -KILL "${pids[@]}" 2>/dev/null || true
+    printf 'stopped %s\n' "${names[@]}" | sort -u
+}
+
 # ---- args ------------------------------------------------------------------
 # Shared by both spellings of --env, so "--env FOO" is rejected as loudly as
 # "--env=FOO" instead of quietly setting FOO to itself.
@@ -137,6 +194,9 @@ while [ "$#" -gt 0 ]; do
         --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
         --list-proton) list_protons; exit 0 ;;
+        --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
+        --stop=*)    stop_sandboxes "${1#--stop=}"; exit ;;
+        --stop-all)  stop_sandboxes ""; exit ;;
         --name)      NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
@@ -179,6 +239,7 @@ fi
 
 CAP="$HOME/game-sandboxes/$NAME"
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
+rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
 
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 WL="${WAYLAND_DISPLAY:-wayland-0}"
@@ -549,6 +610,8 @@ BWRAP=( "${SCOPE[@]}" bwrap
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
-"${BWRAP[@]}" "$@"; rc=$?
+"${BWRAP[@]}" "$@" && rc=0 || rc=$?
 cleanup; trap - EXIT
+# Ended by --stop: that was asked for, not a crash.
+if [ -e "$CAP/.stopped" ]; then rm -f "$CAP/.stopped"; rc=0; fi
 exit "$rc"
