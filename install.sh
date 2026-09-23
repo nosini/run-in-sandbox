@@ -86,6 +86,8 @@ command -v gamescope >/dev/null \
     || warn "gamescope not found -- the default display mode needs it (--wayland does not)"
 command -v systemd-run >/dev/null \
     || warn "systemd-run not found -- games will run without memory and task limits"
+command -v pasta >/dev/null \
+    || warn "pasta not found -- games can only be offered internet access with it (package passt)"
 command -v zenity >/dev/null \
     || warn "zenity not found -- the Nautilus scripts need it for their dialogs"
 case ":$PATH:" in

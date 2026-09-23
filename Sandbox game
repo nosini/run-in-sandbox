@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Nautilus script: right-click a game and run it sandboxed (no net, home hidden,
-# writes captured under ~/game-sandboxes/<name>/). Auto-detects:
+# Nautilus script: right-click a game and run it sandboxed (no net unless the
+# preferences allow the internet, home hidden, writes captured under
+# ~/game-sandboxes/<name>/). Auto-detects:
 #   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
 #   * Ren'Py / native    -> right-click the game folder or its .sh launcher
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
@@ -210,6 +211,7 @@ WL=0
 [ "$HOST_X11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
 [ "$WL" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
+[ "$(cfg_get net 0)" = 1 ] && FLAG+=( --net )
 if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] || [ "$WL" = 0 ]; }; then
     # gamescope_args is hand-edited only; empty means gamescope's own defaults.
     GA="$(cfg_get gamescope_args "")"

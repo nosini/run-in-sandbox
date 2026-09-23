@@ -182,13 +182,13 @@ class SecurityTests(unittest.TestCase):
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join([
             "Host X11 (allows access to other X apps)", "Off", "On",
-            "Newest installed (auto)", "This game only"])
+            "Newest installed (auto)", "Off", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
                                 env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         name = self.cli("--print-name", self.game).stdout.strip()
         settings = (self.home / ".config" / "sandbox-game" / "games" / name).read_text()
-        for entry in ("host_x11=1", "wayland=0", "gamescope=0"):
+        for entry in ("host_x11=1", "wayland=0", "gamescope=0", "net=0"):
             self.assertIn(entry, settings.splitlines())
 
     def test_proton_wayland_does_not_fall_back_to_host_x(self):
@@ -227,6 +227,73 @@ class SecurityTests(unittest.TestCase):
         (self.home / "game-sandboxes" / "played" / "home" / "save").write_text("x")
         seen = self.cli("--headless", played, "/bin/cat", "/etc/machine-id").stdout.strip()
         self.assertEqual(seen, read("/etc/machine-id"))
+
+    def test_network_reaches_the_internet_and_nothing_else(self):
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import socket
+        ip = shutil.which("ip") or "/usr/sbin/ip"
+        addrs = json.loads(subprocess.run([ip, "-j", "addr", "show", "scope", "global"],
+                                          capture_output=True, text=True, check=True).stdout)
+        own = [a["local"] for link in addrs for a in link.get("addr_info", [])
+               if a.get("family") == "inet"]
+        if not own:
+            self.skipTest("no IPv4 address on this machine")
+        routes = json.loads(subprocess.run([ip, "-j", "-4", "route", "show", "default"],
+                                           capture_output=True, text=True).stdout or "[]")
+        gateway = next((r["gateway"] for r in routes if "gateway" in r), None)
+        if gateway is None:
+            self.skipTest("no IPv4 default gateway to stand in for the LAN")
+        # Something listening on this machine, as a local service would be.
+        listener = socket.socket()
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+        try:
+            socket.create_connection(("codeberg.org", 443), timeout=5).close()
+            online = True
+        except OSError:
+            online = False
+        (self.game / "probe.py").write_text(f"""
+import errno, json, shutil, socket, subprocess
+def tcp(host, port):
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        return "open"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e))
+def https():
+    import urllib.request
+    try:
+        return urllib.request.urlopen("https://codeberg.org", timeout=10).status
+    except OSError as e:
+        return str(e)
+ip = shutil.which("ip") or "/usr/sbin/ip"
+print(json.dumps({{
+    "resolv": open("/etc/resolv.conf").read(),
+    "own": tcp({own[0]!r}, {port}),
+    "gateway": tcp({gateway!r}, {port}),
+    "internet": tcp("codeberg.org", 443) if {online} else "skipped",
+    "https": https() if {online} else "skipped",
+    "unlock": subprocess.run([ip, "rule", "del", "priority", "100"],
+                             capture_output=True).returncode,
+}}))
+""")
+        result = self.cli("--headless", "--net", self.game, "python3", "/game/probe.py",
+                          check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(result.stdout)
+        self.assertIn("nameserver 169.254.1.1", seen["resolv"])
+        self.assertNotEqual(seen["own"], "open", "reached a service on this machine")
+        # EACCES is the rule refusing it; ECONNREFUSED or a timeout would only
+        # mean nothing answered there, which proves nothing about the LAN.
+        self.assertEqual(seen["gateway"], "EACCES", "the LAN was not refused")
+        self.assertNotEqual(seen["unlock"], 0, "the game could remove the LAN block")
+        if online:
+            self.assertEqual(seen["internet"], "open")
+            # Verified, so the CA certificates made it in as well.
+            self.assertEqual(seen["https"], 200)
 
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.

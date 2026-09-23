@@ -6,7 +6,9 @@ Games from itch.io, a jam page, or a random archive are unpacked and run as your
 user with your whole home directory in reach. This puts one between them and
 you:
 
-- **No network.** `--unshare-all` takes the net namespace with it.
+- **No network.** `--unshare-all` takes the net namespace with it. A game that
+  needs the internet can be given it, and only it: never the LAN, never a
+  service on this machine, never an incoming connection.
 - **No `$HOME`.** The real one is not bound at all; a fresh, empty one is
   redirected into the capture directory.
 - **No writes to the install.** The game directory is presented at `/game` as an
@@ -126,6 +128,7 @@ working directory.
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
 | memory and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
+| `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
 distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
@@ -227,8 +230,8 @@ with obvious junk (installers, crash handlers, redistributables) filtered out.
 Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
 the last 80 lines in a window.
 
-**Sandbox game preferences** — the video backend, MangoHud, gamescope, and
-the Proton version, saved per game or as the library-wide default. Turning gamescope
+**Sandbox game preferences** — the video backend, MangoHud, gamescope, the
+Proton version and internet access, saved per game or as the library-wide default. Turning gamescope
 on opens a second dialog for resolution and fullscreen. This is why there is one
 launcher entry rather than one per flag combination.
 
@@ -255,6 +258,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 |---|---|
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
+| `--net` | internet access, and only that; see [Network](#network) |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
@@ -390,6 +394,35 @@ keys read as empty. A game that had already run before this existed keeps
 seeing the real machine-id, in case it keyed its saves to it; delete its
 `machine-id` file to give it a fresh one.
 
+## Network
+
+Off by default. `--net`, or **Network** in the preferences dialog, gives a game
+the internet and nothing else:
+
+- It keeps its own network namespace. `pasta` connects that to the internet
+  from outside, through ordinary sockets of yours; no port on this machine is
+  forwarded in, and nothing comes in from outside.
+- Routing rules refuse IPv4's private, shared and link-local space, IPv6's
+  link-local space, every address this machine has, and the whole network
+  behind each network card, IPv6 prefixes included. So neither the LAN, the
+  router's admin page nor a service listening on this machine is reachable.
+  The game cannot lift them: they sit in a namespace it has no privileges
+  over. Tunnels (a VPN, a proxy in tun mode such as mihomo) are left open
+  beyond this machine's own address on them, since what lies behind one is
+  the internet, and a fake-IP proxy hands out private IPv6 addresses for
+  ordinary sites.
+- The CA certificates are mounted too, wherever the distribution keeps them,
+  so HTTPS can be verified.
+- DNS goes to `169.254.1.1`, which `pasta` forwards to your usual resolver —
+  whether that is `127.0.0.53` or the router.
+- The sandbox waits for all of that before the game starts, and if any step
+  fails the game does not start at all.
+
+What it does not do: stop the game talking to whatever it likes on the
+internet, or sending off what it can read — its own capture folder and the
+hardware details listed above, less the identifiers already hidden. Give it to
+games that need it, not by default.
+
 ## Kernel attack surface and resource limits
 
 **No nested user namespaces.** `bwrap --disable-userns` stops the game from
@@ -459,6 +492,7 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 ```ini
 wayland=0|1
 mangohud=0|1
+net=0|1
 gamescope=0|1
 host_x11=0|1
 gamescope_args=-f -W 2560 -H 1440

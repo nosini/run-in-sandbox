@@ -2,7 +2,7 @@
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
 #              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
-#     - no network (--unshare-all includes the net namespace)
+#     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
 #       memory/task limits via a systemd scope
 #     - real $HOME absent; a fresh $HOME is redirected to the capture dir
@@ -24,6 +24,9 @@
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
 #               builds without that driver need --gamescope for Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
+#   --net       give the game the internet, and only that: no LAN, nothing
+#               listening on this machine, no incoming connections. Through
+#               pasta (package passt); see "network" further down.
 #   --env K=V   set a variable inside the sandbox; repeatable, and applied last
 #               so it wins over the clean environment and display defaults
 #               (e.g. --env WAYLANDDRV_PRIMARY_MONITOR=HDMI-1).
@@ -182,13 +185,14 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --host-x11)  HOST_X11=1; shift ;;
         --headless)  HEADLESS=1; shift ;;
+        --net)       NET=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
         --gamescope) GS=1; shift ;;
         --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
@@ -494,7 +498,7 @@ AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
 # ---- overlay for the game's own install dir --------------------------------
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
 # back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
-OVERLAY_ARGS=(); CLEANUP=""
+OVERLAY_ARGS=(); CLEANUP=""; PASTA_PID=""
 if bwrap --help 2>&1 | grep -q -- --overlay; then
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
 else
@@ -521,6 +525,12 @@ cleanup() {
     [ -n "$CLEANUP" ] && { fusermount3 -u "$CLEANUP" 2>/dev/null \
               || fusermount -u "$CLEANUP" 2>/dev/null || true; }
     unwork
+    # --net: pasta outlives the game unless told otherwise; see "network".
+    if [ -n "$PASTA_PID" ]; then
+        local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"
+        [[ "$p" =~ ^[0-9]+$ ]] && kill "$p" 2>/dev/null
+        rm -f "$PASTA_PID"
+    fi
     return 0
 }
 trap cleanup EXIT
@@ -581,6 +591,111 @@ for f in /etc/fstab /etc/crypttab /etc/hostid \
 done
 # The SSH host keys identify the machine as surely as a serial number does.
 [ ! -d /etc/ssh ] || ID_ARGS+=( --tmpfs /etc/ssh --remount-ro /etc/ssh )
+
+# ---- network ---------------------------------------------------------------
+# Off unless --net. With it, the sandbox keeps its own network namespace and
+# pasta connects that to the internet from outside, through ordinary sockets
+# of ours: nothing is forwarded in, and nothing on this machine is reachable
+# through it. Routing rules then refuse the LAN and every network this machine
+# has an address in. The game cannot undo them: that takes CAP_NET_ADMIN over
+# a namespace owned by the outer user namespace, and the game only ever runs
+# in the nested one --disable-userns creates.
+#
+# bwrap is told to wait (--block-fd) until all of that is in place, and tells
+# us (--info-fd) which process to attach to. The helper finds the user
+# namespace that owns the network namespace with NS_GET_USERNS: by the time it
+# looks, that process has already moved into the nested one.
+NET_ARGS=()
+DNS_ADDR=169.254.1.1                  # pasta forwards this to the host's resolver
+if [ "$NET" = 1 ]; then
+    command -v pasta >/dev/null || {
+        echo "--net needs pasta (openSUSE: zypper in passt)" >&2; exit 1; }
+    # The host's resolver is often 127.0.0.53 or the router, and neither is
+    # reachable from in there. Point the game at pasta's forwarder instead --
+    # wherever /etc/resolv.conf really lives, which is often under /run.
+    exec 6<<<"nameserver $DNS_ADDR"
+    PASTA_PID="$(mktemp)"            # cleanup() ends pasta with the game
+    NET_ARGS=( --ro-bind-data 6 "$(realpath -m /etc/resolv.conf)"
+               --info-fd 10 --block-fd 11 )
+    # The CA certificates, for anything that checks who it is talking to. Some
+    # distributions keep them outside /usr and /etc, with only links in /etc
+    # (openSUSE: /var/lib/ca-certificates); bring in whatever those point at.
+    CA_SEEN=()
+    for f in /etc/ssl/certs /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem \
+             /etc/pki/tls/certs /etc/pki/tls/cert.pem /etc/pki/ca-trust; do
+        [ -e "$f" ] || continue
+        f="$(realpath "$f")"
+        case "$f" in /usr/*|/etc/*) continue ;; esac
+        [ -d /var/lib/ca-certificates ] && [[ "$f" == /var/lib/ca-certificates/* ]] \
+            && f=/var/lib/ca-certificates
+        [[ " ${CA_SEEN[*]-} " == *" $f "* ]] && continue
+        CA_SEEN+=( "$f" ); NET_ARGS+=( --ro-bind "$f" "$f" )
+    done
+fi
+read -r -d '' NET_HELPER <<'EOF' || true
+import ctypes, fcntl, ipaddress, json, os, shutil, subprocess, sys
+NS_GET_USERNS = 0xB701
+CLONE_NEWUSER, CLONE_NEWNET = 0x10000000, 0x40000000
+pid, dns, pidfile = sys.argv[1:]
+ip = shutil.which("ip") or next(p for p in ("/usr/sbin/ip", "/sbin/ip")
+                                if os.access(p, os.X_OK))
+# Private, shared and link-local space; every address this machine has; and
+# the whole network behind each real network card -- which covers a LAN on
+# public addresses too, and IPv6's, private (fc00::/7) prefixes included. Only
+# the own address on a tunnel (a VPN, a proxy in tun mode): what lies behind
+# one is the internet, and a fake-IP proxy hands out its range as stand-ins for
+# ordinary sites -- in fc00::/7 itself, for mihomo, which is why that range is
+# not refused wholesale the way IPv4's private space is.
+block = {4: ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16",
+             "172.16.0.0/12", "192.168.0.0/16"],
+         6: ["fe80::/10"]}
+has_v6 = False
+out = subprocess.run([ip, "-j", "addr", "show", "scope", "global"],
+                     capture_output=True, text=True, check=True).stdout
+for link in json.loads(out):
+    for a in link.get("addr_info", []):
+        if not a.get("prefixlen"):
+            continue
+        own = ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}")
+        block[own.version].append(str(own.ip))
+        if link.get("link_type") == "ether":
+            block[own.version].append(str(own.network))
+        has_v6 = has_v6 or own.version == 6
+
+net_fd = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
+user_fd = fcntl.ioctl(net_fd, NS_GET_USERNS)
+libc = ctypes.CDLL(None, use_errno=True)
+def enter(*namespaces):
+    def go():
+        for fd, kind in namespaces:
+            if libc.setns(fd, kind) != 0:
+                raise OSError(ctypes.get_errno(), "setns")
+    return go
+
+# pasta starts out in that user namespace, where it may configure the network
+# namespace, but stays in our network namespace itself: its sockets there are
+# the game's way out. It cannot be handed the user namespace as an fd -- it
+# closes every inherited one first thing. Nor can it watch /proc/PID/ns to
+# notice the game is gone, not from in there; it reports its pid instead, and
+# sandbox-game ends it.
+subprocess.run(["pasta", "--quiet", "--config-net", "--netns-only",
+                "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
+                "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+                "--map-host-loopback", "none", "--map-guest-addr", "none",
+                "--dns-forward", dns] + ([] if has_v6 else ["-4"]),
+               check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
+               pass_fds=(user_fd,))
+for ver, nets in block.items():
+    if ver == 6 and not has_v6:
+        continue
+    # Rules, not routes: they are consulted before any route, so the on-link
+    # route pasta copies from the host cannot outrank them.
+    rules = [f"rule add priority 90 to {dns} lookup main"] if ver == 4 else []
+    rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
+    subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
+                   text=True, check=True, pass_fds=(user_fd, net_fd),
+                   preexec_fn=enter((user_fd, CLONE_NEWUSER), (net_fd, CLONE_NEWNET)))
+EOF
 
 # ---- seccomp ---------------------------------------------------------------
 # Compiled by sandbox-seccomp, which sits beside this script and says what it
@@ -651,6 +766,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${PROTON_ARGS[@]}"
     "${MKXP_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
+    "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above
     --chdir "$CHDIR"
 )
@@ -659,7 +775,33 @@ BWRAP=( "${SCOPE[@]}" bwrap
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
-"${BWRAP[@]}" "$@" && rc=0 || rc=$?
+if [ "$NET" = 0 ]; then
+    "${BWRAP[@]}" "$@" && rc=0 || rc=$?
+else
+    # FIFOs, opened in the same order on both ends: bwrap's info pipe first,
+    # then its go pipe. A byte down the go pipe lets the game start; bwrap
+    # would also carry on at end-of-file, so a failed setup kills it instead
+    # -- the sandbox's pid 1 itself, before the pipe closes: it only arms
+    # --die-with-parent after that read, so killing the outer bwrap alone
+    # would leave it to wake up and start the game without its network.
+    FIFOS="$(mktemp -d)"; mkfifo "$FIFOS/info" "$FIFOS/go"
+    "${BWRAP[@]}" "$@" 10>"$FIFOS/info" 11<"$FIFOS/go" &
+    BW=$!
+    exec 12<"$FIFOS/info" 13>"$FIFOS/go"
+    rm -rf "$FIFOS"
+    CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
+    exec 12<&-
+    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID"; then
+        printf x >&13
+    else
+        echo "could not set up the sandbox's network; not starting the game" >&2
+        [ -z "$CHILD" ] || kill -KILL "$CHILD" 2>/dev/null || true
+        pkill -KILL -P "$BW" 2>/dev/null || true
+        kill -KILL "$BW" 2>/dev/null || true
+    fi
+    exec 13>&-
+    wait "$BW" && rc=0 || rc=$?
+fi
 cleanup; trap - EXIT
 # Ended by --stop: that was asked for, not a crash.
 if [ -e "$CAP/.stopped" ]; then rm -f "$CAP/.stopped"; rc=0; fi
