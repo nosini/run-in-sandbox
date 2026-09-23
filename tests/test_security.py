@@ -295,6 +295,39 @@ print(json.dumps({{
             # Verified, so the CA certificates made it in as well.
             self.assertEqual(seen["https"], 200)
 
+    def test_network_helper_is_named_after_the_game_and_ends_with_it(self):
+        # Proxies that route by process (mihomo's PROCESS-NAME) go by the
+        # executable's file, so that is what has to carry the game's name.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import time
+        names = {"named-game-pasta", "named-game-pasta.avx2"}
+        def running():
+            found = []
+            for p in Path("/proc").glob("[0-9]*"):
+                try:
+                    exe = os.readlink(p / "exe")
+                except OSError:
+                    continue
+                if os.path.basename(exe) in names:
+                    found.append(exe)
+            return found
+        proc = subprocess.Popen([str(ROOT / "sandbox-game"), "--headless", "--net",
+                                 "--name", "named-game", self.game, "sleep", "60"],
+                                env=self.env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.kill)
+        for _ in range(100):
+            if running() or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertTrue(running(), f"no process runs from {names}: {proc.stderr.read() if proc.poll() is not None else ''}")
+        self.cli("--stop", "named-game")
+        proc.wait(timeout=10)
+        time.sleep(0.3)
+        self.assertEqual(running(), [], "pasta outlived the game")
+
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.
         import time

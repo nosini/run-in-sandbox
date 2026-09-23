@@ -418,6 +418,22 @@ the internet and nothing else:
 - The sandbox waits for all of that before the game starts, and if any step
   fails the game does not start at all.
 
+`pasta` runs from a copy named after the game — `<name>-pasta`, or
+`<name>-pasta.avx2` on CPUs that run its AVX2 build, which is most — kept in
+`$XDG_RUNTIME_DIR/sandbox-game/`. A proxy that routes by process can tell games
+apart by it; mihomo goes by the executable's file name, so for example:
+
+```yaml
+rules:
+  - PROCESS-NAME,some-game-pasta.avx2,DIRECT          # one game
+  - PROCESS-NAME-REGEX,-pasta(\.avx2)?$,SandboxProxy  # every other sandboxed game
+```
+
+`<name>` is the sandbox name, as `sandbox-attach --list` shows it. The copies
+are left in place between launches, so a rule never meets a running `pasta`
+whose file has gone (`... (deleted)`); they go at logout with the rest of the
+runtime directory.
+
 What it does not do: stop the game talking to whatever it likes on the
 internet, or sending off what it can read — its own capture folder and the
 hardware details listed above, less the identifiers already hidden. Give it to

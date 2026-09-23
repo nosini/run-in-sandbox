@@ -615,6 +615,25 @@ if [ "$NET" = 1 ]; then
     # wherever /etc/resolv.conf really lives, which is often under /run.
     exec 6<<<"nameserver $DNS_ADDR"
     PASTA_PID="$(mktemp)"            # cleanup() ends pasta with the game
+    # pasta runs from a copy named after the game, NAME-pasta, so that proxies
+    # which route by process (mihomo's PROCESS-NAME) can tell one game's
+    # traffic from another's, and from podman's own pasta. They go by the
+    # executable's file, /proc/PID/exe, so renaming the process would not do.
+    # pasta re-executes itself as "<own path>.avx2" where the CPU allows, so
+    # that build is copied alongside and is the name seen there. A copy is
+    # only ever replaced when pasta itself changed, and never removed: a
+    # running pasta whose file goes away shows up as "... (deleted)", and a
+    # rule matching the plain name would quietly stop applying to it.
+    PASTA_SRC="$(realpath "$(command -v pasta)")"
+    PASTA_BIN="$RT/sandbox-game/$NAME-pasta"
+    [ -d "$RT/sandbox-game" ] || mkdir -m 0700 "$RT/sandbox-game"
+    for suffix in "" .avx2; do
+        [ -f "$PASTA_SRC$suffix" ] || continue
+        cmp -s "$PASTA_SRC$suffix" "$PASTA_BIN$suffix" && continue
+        cp "$PASTA_SRC$suffix" "$PASTA_BIN$suffix.new"
+        chmod 0755 "$PASTA_BIN$suffix.new"
+        mv -f "$PASTA_BIN$suffix.new" "$PASTA_BIN$suffix"
+    done
     NET_ARGS=( --ro-bind-data 6 "$(realpath -m /etc/resolv.conf)"
                --info-fd 10 --block-fd 11 )
     # The CA certificates, for anything that checks who it is talking to. Some
@@ -636,7 +655,7 @@ read -r -d '' NET_HELPER <<'EOF' || true
 import ctypes, fcntl, ipaddress, json, os, shutil, subprocess, sys
 NS_GET_USERNS = 0xB701
 CLONE_NEWUSER, CLONE_NEWNET = 0x10000000, 0x40000000
-pid, dns, pidfile = sys.argv[1:]
+pid, dns, pidfile, pasta = sys.argv[1:]
 ip = shutil.which("ip") or next(p for p in ("/usr/sbin/ip", "/sbin/ip")
                                 if os.access(p, os.X_OK))
 # Private, shared and link-local space; every address this machine has; and
@@ -678,7 +697,7 @@ def enter(*namespaces):
 # closes every inherited one first thing. Nor can it watch /proc/PID/ns to
 # notice the game is gone, not from in there; it reports its pid instead, and
 # sandbox-game ends it.
-subprocess.run(["pasta", "--quiet", "--config-net", "--netns-only",
+subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
                 "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
                 "-t", "none", "-u", "none", "-T", "none", "-U", "none",
                 "--map-host-loopback", "none", "--map-guest-addr", "none",
@@ -791,7 +810,7 @@ else
     rm -rf "$FIFOS"
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
-    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID"; then
+    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN"; then
         printf x >&13
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
