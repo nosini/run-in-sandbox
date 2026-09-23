@@ -352,7 +352,8 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── home/       writes to $HOME — configs, saves, whatever it scatters
 ├── rw/         writes into the install directory at /game
 ├── compat/     --proton: the Wine prefix, under pfx/
-└── mkxp.json   --mkxp: the runtime config, yours to edit
+├── mkxp.json   --mkxp: the runtime config, yours to edit
+└── machine-id  the game's own stand-in for /etc/machine-id
 ```
 
 `mkxp.json` is generated from the runtime's own commented one on first launch
@@ -379,6 +380,15 @@ terminal devices are not exposed; controllers requiring raw device access are
 currently unavailable. Sound goes through the PipeWire and Pulse sockets, which
 are always exposed and carry recording access as well as playback.
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
+
+`/etc`, `/sys` and `/proc` come from the host, minus what identifies the
+machine. Each game gets a `machine-id` of its own (which engines such as Unity
+turn into a device ID), stable across launches; the hostname is `localhost`
+and the boot ID is fresh every launch. MAC addresses, disk, NVMe, USB and
+battery serials, controller Bluetooth addresses, `/etc/fstab` and the SSH host
+keys read as empty. A game that had already run before this existed keeps
+seeing the real machine-id, in case it keyed its saves to it; delete its
+`machine-id` file to give it a fresh one.
 
 ## Kernel attack surface and resource limits
 

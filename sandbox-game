@@ -534,6 +534,54 @@ TOOLS="${SANDBOX_TOOLS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sandbox-game/to
 TOOLS_ARGS=()
 [ ! -d "$TOOLS" ] || TOOLS_ARGS=( --ro-bind "$TOOLS" /tools )
 
+# ---- identifiers -----------------------------------------------------------
+# /etc, /sys and /proc come from the host, and with them what tells this
+# machine apart from any other: the machine-id (which engines such as Unity
+# turn into a "device ID"), the hostname, the boot ID, MAC addresses and disk,
+# USB and battery serials. Nothing a game legitimately does needs the real
+# ones, so it gets stand-ins -- a machine-id of its own, stable across launches.
+ID_ARGS=( --hostname localhost )
+if [ -e /etc/machine-id ]; then
+    if [ ! -s "$CAP/machine-id" ]; then
+        # A game that already ran here may have keyed something to the real
+        # id -- some encrypt their saves with it -- so it keeps seeing that.
+        # Delete the file to give such a game a fresh one.
+        if [ -n "$(find "$CAP/home" "$CAP/rw" "$CAP/compat" -mindepth 1 -print -quit 2>/dev/null)" ] \
+           && [ -r /etc/machine-id ]; then
+            cp /etc/machine-id "$CAP/machine-id"
+        else
+            printf '%s\n' "$(tr -d - < /proc/sys/kernel/random/uuid)" > "$CAP/machine-id"
+        fi
+    fi
+    ID_ARGS+=( --ro-bind "$CAP/machine-id" /etc/machine-id )
+fi
+# bwrap reads these from the fds, so no file is left behind for them.
+exec 7<<<localhost
+[ ! -e /etc/hostname ] || ID_ARGS+=( --ro-bind-data 7 /etc/hostname )
+exec 8< <(cat /proc/sys/kernel/random/uuid)
+ID_ARGS+=( --ro-bind-data 8 /proc/sys/kernel/random/boot_id )
+# Each covered with an empty file. Only what any user can read is worth
+# hiding; the rest (DMI serials, most VPD pages) is root-only already. A real
+# file, not /dev/null: /sys is mounted nodev, where a device node will not open.
+: > "$CAP/.empty"
+for f in /etc/fstab /etc/crypttab /etc/hostid \
+         /sys/class/net/*/address /sys/class/ieee80211/*/macaddress \
+         /sys/class/ieee80211/*/addresses /sys/class/bluetooth/*/address \
+         /sys/class/input/*/uniq \
+         /sys/block/*/wwid /sys/block/*/eui /sys/block/*/nguid /sys/block/*/uuid \
+         /sys/block/*/serial /sys/block/*/device/serial /sys/block/*/device/wwid \
+         /sys/class/nvme/*/serial /sys/class/nvme/*/subsysnqn \
+         /sys/class/nvme-subsystem/*/serial /sys/class/nvme-subsystem/*/subsysnqn \
+         /sys/bus/usb/devices/*/serial /sys/bus/mmc/devices/*/serial \
+         /sys/bus/mmc/devices/*/cid /sys/class/power_supply/*/serial_number \
+         /sys/class/drm/card*/device/unique_id /sys/class/drm/card*/device/serial_number \
+         /sys/class/dmi/id/product_uuid /sys/class/dmi/id/*_serial; do
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    ID_ARGS+=( --ro-bind "$CAP/.empty" "$(realpath "$f")" )
+done
+# The SSH host keys identify the machine as surely as a serial number does.
+[ ! -d /etc/ssh ] || ID_ARGS+=( --tmpfs /etc/ssh --remount-ro /etc/ssh )
+
 # ---- seccomp ---------------------------------------------------------------
 # Compiled by sandbox-seccomp, which sits beside this script and says what it
 # blocks and why. Refuse to start without it rather than quietly run unfiltered.
@@ -587,6 +635,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     --symlink usr/sbin  /sbin
     --proc /proc
     --dev /dev
+    "${ID_ARGS[@]}"                   # after /etc, /sys and /proc, to cover them
     "${DEVICE_ARGS[@]}"
     --tmpfs /tmp
     "${XSOCK_ARGS[@]}"

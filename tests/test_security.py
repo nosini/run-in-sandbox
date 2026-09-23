@@ -202,6 +202,32 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertIn("STEAM_COMPAT_CONFIG", args)
 
+    def test_machine_identifiers_are_stand_ins(self):
+        read = lambda path: Path(path).read_text().strip()
+        probe = ('printf "%s|%s|%s|" "$(cat /proc/sys/kernel/random/boot_id)" '
+                 '"$(cat /proc/sys/kernel/hostname)" "$(ls -A /etc/ssh 2>/dev/null | wc -l)"; '
+                 'for f in /sys/class/net/*/address; do printf "%s," "$(cat "$f")"; done; '
+                 'printf "|%s" "$(cat /etc/machine-id 2>/dev/null)"')
+        boot, host, ssh, macs, mid = self.run_guest(probe).stdout.split("|")
+        self.assertNotEqual(boot, read("/proc/sys/kernel/random/boot_id"))
+        self.assertEqual(host, "localhost")
+        self.assertEqual(ssh, "0")
+        self.assertEqual(macs.split(",")[:-1],
+                         [""] * len(list(Path("/sys/class/net").glob("*/address"))))
+        if not Path("/etc/machine-id").exists():
+            return
+        # A game of its own gets an id of its own, the same every launch...
+        self.assertNotIn(mid, ("", read("/etc/machine-id")))
+        self.assertEqual(self.run_guest("cat /etc/machine-id").stdout.strip(), mid)
+        # ...but one that already has saves keeps what it saw before, in case
+        # it keyed them to that.
+        played = self.base / "games" / "Played"
+        played.mkdir()
+        (self.home / "game-sandboxes" / "played" / "home").mkdir(parents=True)
+        (self.home / "game-sandboxes" / "played" / "home" / "save").write_text("x")
+        seen = self.cli("--headless", played, "/bin/cat", "/etc/machine-id").stdout.strip()
+        self.assertEqual(seen, read("/etc/machine-id"))
+
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.
         import time
