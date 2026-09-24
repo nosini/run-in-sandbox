@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh [--restrict-audio] [--uninstall]
-#   Install sandbox-game, sandbox-attach, sandbox-seccomp and the Nautilus
+#   Install sandbox-game, sandbox-attach, sandbox-seccomp, sandbox-landlock and the Nautilus
 #   scripts for the current user. No root needed; nothing outside ~/.local is
 #   touched.
 #
@@ -35,6 +35,7 @@ each() {
     "$@" 755 sandbox-game             "$BIN"
     "$@" 755 sandbox-attach           "$BIN"
     "$@" 755 sandbox-seccomp          "$BIN"
+    "$@" 755 sandbox-landlock         "$BIN"
     "$@" 644 sandbox-game-lib         "$BIN"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"

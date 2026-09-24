@@ -36,9 +36,11 @@ class SecurityTests(unittest.TestCase):
         self.env["SANDBOX_TOOLS_DIR"] = str(self.tools)
 
     def cli(self, *args, check=True):
+        # No terminal on stdin, or anything that asks first (--delete,
+        # --reset-install) would wait for an answer that never comes.
         return subprocess.run([str(ROOT / "sandbox-game"), *map(str, args)],
                               env=self.env, capture_output=True, text=True,
-                              timeout=15, check=check)
+                              stdin=subprocess.DEVNULL, timeout=15, check=check)
 
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
@@ -130,6 +132,53 @@ class SecurityTests(unittest.TestCase):
                                 '! unshare -U true 2>/dev/null; '
                                 f'python3 -c "{probe}"')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_descriptors_from_outside_are_closed(self):
+        # A descriptor inherited from outside names something past every
+        # mount, and /proc/self/fd/N reopens it; so only 0-2 go in.
+        (self.home / "host-secret").write_text("private")
+        outside = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, outside)
+        stray = subprocess.run([str(ROOT / "sandbox-game"), "--headless", self.game,
+                                "/bin/sh", "-c", f"cat /proc/self/fd/{outside}/host-secret"],
+                               env=self.env, capture_output=True, text=True,
+                               pass_fds=(outside,), timeout=15)
+        self.assertNotIn("private", stray.stdout)
+
+    def test_landlock_holds_the_game_to_its_mounts(self):
+        # Wired in: the command starts with the helper, given the mounts.
+        args = self.recorded_args()
+        start = next(i for i, a in enumerate(args)
+                     if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"])
+        rules = args[start + 1:args.index("--", start)]
+        pairs = list(zip(rules[::2], rules[1::2]))
+        for rule in (("--ls", "/"), ("--ro", "/usr"), ("--ro", "/etc"), ("--rw", "/game"),
+                     ("--rw", str(self.home)), ("--rw", "/tmp"), ("--ls", "/dev"),
+                     ("--rw", "/dev/null"), ("--rw", "/dev/shm"), ("--rw", "/dev/pts")):
+            self.assertIn(rule, pairs)
+        self.assertNotIn(("--rw", "/dev"), pairs)     # device by device, not wholesale
+        # /dev as bwrap makes it still works under that list.
+        self.run_guest("echo x > /dev/null; head -c 8 /dev/urandom > /dev/shm/t; "
+                       "test -s /dev/shm/t; rm /dev/shm/t; python3 -c 'import os, pty; pty.openpty()'")
+        # And it holds: given a few paths, the helper refuses the rest -- here
+        # on the host, since inside the sandbox nothing else is there to try.
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        if libc.syscall(ctypes.c_long(444), None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 1:
+            self.skipTest("no Landlock in this kernel")
+        (self.home / "host-secret").write_text("private")
+        allowed = self.base / "allowed"
+        allowed.mkdir()
+        (allowed / "fine").write_text("fine")
+        result = subprocess.run(
+            [str(ROOT / "sandbox-landlock"), "--ro", "/usr", "--ro", "/etc", "--rw", str(allowed),
+             "--", "/bin/sh", "-c",
+             f'cat {allowed}/fine; echo w > {allowed}/new; cat {self.home}/host-secret'],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.stdout, "fine")
+        self.assertTrue((allowed / "new").exists())
+        self.assertIn("Permission denied", result.stderr)
 
     def test_shared_tools_are_read_only(self):
         # Shared by every sandbox, so a game that could write here could plant
@@ -435,7 +484,9 @@ print(json.dumps({{
     def test_help_and_completion_know_every_option(self):
         # Taken from the option parser itself, so neither can fall behind it.
         import re
-        parser = (ROOT / "sandbox-game").read_text()
+        script = (ROOT / "sandbox-game").read_text()
+        parser = script[script.index('while [ "$#" -gt 0 ]; do'):]
+        parser = parser[:parser.index("\ndone\n")]
         options = set(re.findall(r"^\s+(?:-h\|)?(--[a-z0-9-]+)(?:=\*)?\)", parser, re.M))
         self.assertIn("--proton", options)
         help_text = self.cli("--help").stdout
@@ -483,11 +534,13 @@ print(json.dumps({{
         gs.write_text("#!/bin/sh\nexit 99\n")
         gs.chmod(0o755)
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
-        # A real Unix socket satisfies validation without a real compositor.
-        import socket
-        sock = socket.socket(socket.AF_UNIX)
-        sock.bind(str(self.runtime / "wayland-0"))
-        self.addCleanup(sock.close)
+        # A real Unix socket satisfies validation without a real compositor;
+        # made once, however many times a test records.
+        if not (self.runtime / "wayland-0").exists():
+            import socket
+            sock = socket.socket(socket.AF_UNIX)
+            sock.bind(str(self.runtime / "wayland-0"))
+            self.addCleanup(sock.close)
         self.env["WAYLAND_DISPLAY"] = "wayland-0"
         self.env["DISPLAY"] = ":123"
         return json.loads(self.cli(*options, self.game, "/bin/true").stdout)

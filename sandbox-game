@@ -411,6 +411,18 @@ fi
 [ "$HOST_X11" = 0 ] || { [ "$GS" = 0 ] && [ "$WAYLAND" = 0 ]; } || {
     echo "--host-x11 cannot be combined with --gamescope or --wayland" >&2; exit 1; }
 
+# Only stdin, stdout and stderr go into the sandbox. bwrap passes on every
+# descriptor it inherits, and one that names something outside -- a directory
+# left open by whatever launched this -- reaches past every mount, reopened
+# through /proc/self/fd/N. Landlock refuses that too (see below); this does it
+# on kernels without Landlock as well. Bash reads this script through a
+# descriptor of its own, up at 255, which has to stay.
+for fd in /proc/self/fd/*; do
+    fd="${fd##*/}"
+    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] && [ "$fd" -lt 250 ] || continue
+    eval "exec $fd>&-"
+done
+
 CAP="$HOME/game-sandboxes/$NAME"
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
 rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
@@ -980,6 +992,48 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${ENV_ARGS[@]}"                  # last, so these win over the above
     --chdir "$CHDIR"
 )
+
+# ---- landlock --------------------------------------------------------------
+# The mounts above decide what the game can reach; Landlock then holds it to
+# the same, from inside -- the second lock on the same door. sandbox-landlock
+# runs as the first step of the command, restricts itself to the paths below
+# and execs the game: every writable mount read-write, every read-only one
+# read-only, the root for listing only. Taken from the bwrap arguments
+# themselves, so the two cannot drift apart. What it adds is refusal of
+# anything that reaches past the mounts anyway: a file descriptor inherited
+# from outside, reopened through /proc/self/fd -- the file manager hands the
+# game its log file like that -- or a slip in the mount plan.
+LANDLOCK="$(dirname "$(realpath "$0")")/sandbox-landlock"
+[ -f "$LANDLOCK" ] || LANDLOCK="$(command -v sandbox-landlock || true)"
+[ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found beside sandbox-game or on PATH" >&2; exit 1; }
+LL_ARGS=( --ls / --ro /run/sandbox-landlock )
+i=0
+while [ "$i" -lt "${#BWRAP[@]}" ]; do
+    case "${BWRAP[i]}" in
+        --bind|--bind-try|--dev-bind|--dev-bind-try)
+                                LL_ARGS+=( --rw "${BWRAP[i+2]}" ); i=$((i + 3)) ;;
+        --ro-bind|--ro-bind-try|--ro-bind-data)
+                                LL_ARGS+=( --ro "${BWRAP[i+2]}" ); i=$((i + 3)) ;;
+        --tmpfs|--proc)         LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
+        # What bwrap --dev makes, one by one, rather than all of /dev: the
+        # device nodes bound into it get rules of their own. (fd, stdin and
+        # the like are links into /proc; ptmx one into pts.)
+        --dev)                  LL_ARGS+=( --ls "${BWRAP[i+1]}" )
+                                for n in null zero full random urandom tty console pts shm; do
+                                    LL_ARGS+=( --rw "${BWRAP[i+1]}/$n" )
+                                done
+                                i=$((i + 2)) ;;
+        --overlay)              LL_ARGS+=( --rw "${BWRAP[i+3]}" ); i=$((i + 4)) ;;
+        # Everything else that takes arguments, so none is read as an option.
+        --setenv|--symlink)     i=$((i + 3)) ;;
+        --seccomp|--perms|--info-fd|--block-fd|--chdir|--dir|--overlay-src|\
+        --hostname|--remount-ro|--unsetenv)
+                                i=$((i + 2)) ;;
+        *)                      i=$((i + 1)) ;;
+    esac
+done
+BWRAP+=( --ro-bind "$LANDLOCK" /run/sandbox-landlock )
+set -- /run/sandbox-landlock "${LL_ARGS[@]}" -- "$@"
 
 # Always a child rather than exec: the trap has to get a turn after the game
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The

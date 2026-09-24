@@ -16,8 +16,9 @@ you:
 - **Everything in one folder.** `~/game-sandboxes/<name>/` holds the saves, the
   configs, the Wine prefix — delete it and the game is factory-fresh.
 - **Less kernel to aim at.** No nested user namespaces, a seccomp filter
-  over the syscalls a game never needs, and memory and task limits, so a
-  runaway game cannot take the desktop with it.
+  over the syscalls a game never needs, Landlock holding the game to its
+  mounts, and memory and task limits, so a runaway game cannot take the
+  desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is always
@@ -70,7 +71,7 @@ What goes where:
 
 | File | Installed to |
 |---|---|
-| `sandbox-game`, `sandbox-attach`, `sandbox-seccomp` | `~/.local/bin/` |
+| `sandbox-game`, `sandbox-attach`, `sandbox-seccomp`, `sandbox-landlock` | `~/.local/bin/` |
 | `sandbox-game-lib` (mode 644) | `~/.local/bin/` |
 | `Sandbox game`, `Sandbox game preferences` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
@@ -555,6 +556,27 @@ is 64-bit and `arch=40000003` 32-bit, and the two number syscalls differently;
 `clone3` is left out of the log: glibc tries it for every thread and falls
 back to `clone`, and its hits would bury everything else. Expect `clone` from
 a `bwrap` under gamescope too — its image loader trying to sandbox itself.
+
+**Landlock.** The mounts decide what a game can reach; Landlock then holds it
+to the same from inside, a second lock on the same door. `sandbox-landlock`
+runs as the first step of the game's command, restricts itself to the
+sandbox's own mount plan — writable mounts read-write, read-only ones
+read-only, the root for listing only, taken from the `bwrap` arguments so the
+two cannot drift — and then starts the game, which inherits that along with
+everything it starts. Where the kernel supports it (Landlock ABI 6), signals
+and abstract Unix sockets are scoped to the game's own processes as well. What
+this adds is refusal of anything that reaches past the mounts anyway: a file
+descriptor from outside, reopened through `/proc/self/fd/N`, or a slip in the
+mount plan. On a kernel without Landlock the game starts regardless, with a
+warning.
+
+Stray descriptors are also simply closed: only stdin, stdout and stderr are
+passed into the sandbox, so a directory left open by whatever started
+`sandbox-game` never gets there at all.
+
+`sandbox-attach` does not go through Landlock: a process cannot ptrace one in
+another Landlock domain, and that is Cheat Engine's whole job. What it runs is
+still inside the sandbox's mounts, filter and scope.
 
 **Memory and task limits.** The sandbox runs in a transient systemd scope,
 `sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM and 4096 tasks. That

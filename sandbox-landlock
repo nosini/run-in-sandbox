@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""sandbox-landlock [--rw PATH | --ro PATH | --ls PATH]... -- CMD...
+
+Runs inside the sandbox, as the first step of the game's command:
+restricts itself with Landlock to the paths it is given, then execs CMD,
+which inherits the restriction along with everything it starts.
+
+sandbox-game passes the sandbox's own mount plan: every writable mount as
+--rw, every read-only one as --ro, and the root as --ls (listing only). So
+Landlock allows nothing the mounts do not -- and goes on refusing when
+something reaches past them anyway: a file descriptor inherited from outside,
+reopened through /proc/self/fd/N (the file manager hands a game its log file
+that way), or a mistake in the mount plan itself. It is the second lock on
+the same door.
+
+--rw   read, write, create, remove, execute, ioctl on devices
+--ro   read and execute
+--ls   list directories only
+
+Landlock also scopes signals and abstract unix sockets to the game's own
+processes, where the kernel supports that (ABI 6).
+
+On a kernel without Landlock the command runs anyway, with a warning, the way
+sandbox-game carries on without a systemd scope: it is defence in depth, and
+everything else still stands. Any other failure stops the launch.
+
+sandbox-attach does not go through this: Landlock refuses to let a process
+ptrace one in a different Landlock domain, and ptrace is Cheat Engine's job.
+"""
+import ctypes
+import os
+import stat
+import sys
+
+# The same numbers on every architecture: allocated after the syscall
+# tables were unified.
+SYS_CREATE_RULESET, SYS_ADD_RULE, SYS_RESTRICT_SELF = 444, 445, 446
+CREATE_RULESET_VERSION = 1
+RULE_PATH_BENEATH = 1
+PR_SET_NO_NEW_PRIVS = 38
+
+EXECUTE, WRITE_FILE, READ_FILE, READ_DIR = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+REMOVE_DIR, REMOVE_FILE = 1 << 4, 1 << 5
+MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK = 1 << 6, 1 << 7, 1 << 8, 1 << 9
+MAKE_FIFO, MAKE_BLOCK, MAKE_SYM = 1 << 10, 1 << 11, 1 << 12
+REFER, TRUNCATE, IOCTL_DEV = 1 << 13, 1 << 14, 1 << 15
+SCOPE_ABSTRACT_UNIX_SOCKET, SCOPE_SIGNAL = 1 << 0, 1 << 1
+
+# What each ABI version can handle; anything newer is left alone.
+ABI_FS = {1: (1 << 13) - 1}
+ABI_FS[2] = ABI_FS[1] | REFER
+ABI_FS[3] = ABI_FS[2] | TRUNCATE
+ABI_FS[4] = ABI_FS[3]
+ABI_FS[5] = ABI_FS[4] | IOCTL_DEV
+FILE_ONLY = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV
+RO = EXECUTE | READ_FILE | READ_DIR
+
+
+class RulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64),
+                ("handled_access_net", ctypes.c_uint64),
+                ("scoped", ctypes.c_uint64)]
+
+
+class PathBeneathAttr(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [("allowed_access", ctypes.c_uint64),
+                ("parent_fd", ctypes.c_int32)]
+
+
+def fail(what):
+    err = ctypes.get_errno()
+    sys.exit(f"sandbox-landlock: {what}: {os.strerror(err)}")
+
+
+def main():
+    args = sys.argv[1:]
+    rules = []
+    while args and args[0] != "--":
+        if len(args) < 2 or args[0] not in ("--rw", "--ro", "--ls"):
+            sys.exit(__doc__.split("\n\n")[0])
+        rules.append((args[0], args[1]))
+        args = args[2:]
+    cmd = args[1:]
+    if not cmd:
+        sys.exit(__doc__.split("\n\n")[0])
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    abi = libc.syscall(ctypes.c_long(SYS_CREATE_RULESET), None, ctypes.c_size_t(0),
+                       ctypes.c_uint32(CREATE_RULESET_VERSION))
+    if abi < 1:
+        print("warning: no Landlock in this kernel; running without it", file=sys.stderr)
+        os.execvp(cmd[0], cmd)
+
+    handled = ABI_FS[min(abi, 5)]
+    access = {"--rw": handled, "--ro": RO & handled, "--ls": READ_DIR}
+    attr = RulesetAttr(handled_access_fs=handled)
+    size = 8
+    if abi >= 6:
+        attr.scoped = SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
+        size = 24
+    ruleset = libc.syscall(ctypes.c_long(SYS_CREATE_RULESET), ctypes.byref(attr),
+                           ctypes.c_size_t(size), ctypes.c_uint32(0))
+    if ruleset < 0:
+        fail("creating the ruleset")
+
+    for kind, path in rules:
+        try:
+            fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        except FileNotFoundError:
+            continue                    # an optional mount (--ro-bind-try) left out
+        allowed = access[kind]
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            allowed &= FILE_ONLY
+        rule = PathBeneathAttr(allowed_access=allowed, parent_fd=fd)
+        if libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
+                        ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),
+                        ctypes.c_uint32(0)) < 0:
+            fail(f"adding {path}")
+        os.close(fd)
+
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
+        fail("setting no_new_privs")
+    if libc.syscall(ctypes.c_long(SYS_RESTRICT_SELF), ctypes.c_int(ruleset),
+                    ctypes.c_uint32(0)) < 0:
+        fail("restricting")
+    os.close(ruleset)
+    os.execvp(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    main()
