@@ -269,7 +269,17 @@ def https():
         return urllib.request.urlopen("https://codeberg.org", timeout=10).status
     except OSError as e:
         return str(e)
+def refused(make):
+    try:
+        make().close()
+        return "allowed"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e))
 ip = shutil.which("ip") or "/usr/sbin/ip"
+def ip_rc(*args):
+    return subprocess.run([ip, *args], capture_output=True).returncode
+links = json.loads(subprocess.run([ip, "-j", "link"], capture_output=True, text=True).stdout)
+iface = next(l["ifname"] for l in links if l["ifname"] != "lo")
 print(json.dumps({{
     "resolv": open("/etc/resolv.conf").read(),
     "own": tcp({own[0]!r}, {port}),
@@ -278,6 +288,14 @@ print(json.dumps({{
     "https": https() if {online} else "skipped",
     "unlock": subprocess.run([ip, "rule", "del", "priority", "100"],
                              capture_output=True).returncode,
+    # Last, so that one which did get through cannot spoil the checks above.
+    "packet": refused(lambda: socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                                            socket.htons(0x0003))),
+    "raw_ip": refused(lambda: socket.socket(socket.AF_INET, socket.SOCK_RAW,
+                                            socket.IPPROTO_RAW)),
+    "link_add": ip_rc("link", "add", "sbxtest0", "type", "dummy"),
+    "addr_add": ip_rc("addr", "add", "10.9.9.9/32", "dev", iface),
+    "link_down": ip_rc("link", "set", iface, "down"),
 }}))
 """)
         result = self.cli("--headless", "--net", self.game, "python3", "/game/probe.py",
@@ -290,6 +308,15 @@ print(json.dumps({{
         # mean nothing answered there, which proves nothing about the LAN.
         self.assertEqual(seen["gateway"], "EACCES", "the LAN was not refused")
         self.assertNotEqual(seen["unlock"], 0, "the game could remove the LAN block")
+        # The rules act at routing. Raw packets skip routing, and pasta passes
+        # on whatever reaches it, so the LAN block holds only as long as the
+        # game can write nothing but routed traffic -- and cannot add, change
+        # or take down an interface. No capabilities over the namespace, and
+        # the seccomp filter does not look at socket families: this is it.
+        self.assertIn(seen["packet"], ("EPERM", "EACCES"), "raw packet socket allowed")
+        self.assertIn(seen["raw_ip"], ("EPERM", "EACCES"), "raw IP socket allowed")
+        for change in ("link_add", "addr_add", "link_down"):
+            self.assertNotEqual(seen[change], 0, f"the game could {change.replace('_', ' ')}")
         if online:
             self.assertEqual(seen["internet"], "open")
             # Verified, so the CA certificates made it in as well.
