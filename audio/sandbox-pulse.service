@@ -1,0 +1,18 @@
+# Installed to ~/.config/systemd/user/ by `install.sh --restrict-audio`.
+# See sandbox-pulse.conf for what this is and why it is separate.
+[Unit]
+Description=Playback-only PulseAudio server for run-in-sandbox games
+Requires=pipewire.socket
+After=pipewire.socket pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+Environment=PULSE_RUNTIME_PATH=%t/sandbox-pulse
+ExecStartPre=/usr/bin/mkdir -p %t/sandbox-pulse
+ExecStartPre=/usr/bin/chmod 0700 %t/sandbox-pulse
+ExecStart=/usr/bin/pipewire -c sandbox-pulse.conf
+Restart=on-failure
+Slice=session.slice
+
+[Install]
+WantedBy=default.target

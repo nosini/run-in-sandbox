@@ -61,9 +61,11 @@
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
 #   X server (other X clients can be observed/controlled). --headless exposes
-#   no display. Audio always goes through the host's PipeWire and Pulse
-#   sockets -- enough games refuse to start without a sound device that
-#   withholding it broke more than it protected.
+#   no display. Audio is always on -- enough games refuse to start without a
+#   sound device that withholding it broke more than it protected -- and
+#   playback-only when install.sh --restrict-audio set that up: see
+#   audio/sandbox-pulse.conf. Otherwise it is the desktop's own PipeWire and
+#   Pulse sockets, recording and all.
 #
 # sandbox-game --stop NAME | --stop-all
 #   End a running sandbox outright: the game, Wine and anything sandbox-attach
@@ -491,9 +493,24 @@ if [ "$WAYLAND" = 1 ]; then
         VIDEO_ENV+=( --setenv SDL_VIDEODRIVER wayland )
     fi
 fi
-AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
-    --ro-bind-try "$RT/pulse" "$RT/pulse"
-    --setenv PULSE_SERVER "unix:$RT/pulse/native" )
+# Playback only, when the sandbox sound server is running (install.sh
+# --restrict-audio; see audio/sandbox-pulse.conf): its socket alone, where Pulse
+# clients look, and no PipeWire socket at all -- that one would get around it.
+# SDL, OpenAL, Wine and Chromium all fall back to Pulse; a game that talks to
+# ALSA and nothing else stays silent, ALSA's default here going through the
+# PipeWire socket. Without that server, the desktop's own sockets as before,
+# which carry recording and module loading as well as playback.
+SANDBOX_PULSE="$RT/sandbox-pulse/native"
+if [ -S "$SANDBOX_PULSE" ]; then
+    AUDIO_ARGS=( --ro-bind "$SANDBOX_PULSE" "$RT/pulse/native"
+        --setenv PULSE_SERVER "unix:$RT/pulse/native" )
+else
+    echo "warning: no playback-only sound server; the game can record and load sound server modules" >&2
+    echo "         (./install.sh --restrict-audio sets one up)" >&2
+    AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
+        --ro-bind-try "$RT/pulse" "$RT/pulse"
+        --setenv PULSE_SERVER "unix:$RT/pulse/native" )
+fi
 
 # ---- overlay for the game's own install dir --------------------------------
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall

@@ -425,6 +425,71 @@ print(json.dumps({{
         for option in ("--unshare-user", "--disable-userns", "--seccomp"):
             self.assertIn(option, args)
 
+    def test_playback_only_server_replaces_the_desktop_sockets(self):
+        # With the sandbox sound server up, the game gets its socket alone --
+        # never the PipeWire one, which would get around it.
+        import socket
+        (self.runtime / "sandbox-pulse").mkdir()
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(self.runtime / "sandbox-pulse" / "native"))
+        self.addCleanup(sock.close)
+        args = self.recorded_args()
+        bind = args.index(str(self.runtime / "sandbox-pulse" / "native"))
+        self.assertEqual(args[bind - 1:bind + 2], ["--ro-bind",
+                         str(self.runtime / "sandbox-pulse" / "native"),
+                         str(self.runtime / "pulse" / "native")])
+        self.assertNotIn(str(self.runtime / "pipewire-0"), args)
+        self.assertNotIn(str(self.runtime / "pulse"), args)
+
+    def test_games_can_play_but_not_record(self):
+        # Against the real sandbox sound server (install.sh --restrict-audio).
+        # Every refusal is checked by trying, not by reading permissions:
+        # WirePlumber links streams with its own rights, whatever a client can
+        # see, so only a recording that comes back empty proves anything.
+        real_rt = os.environ.get("XDG_RUNTIME_DIR")
+        if not real_rt or not Path(real_rt, "sandbox-pulse", "native").is_socket():
+            self.skipTest("no playback-only sound server (install.sh --restrict-audio)")
+        if not all(shutil.which(t) for t in ("pactl", "pacat", "parec")):
+            self.skipTest("pactl, pacat and parec are needed (pulseaudio-utils)")
+        self.env["XDG_RUNTIME_DIR"] = real_rt
+        # Something else playing, outside the sandbox, silently: a stream the
+        # game could try to record on its own.
+        other = subprocess.Popen(["pacat", "--playback", "--volume=0",
+                                  "--client-name=sandbox-test-other", "/dev/zero"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(other.wait)
+        self.addCleanup(other.terminate)
+        import time
+        time.sleep(0.5)
+        # Recording has to fail, and fail at once: a stream merely left
+        # unlinked would hang every Proton game's start-up for 30 s, since
+        # Wine opens one to probe formats. timeout's 124 means it hung.
+        result = self.run_guest(r'''
+            set +e    # refusals are what is being checked for
+            recorded() {
+                timeout 5 parec --raw "$@" > /tmp/recorded 2>/dev/null
+                rc=$?
+                printf '%s:%s' "$(wc -c < /tmp/recorded)" "$rc"
+            }
+            other=$(pactl list short sink-inputs 2>/dev/null | head -n1 | cut -f1)
+            printf 'play=%s\n' "$(head -c 96000 /dev/zero | timeout 5 pacat --playback --raw \
+                                   >/dev/null 2>&1; echo $?)"
+            printf 'module=%s\n' "$(pactl load-module module-null-sink >/dev/null 2>&1; echo $?)"
+            printf 'mic=%s\n' "$(recorded -d @DEFAULT_SOURCE@)"
+            printf 'monitor=%s\n' "$(recorded -d @DEFAULT_MONITOR@)"
+            printf 'other=%s\n' "$( [ -n "$other" ] && recorded --monitor-stream="$other" || echo none)"
+        ''')
+        seen = dict(line.split("=", 1) for line in result.stdout.split())
+        self.assertEqual(seen["play"], "0", "playback failed")
+        self.assertNotEqual(seen["module"], "0", "the game could load a sound server module")
+        for what, label in (("mic", "the microphone"), ("monitor", "what is playing"),
+                            ("other", "another app's stream")):
+            if seen[what] == "none":
+                continue
+            recorded, rc = seen[what].split(":")
+            self.assertEqual(recorded, "0", f"the game recorded {label}")
+            self.assertNotEqual(rc, "124", f"recording {label} hung instead of failing")
+
     def test_host_display_requires_explicit_option(self):
         args = self.recorded_args("--host-x11")
         self.assertNotIn("gamescope", args)

@@ -21,9 +21,11 @@ you:
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is always
-on, through the host's PipeWire and Pulse sockets. That includes **microphone
-and monitor recording**: sound servers do not split playback from capture, and
-too many games refuse to start without a sound device to withhold it.
+on — too many games refuse to start without a sound device to withhold it — and
+by default goes through the host's own PipeWire and Pulse sockets. That
+includes **microphone and monitor recording, and loading sound server
+modules**, some of which reach the network. `./install.sh --restrict-audio`
+makes it playback only; see [Sound](#sound).
 `--host-x11` explicitly grants access to other host X applications; do not
 enable it for a game you do not trust.
 
@@ -58,6 +60,11 @@ less install.sh && bash install.sh
 scripts again, `./install.sh --uninstall`, or through the pipe
 `... | bash -s -- --uninstall`. That leaves `~/game-sandboxes` (saves and Wine
 prefixes), your preferences and the shared tools folder alone.
+
+`./install.sh --restrict-audio` (or `... | bash -s -- --restrict-audio`)
+additionally makes games' sound playback only; see [Sound](#sound). It changes
+your sound setup, so it is not done unless asked, and once done every later
+install keeps it current. `--uninstall` takes it out again.
 
 What goes where:
 
@@ -129,6 +136,7 @@ working directory.
 | `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
 | memory and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
+| playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
 distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
@@ -381,8 +389,7 @@ including for Proton: builds lacking winewayland must use gamescope instead.
 `/dev` and its shared memory are private. Graphical modes expose GPU devices only
 (`/dev/dri` and available NVIDIA device nodes). Host input, camera, sound and
 terminal devices are not exposed; controllers requiring raw device access are
-currently unavailable. Sound goes through the PipeWire and Pulse sockets, which
-are always exposed and carry recording access as well as playback.
+currently unavailable. Sound goes through a Pulse socket; see [Sound](#sound).
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
 
 `/etc`, `/sys` and `/proc` come from the host, minus what identifies the
@@ -438,6 +445,47 @@ What it does not do: stop the game talking to whatever it likes on the
 internet, or sending off what it can read — its own capture folder and the
 hardware details listed above, less the identifiers already hidden. Give it to
 games that need it, not by default.
+
+## Sound
+
+By default a game gets the desktop's own PipeWire and Pulse sockets, and with
+them everything a sound server client can do: record every microphone and
+everything playing (a "Monitor of …" source), change volumes, and **load Pulse
+modules**, which pipewire-pulse runs with its own rights outside the sandbox.
+`module-rtp-send`, `module-tunnel-sink` or `module-roc-sink` would carry audio —
+or anything encoded as audio — to any address on the network, from a game that
+has none; `module-native-protocol-tcp` would open the sound server to the LAN.
+
+`./install.sh --restrict-audio` makes it playback only:
+
+- **A sound server of the games' own.** A second pipewire-pulse,
+  `sandbox-pulse.service`, with one socket and module loading switched off —
+  that switch only exists for a whole server, and the desktop's may want it.
+  Everything connecting to it is marked restricted. The game gets this socket
+  alone, where Pulse clients look for one, and no PipeWire socket.
+- **Nothing to record.** WirePlumber hides every source and microphone, the
+  monitor ports of every sink and the link factory from restricted clients.
+  Hiding alone would not do: WirePlumber links a recording stream to the
+  default source on the client's behalf, with its own rights. So a hook
+  (`deny-restricted-capture.lua`) refuses to link a restricted client's
+  recording streams at all. It is loaded as required: if it ever fails to
+  load, WirePlumber does not start, rather than games quietly regaining the
+  microphone.
+
+Playback is unaffected for anything that speaks Pulse: SDL, OpenAL (mkxp-z),
+Wine and Proton, Chromium (NW.js), FMOD. A game that talks to ALSA and nothing
+else stays silent — ALSA's default goes through the PipeWire socket, and
+openSUSE's `alsa-plugins-pulse` conflicts with `pipewire-alsa`. Other apps'
+playback streams stay visible by name, though not recordable. The rules apply
+to every client WirePlumber considers restricted, which includes Pulse clients
+connecting over TCP.
+
+What goes where: `~/.config/pipewire/sandbox-pulse.conf`,
+`~/.config/systemd/user/sandbox-pulse.service`,
+`~/.config/wireplumber/wireplumber.conf.d/60-sandbox-audio.conf` and
+`~/.local/share/wireplumber/scripts/sandbox-game/deny-restricted-capture.lua`,
+all from `audio/` in this repository. Without the server running, games fall
+back to the desktop's sockets, with a warning in the launch log.
 
 ## Kernel attack surface and resource limits
 
