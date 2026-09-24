@@ -16,9 +16,9 @@ you:
 - **Everything in one folder.** `~/game-sandboxes/<name>/` holds the saves, the
   configs, the Wine prefix — delete it and the game is factory-fresh.
 - **Less kernel to aim at.** No nested user namespaces, a seccomp filter
-  over the syscalls a game never needs, Landlock holding the game to its
-  mounts, and memory and task limits, so a runaway game cannot take the
-  desktop with it.
+  over the syscalls a game never needs, only the GPU's render nodes, Landlock
+  holding the game to its mounts, and memory and task limits, so a runaway
+  game cannot take the desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is always
@@ -411,8 +411,9 @@ fixed `/usr/bin:/bin` search path, private XDG directories, locale/timezone/term
 settings and the selected display variables. Tokens, session-bus addresses and
 loader overrides are not inherited; pass necessary game-specific settings with
 `--env KEY=VALUE`. Variables read on the host still work: the runtime
-discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR` and
-`SANDBOX_SECCOMP`, and `MANGOHUD=1` still selects the overlay.
+discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
+`SANDBOX_SECCOMP` and `SANDBOX_GPU_CARD`, and `MANGOHUD=1` still selects the
+overlay.
 
 The default display exposes the Wayland socket for gamescope, which supplies a
 private Xwayland server. Native `--wayland` exposes no host X socket or cookie,
@@ -420,8 +421,16 @@ including for Proton: builds lacking winewayland must use gamescope instead.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided.
 
-`/dev` and its shared memory are private. Graphical modes expose GPU devices only
-(`/dev/dri` and available NVIDIA device nodes). Host input, camera, sound and
+`/dev` and its shared memory are private. Graphical modes expose GPU devices
+only: the render nodes (`/dev/dri/renderD*`) and any NVIDIA device nodes.
+Drawing — Vulkan, OpenGL, Wine — goes through the render nodes; the card nodes
+beside them add modesetting, and with it a good deal more of the graphics
+driver, for a game to aim at. With `--wayland` they are not there at all. Under
+gamescope they are, because nested gamescope refuses to start unless the driver
+reports a card node, and it only does when one exists — but nothing in nested
+mode opens it, and Landlock refuses anyone who tries. Should a game turn out to
+need one itself, `SANDBOX_GPU_CARD=1` hands over all of `/dev/dri`, usable, for
+that launch. Host input, camera, sound and
 terminal devices are not exposed; controllers requiring raw device access are
 currently unavailable. Sound goes through a Pulse socket; see [Sound](#sound).
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.

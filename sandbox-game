@@ -335,7 +335,7 @@ Examples
   sandbox-game --mkxp ~/Games/SomeVXAceGame
 
 Read on the host: PROTON_DIR, MKXP_DIR, NWJS_DIR, SANDBOX_TOOLS_DIR,
-SANDBOX_SECCOMP=log, MANGOHUD=1. Sound is playback only once
+SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, MANGOHUD=1. Sound is playback only once
 `install.sh --restrict-audio` has set that up. More in the README.
 EOF
 }
@@ -643,7 +643,27 @@ if [ "$HEADLESS" = 0 ]; then
     # No sound, input, camera, tty or host shared-memory mounts: sound goes
     # through the audio sockets below instead. Controllers that require raw
     # device access must be granted separately in future.
-    [ ! -d /dev/dri ] || DEVICE_ARGS+=( --dev-bind /dev/dri /dev/dri )
+    # Render nodes are all drawing takes -- Vulkan, OpenGL, Wine -- where the
+    # card nodes beside them also carry modesetting: display control, and a
+    # good deal more driver code within a game's reach. So only the render
+    # nodes, with one wrinkle: nested gamescope will not start unless the
+    # driver reports a card node, and the driver only does when one exists
+    # here. It never opens it -- only gamescope's full-screen DRM backend does
+    # -- so under gamescope the card nodes are bound, and Landlock (below) lets
+    # nothing open them. SANDBOX_GPU_CARD=1 hands over all of /dev/dri, usable,
+    # for a game that turns out to need a card node itself.
+    if [ "${SANDBOX_GPU_CARD:-0}" = 1 ]; then
+        [ ! -d /dev/dri ] || DEVICE_ARGS+=( --dev-bind /dev/dri /dev/dri )
+    else
+        for device in /dev/dri/renderD*; do
+            [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
+        done
+        if [ "$GS" = 1 ]; then
+            for device in /dev/dri/card*; do
+                [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
+            done
+        fi
+    fi
     # Proprietary NVIDIA uses additional devices outside /dev/dri.
     for device in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
         [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
@@ -1011,13 +1031,18 @@ i=0
 while [ "$i" -lt "${#BWRAP[@]}" ]; do
     case "${BWRAP[i]}" in
         --bind|--bind-try|--dev-bind|--dev-bind-try)
-                                LL_ARGS+=( --rw "${BWRAP[i+2]}" ); i=$((i + 3)) ;;
+            # A card node is there for gamescope to see, not to be opened.
+            case "${BWRAP[i+2]}" in
+                /dev/dri/card*) [ "${SANDBOX_GPU_CARD:-0}" = 1 ] && LL_ARGS+=( --rw "${BWRAP[i+2]}" ) ;;
+                *) LL_ARGS+=( --rw "${BWRAP[i+2]}" ) ;;
+            esac
+            i=$((i + 3)) ;;
         --ro-bind|--ro-bind-try|--ro-bind-data)
                                 LL_ARGS+=( --ro "${BWRAP[i+2]}" ); i=$((i + 3)) ;;
         --tmpfs|--proc)         LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
-        # What bwrap --dev makes, one by one, rather than all of /dev: the
-        # device nodes bound into it get rules of their own. (fd, stdin and
-        # the like are links into /proc; ptmx one into pts.)
+        # What bwrap --dev makes, one by one: all of /dev would take in the
+        # device nodes bound into it as well, card nodes included. (fd, stdin
+        # and the like are links into /proc; ptmx one into pts.)
         --dev)                  LL_ARGS+=( --ls "${BWRAP[i+1]}" )
                                 for n in null zero full random urandom tty console pts shm; do
                                     LL_ARGS+=( --rw "${BWRAP[i+1]}/$n" )

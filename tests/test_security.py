@@ -29,7 +29,8 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "XDG_DATA_HOME"):
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "XDG_DATA_HOME",
+                    "SANDBOX_GPU_CARD"):
             self.env.pop(key, None)
         # A tools folder of the test's own, never the real one.
         self.tools = self.base / "tools"
@@ -156,7 +157,7 @@ class SecurityTests(unittest.TestCase):
                      ("--rw", str(self.home)), ("--rw", "/tmp"), ("--ls", "/dev"),
                      ("--rw", "/dev/null"), ("--rw", "/dev/shm"), ("--rw", "/dev/pts")):
             self.assertIn(rule, pairs)
-        self.assertNotIn(("--rw", "/dev"), pairs)     # device by device, not wholesale
+        self.assertNotIn(("--rw", "/dev"), pairs)     # not wholesale: see the GPU test
         # /dev as bwrap makes it still works under that list.
         self.run_guest("echo x > /dev/null; head -c 8 /dev/urandom > /dev/shm/t; "
                        "test -s /dev/shm/t; rm /dev/shm/t; python3 -c 'import os, pty; pty.openpty()'")
@@ -621,6 +622,31 @@ print(json.dumps({{
             recorded, rc = seen[what].split(":")
             self.assertEqual(recorded, "0", f"the game recorded {label}")
             self.assertNotEqual(rc, "124", f"recording {label} hung instead of failing")
+
+    def test_gpu_render_nodes_only(self):
+        # Drawing needs the render nodes. The card nodes add modesetting, and
+        # with it far more of the driver: under gamescope they are there only
+        # because it will not start unless the driver reports one, and
+        # Landlock lets nothing open them; without gamescope they are not there.
+        def landlock_rules(args):
+            start = next(i for i, a in enumerate(args)
+                         if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"])
+            rules = args[start + 1:args.index("--", start)]
+            return list(zip(rules[::2], rules[1::2]))
+        cards = [str(c) for c in Path("/dev").glob("dri/card*")]
+        args = self.recorded_args()                            # gamescope
+        self.assertNotIn("/dev/dri", args)
+        for node in Path("/dev").glob("dri/renderD*"):
+            self.assertIn(str(node), args)
+            self.assertIn(("--rw", str(node)), landlock_rules(args))
+        for card in cards:
+            self.assertIn(card, args)
+            self.assertNotIn(("--rw", card), landlock_rules(args))
+        native = self.recorded_args("--wayland")
+        self.assertFalse([a for a in native if a.startswith("/dev/dri/card")])
+        self.env["SANDBOX_GPU_CARD"] = "1"
+        if Path("/dev/dri").is_dir():
+            self.assertIn("/dev/dri", self.recorded_args())
 
     def test_host_display_requires_explicit_option(self):
         args = self.recorded_args("--host-x11")
