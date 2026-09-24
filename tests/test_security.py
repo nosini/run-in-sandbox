@@ -423,7 +423,7 @@ print(json.dumps({{
             """
             return subprocess.run(["bash", "-c", script, "tab", *words], env=self.env,
                                   capture_output=True, text=True).stdout.split("\n")[:-1]
-        self.assertIn("--proton=", tab("--pro"))
+        self.assertEqual(tab("--pro"), ["--proton"])      # plain; = is typed
         self.assertEqual(tab(str(self.game), "/g"), ["/game/"])
         self.assertEqual(sorted(tab(str(self.game), "/game/")),
                          ["/game/bin/", "/game/read me.txt"])

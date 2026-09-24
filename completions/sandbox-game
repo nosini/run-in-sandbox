@@ -149,11 +149,12 @@ _sandbox_game()
         return
     fi
 
+    # --proton, --gamescope and --mkxp take an optional =VALUE; they are
+    # listed plain, and typing the = gets the values completed.
     if [[ $cur == -* ]]; then
-        COMPREPLY=($(compgen -W '--wayland --gamescope --gamescope= --host-x11
-            --headless --proton --proton= --mkxp --mkxp= --net --ro --name --env
-            --mangohud --stop --stop-all --print-name --list-proton --help' -- "$cur"))
-        [[ ${COMPREPLY-} == *= ]] && compopt -o nospace
+        COMPREPLY=($(compgen -W '--wayland --gamescope --host-x11 --headless
+            --proton --mkxp --net --ro --name --env --mangohud --stop --stop-all
+            --print-name --list-proton --help' -- "$cur"))
         return
     fi
     _sandbox_game_filedir -d                   # GAMEDIR
