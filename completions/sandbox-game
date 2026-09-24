@@ -3,7 +3,7 @@
 # bash-completion picks it up the first time sandbox-game is completed.
 #
 # Completes the options; running sandboxes after --stop; existing ones after
-# --name; Proton installs after --proton=; directories for GAMEDIR; and, for
+# --name, --delete and --reset-install; Proton installs after --proton=; directories for GAMEDIR; and, for
 # the command, paths inside GAMEDIR written the way the sandbox sees them --
 # type /game/ and it lists the game's folder.
 
@@ -97,7 +97,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -120,7 +120,7 @@ _sandbox_game()
         --stop)
             COMPREPLY=($(compgen -W "$(_sandbox_game_running)" -- "$cur"))
             return ;;
-        --name)
+        --name | --delete | --reset-install)
             COMPREPLY=($(compgen -W "$(_sandbox_game_known)" -- "$cur"))
             return ;;
         --print-name)
@@ -153,8 +153,8 @@ _sandbox_game()
     # listed plain, and typing the = gets the values completed.
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --gamescope --host-x11 --headless
-            --proton --mkxp --net --ro --name --env --mangohud --stop --stop-all
-            --print-name --list-proton --help' -- "$cur"))
+            --proton --mkxp --net --ro --name --env --mangohud --list --stop
+            --stop-all --reset-install --delete --print-name --list-proton --help' -- "$cur"))
         return
     fi
     _sandbox_game_filedir -d                   # GAMEDIR

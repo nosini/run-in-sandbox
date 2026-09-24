@@ -391,6 +391,47 @@ print(json.dumps({{
         second.wait(timeout=10)
         self.assertEqual(second.returncode, 0)
 
+    def test_list_reset_install_and_delete(self):
+        (self.game / "www").mkdir()
+        (self.game / "www" / "data.js").write_text("original\n")
+        (self.game / "www" / "old.js").write_text("original\n")
+        self.run_guest("mkdir -p /game/www/save; echo s > /game/www/save/file1.rpgsave; "
+                       "echo changed > /game/www/data.js; rm /game/www/old.js; "
+                       'echo cfg > "$HOME/config"; sleep 1', "--name", "managed")
+        capture = self.home / "game-sandboxes" / "managed"
+
+        listing = self.cli("--list").stdout
+        self.assertRegex(listing, r"(?m)^managed\s+\S+\s+(<1m|\dm)\s+\d{4}-\d\d-\d\d ")
+
+        result = self.cli("--reset-install", "managed")
+        self.assertIn("kept: www/save", result.stdout)
+        seen = self.run_guest("cat /game/www/data.js /game/www/old.js /game/www/save/file1.rpgsave",
+                              "--name", "managed").stdout.split()
+        self.assertEqual(seen, ["original", "original", "s"])      # saves kept, the rest undone
+        self.assertEqual((capture / "home" / "config").read_text(), "cfg\n")
+        self.assertIn("nothing changed", self.cli("--reset-install", "managed").stdout)
+
+        # Never while it runs, and only ever a name under ~/game-sandboxes.
+        import time
+        proc = subprocess.Popen([str(ROOT / "sandbox-game"), "--headless", "--name", "managed",
+                                 self.game, "sleep", "60"], env=self.env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        for _ in range(100):
+            if "running" in self.cli("--list").stdout:
+                break
+            time.sleep(0.1)
+        refused = self.cli("--delete", "managed", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("is running", refused.stderr)
+        self.cli("--stop", "managed")
+        proc.wait(timeout=10)
+        for bad in ("../home", "no-such-game"):
+            self.assertNotEqual(self.cli("--delete", bad, check=False).returncode, 0)
+        self.cli("--delete", "managed")
+        self.assertFalse(capture.exists())
+
     def test_help_and_completion_know_every_option(self):
         # Taken from the option parser itself, so neither can fall behind it.
         import re

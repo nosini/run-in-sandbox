@@ -176,12 +176,118 @@ stop_sandboxes() {                    # $1 = NAME, empty for all
     printf 'stopped %s\n' "${names[@]}" | sort -u
 }
 
+# ---- managing sandboxes ----------------------------------------------------
+# All of a game's state is its capture folder, so managing a sandbox is
+# managing that folder -- never while the game runs, since the overlay is
+# mounted on it then.
+SANDBOXES="$HOME/game-sandboxes"
+
+valid_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$1" != . ] && [ "$1" != .. ]; }
+
+# An existing, stopped sandbox, or say why not. $1 = NAME.
+stopped_sandbox() {
+    valid_name "$1" && [ -d "$SANDBOXES/$1" ] || {
+        echo "no sandbox named '$1' (see sandbox-game --list)" >&2; return 1; }
+    [ -z "$(outer_bwraps "$1")" ] || {
+        echo "'$1' is running; stop it first: sandbox-game --stop $1" >&2; return 1; }
+}
+
+# Asked only in a terminal, so scripts can still use these.
+confirm() {
+    [ -t 0 ] || return 0
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ "$answer" == [yY]* ]]
+}
+
+# Overlayfs leaves work/work at mode 0000; nothing can be removed under it
+# until that is undone.
+unlock_work() { chmod -R u+rwx "$1/work" 2>/dev/null || true; }
+
+played() {                            # seconds -> "3h 12m"
+    local s="$1"
+    if [ "$s" -ge 3600 ]; then printf '%dh %02dm' $((s / 3600)) $((s % 3600 / 60))
+    elif [ "$s" -ge 60 ]; then printf '%dm' $((s / 60))
+    else printf '<1m'; fi
+}
+
+list_sandboxes() {
+    local d name running total last size state
+    running=" $(outer_bwraps "" | awk '{print $2}' | tr '\n' ' ') "
+    printf '%-32s %7s %9s  %-16s %s\n' NAME SIZE PLAYED "LAST PLAYED" STATE
+    for d in "$SANDBOXES"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"; name="${d##*/}"
+        valid_name "$name" || continue
+        total=0; last=""
+        if [ -f "$d/playtime" ]; then
+            read -r total last < <(awk '{ t += $2; if ($1 + $2 > l) l = $1 + $2 }
+                                        END { print t + 0, l }' "$d/playtime")
+        fi
+        # Blocks shared with other games (reflinked Proton files) count in
+        # each of them, as du counts them. While a game runs, overlayfs keeps
+        # its work folder unreadable; du counts the rest and complains.
+        size="$(du -sh "$d" 2>/dev/null | cut -f1 || true)"
+        [[ "$running" == *" $name "* ]] && state=running || state=""
+        printf '%-32s %7s %9s  %-16s %s\n' "$name" "${size:--}" \
+            "$([ "$total" -gt 0 ] && played "$total" || echo -)" \
+            "$([ -n "$last" ] && date -d "@$last" '+%Y-%m-%d %H:%M' || echo -)" "$state"
+    done
+}
+
+delete_sandbox() {                    # $1 = NAME
+    stopped_sandbox "$1" || return 1
+    local d="$SANDBOXES/$1"
+    confirm "Delete $d ($(du -sh "$d" 2>/dev/null | cut -f1 || true)) -- saves, settings and Wine prefix with it?" || {
+        echo "left alone"; return 1; }
+    unlock_work "$d"
+    rm -rf -- "$d"
+    echo "deleted $1"
+    [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game/games/$1" ] \
+        || echo "its preferences are kept: ${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game/games/$1"
+}
+
+# Throw away what the game changed in its own install folder -- rw/, the
+# overlay's upper layer -- so an updated install shows through again instead
+# of the copies the old one left. home/ (saves, settings) and the Wine prefix
+# are not touched, and neither is any "save" folder in rw/: RPG Maker MV and
+# MZ keep their saves inside the install (www/save, save).
+reset_install() {                     # $1 = NAME
+    stopped_sandbox "$1" || return 1
+    local d="$SANDBOXES/$1" keep=() changed f
+    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -maxdepth 3 -type d -iname save | sed 's|^\./||')
+    # Everything but directories -- files, links, and the character devices
+    # overlayfs uses to mark a deletion -- outside the saves being kept.
+    changed="$(cd "$d/rw" && find . -mindepth 1 ! -type d | sed 's|^\./||' |
+        awk -v keep="$(printf '%s\n' ${keep[@]+"${keep[@]}"})" '
+            BEGIN { n = split(keep, k, "\n") }
+            { for (i = 1; i <= n; i++) if (k[i] != "" && index($0, k[i] "/") == 1) next; print }')"
+    [ -n "$changed" ] || {
+        echo "$1: nothing changed in its install folder${keep[0]:+, apart from its saves}"; return 0; }
+    echo "$1: changes to its install folder, to be discarded:"
+    awk -F/ '{ n[$1]++ } END { for (t in n) printf "  %s (%d file%s)\n", t, n[t], (n[t] > 1 ? "s" : "") }' \
+        <<<"$changed" | sort
+    for f in ${keep[@]+"${keep[@]}"}; do echo "kept: $f (saves)"; done
+    confirm "Discard them?" || { echo "left alone"; return 1; }
+    unlock_work "$d"
+    rm -rf -- "$d/rw.keep"
+    for f in ${keep[@]+"${keep[@]}"}; do
+        mkdir -p "$d/rw.keep/$(dirname "$f")"
+        mv -- "$d/rw/$f" "$d/rw.keep/$f"
+    done
+    rm -rf -- "$d/rw" "$d/work"
+    if [ -d "$d/rw.keep" ]; then mv -- "$d/rw.keep" "$d/rw"; else mkdir "$d/rw"; fi
+    mkdir -p "$d/work"
+    echo "reset $1"
+}
+
 # ---- args ------------------------------------------------------------------
 # The short version. The header above says why each of these is the way it is.
 usage() {
     cat <<'EOF'
 usage: sandbox-game [OPTIONS] GAMEDIR CMD...
-       sandbox-game --stop NAME | --stop-all
+       sandbox-game --list | --stop NAME | --stop-all
+       sandbox-game --reset-install NAME | --delete NAME
        sandbox-game --print-name GAMEDIR | --list-proton | --help
 
 Runs CMD in a bwrap sandbox: no network, no home directory, GAMEDIR at /game
@@ -211,8 +317,13 @@ Other
   --mangohud            the MangoHud overlay (also: MANGOHUD=1)
 
 Managing sandboxes
+  --list                every sandbox: size, time played, last played, running
   --stop NAME           end a running sandbox and everything in it
   --stop-all            end every running sandbox
+  --reset-install NAME  discard the game's changes to its install folder
+                        (after updating it); saves, settings and any "save"
+                        folder in there are kept
+  --delete NAME         delete a sandbox: saves, settings, Wine prefix
   --print-name GAMEDIR  the sandbox name a folder gets
   --list-proton         the Proton installs found, newest first
   -h, --help            this
@@ -256,6 +367,9 @@ while [ "$#" -gt 0 ]; do
         --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
         --stop=*)    stop_sandboxes "${1#--stop=}"; exit ;;
         --stop-all)  stop_sandboxes ""; exit ;;
+        --list)      list_sandboxes; exit ;;
+        --delete)    delete_sandbox "${2:?--delete needs a sandbox name}"; exit ;;
+        --reset-install) reset_install "${2:?--reset-install needs a sandbox name}"; exit ;;
         --name)      NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
@@ -569,7 +683,7 @@ fi
 # ---- overlay for the game's own install dir --------------------------------
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
 # back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
-OVERLAY_ARGS=(); CLEANUP=""; PASTA_PID=""
+OVERLAY_ARGS=(); CLEANUP=""; PASTA_PID=""; PLAY_START=""
 if bwrap --help 2>&1 | grep -q -- --overlay; then
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
 else
@@ -601,6 +715,12 @@ cleanup() {
         local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"
         [[ "$p" =~ ^[0-9]+$ ]] && kill "$p" 2>/dev/null
         rm -f "$PASTA_PID"
+    fi
+    # One line per launch -- start, seconds played -- for --list. Here rather
+    # than after the game, so a crash or a --stop still counts.
+    if [ -n "$PLAY_START" ]; then
+        printf '%s %s\n' "$PLAY_START" "$(( $(date +%s) - PLAY_START ))" >> "$CAP/playtime"
+        PLAY_START=""
     fi
     return 0
 }
@@ -865,6 +985,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
+PLAY_START="$(date +%s)"
 if [ "$NET" = 0 ]; then
     "${BWRAP[@]}" "$@" && rc=0 || rc=$?
 else

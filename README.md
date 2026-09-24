@@ -252,6 +252,7 @@ sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
+sandbox-game --list | --reset-install NAME | --delete NAME
 ```
 
 `sandbox-game --help` lists the options. With bash-completion, Tab completes
@@ -286,6 +287,9 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--list-proton` | list the Proton installs found, newest first |
 | `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
 | `--stop-all` | the same, for every running sandbox |
+| `--list` | every sandbox: size, time played, when last played, whether running |
+| `--reset-install NAME` | discard what the game changed in its install folder; see [Managing sandboxes](#managing-sandboxes) |
+| `--delete NAME` | delete a sandbox, saves and all |
 
 ## Attaching to a running game
 
@@ -372,8 +376,30 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── rw/         writes into the install directory at /game
 ├── compat/     --proton: the Wine prefix, under pfx/
 ├── mkxp.json   --mkxp: the runtime config, yours to edit
-└── machine-id  the game's own stand-in for /etc/machine-id
+├── machine-id  the game's own stand-in for /etc/machine-id
+└── playtime    one line per launch: when it started, seconds played
 ```
+
+### Managing sandboxes
+
+```sh
+sandbox-game --list
+NAME                                SIZE    PLAYED  LAST PLAYED      STATE
+some-game                           1.2G    3h 12m  2026-09-24 18:10 running
+```
+
+`SIZE` is what `du` says, which counts blocks shared between games — Proton
+files reflinked on XFS or btrfs — once for each of them.
+
+`--reset-install NAME` is for after updating a game. Everything the game wrote
+into its own install folder lives in `rw/`, and shadows the install beneath it:
+left there, an old copy of a file would hide the updated one. This throws `rw/`
+away, and lists what goes first, but keeps any `save` folder in it (RPG Maker
+MV and MZ keep their saves inside the install, in `www/save` or `save`), and
+leaves `home/` and the Wine prefix alone.
+
+`--delete NAME` removes the whole capture folder; the game's preferences stay.
+Both refuse while the game runs, and ask first when run in a terminal.
 
 `mkxp.json` is generated from the runtime's own commented one on first launch
 and then left alone, so per-game tweaks — a soundfont, RTP paths, `fontSub` —
