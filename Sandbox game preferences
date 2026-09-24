@@ -22,7 +22,7 @@
 #   net=0|1                             # internet access, never the LAN
 #   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
 #   env=K=V K=V ...                      e.g. WAYLANDDRV_PRIMARY_MONITOR=HDMI-1
-# Resolution and fullscreen get a second dialog once gamescope is on; the rest
+# Resolution and fullscreen get a second dialog when gamescope will run; the rest
 # of gamescope_args, and all of env, are set by hand and carried through saves
 # untouched. env explicitly adds values to the clean sandbox environment.
 # Values cannot contain spaces, the list being split on them.
@@ -99,7 +99,7 @@ N_OFF="Off"; N_ON="Internet only (no LAN, nothing on this PC)"
 [ "$NET_NOW" = 1 ] && N_CUR="$N_ON" || N_CUR="$N_OFF"
 mapfile -t N_ALL < <(first "$N_CUR" "$N_OFF" "$N_ON")
 
-G_OFF="Automatic (required for private Xwayland)"; G_ON="On"
+G_OFF="Automatic (on for private Xwayland)"; G_ON="On (always)"
 [ "$GS_NOW" = 1 ] && G_CUR="$G_ON" || G_CUR="$G_OFF"
 mapfile -t G_ALL < <(first "$G_CUR" "$G_OFF" "$G_ON")
 
@@ -154,19 +154,26 @@ else W=0; fi
 if [ "$F_MHUD" = "$M_NA" ]; then M="$(kept mangohud 0)"
 elif [ "$F_MHUD" = "$M_ON" ]; then M=1
 else M=0; fi
+# gamescope=1 means always; Automatic is stored as 0 whatever the video
+# backend, and the launcher turns gamescope on for private Xwayland itself.
+# Saving 1 for private Xwayland instead would pin it on, and it would stay on
+# after a switch to native Wayland.
 [ "$F_GS" = "$G_ON" ] && G=1 || G=0
 [ "$F_NET" = "$N_ON" ] && NET=1 || NET=0
-[ "$F_VIDEO" != "$V_X" ] || G=1
 [ "$F_VIDEO" = "$V_HOST" ] && HX=1 || HX=0
 [ "$HX" = 0 ] || G=0
+# Whether gamescope will actually run, which is when its options matter.
+USES_GS=$G
+[ "$F_VIDEO" = "$V_X" ] && USES_GS=1
 
 # ---- gamescope options -----------------------------------------------------
-# Only worth asking once gamescope is on, so it is a second dialog rather than
-# four more fields nobody with it switched off would want. Resolution and
+# Only worth asking when gamescope will run -- On, or Automatic with private
+# Xwayland -- so it is a second dialog rather than four more fields nobody
+# without it would want. Resolution and
 # fullscreen are the two knobs; anything else in gamescope_args was put there
 # by hand and is parsed out, left alone, and put back.
 GA_OUT="$(kept gamescope_args "")"
-if [ "$G" = 1 ]; then
+if [ "$USES_GS" = 1 ]; then
     GA_W=""; GA_H=""; GA_F=0; GA_REST=(); i=0
     read -r -a GA_IN <<<"$GA_OUT"
     while [ "$i" -lt "${#GA_IN[@]}" ]; do

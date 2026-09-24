@@ -231,7 +231,7 @@ class SecurityTests(unittest.TestCase):
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join([
-            "Host X11 (allows access to other X apps)", "Off", "On",
+            "Host X11 (allows access to other X apps)", "Off", "On (always)",
             "Newest installed (auto)", "Off", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
                                 env=self.env, capture_output=True, text=True, timeout=15)
@@ -521,6 +521,32 @@ print(json.dumps({{
         self.assertEqual(sorted(tab(str(self.game), "/game/")),
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
+
+    def test_gamescope_automatic_stays_automatic(self):
+        # Automatic is gamescope=0 whatever the video backend -- the launcher
+        # turns it on for private Xwayland itself. Saving 1 there pinned it
+        # on, and it stayed on after a switch to native Wayland.
+        bindir = self.home / ".local" / "bin"         # where the dialog looks
+        bindir.mkdir(parents=True)
+        for script in ("sandbox-game", "sandbox-game-lib"):
+            (bindir / script).symlink_to(ROOT / script)
+        zenity = bindir / "zenity"
+        zenity.write_text('#!/bin/sh\ncase "$*" in *--forms*) printf "%s\\n" "$TEST_FORM" ;; esac\n')
+        zenity.chmod(0o755)
+        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        name = self.cli("--print-name", self.game).stdout.strip()
+        settings = self.home / ".config" / "sandbox-game" / "games" / name
+        def save(video, gamescope):
+            self.env["TEST_FORM"] = "\t".join([video, "Off", gamescope,
+                                               "Newest installed (auto)", "Off", "This game only"])
+            subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
+                           capture_output=True, timeout=15, check=True)
+            return dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l)
+        automatic = "Automatic (on for private Xwayland)"
+        self.assertEqual(save("Private Xwayland (gamescope)", automatic)["gamescope"], "0")
+        self.assertEqual(save("Native Wayland", automatic)["gamescope"], "0")
+        self.assertEqual(save("Native Wayland", "On (always)")["gamescope"], "1")
 
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""
