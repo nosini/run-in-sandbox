@@ -1,4 +1,4 @@
--- run-in-sandbox: refuse to link recording streams from restricted clients.
+-- run-in-sandbox: refuse to link recording streams from sandboxed games.
 -- Installed to ~/.local/share/wireplumber/scripts/sandbox-game/ by
 -- `install.sh --restrict-audio`, and loaded by 60-sandbox-audio.conf.
 --
@@ -6,7 +6,7 @@
 -- behalf, with its own rights -- so a client that cannot even see a microphone
 -- still gets linked to the default one when it opens a recording stream. This
 -- runs ahead of every target-finding hook and ends the search for recording
--- streams whose client is restricted: no target, no link, no audio. Playback
+-- streams whose client is a game: no target, no link, no audio. Playback
 -- streams go on as normal.
 --
 -- The stream is failed outright ("no such entity"), the way WirePlumber fails
@@ -15,9 +15,10 @@
 -- probe formats, so every Proton game sat out pipewire-pulse's 30 s timeout.
 -- To the game it looks like a machine without a microphone.
 --
--- "Restricted" is decided the way WirePlumber's own access hooks decide it,
--- from properties the client cannot set: pipewire-pulse marks each Pulse
--- client with the client.access of the socket it came through.
+-- A game is a client of access class "sandbox-game", decided the way
+-- WirePlumber's own access hooks decide a class, from properties the client
+-- cannot set: pipewire-pulse marks each Pulse client with the client.access of
+-- the socket it came through, and only sandbox-pulse's socket carries this one.
 
 cutils = require ("common-utils")
 lutils = require ("linking-utils")
@@ -55,11 +56,11 @@ SimpleEventHook {
     local client = client_om:lookup {
       Constraint { "bound-id", "=", client_id, type = "gobject" }
     }
-    if client == nil or cutils.get_client_access (client.properties) ~= "restricted" then
+    if client == nil or cutils.get_client_access (client.properties) ~= "sandbox-game" then
       return
     end
     log:info (si, string.format (
-        "refusing recording stream '%s' of restricted client '%s'",
+        "refusing recording stream '%s' of sandboxed game '%s'",
         tostring (node.properties ["node.name"]),
         tostring (client.properties ["application.name"])))
     event:set_data ("target", nil)

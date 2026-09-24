@@ -461,24 +461,26 @@ has none; `module-native-protocol-tcp` would open the sound server to the LAN.
 - **A sound server of the games' own.** A second pipewire-pulse,
   `sandbox-pulse.service`, with one socket and module loading switched off —
   that switch only exists for a whole server, and the desktop's may want it.
-  Everything connecting to it is marked restricted. The game gets this socket
-  alone, where Pulse clients look for one, and no PipeWire socket.
+  Everything connecting to it gets an access class of its own,
+  `sandbox-game`. The game gets this socket alone, where Pulse clients look
+  for one, and no PipeWire socket.
 - **Nothing to record.** WirePlumber hides every source and microphone, the
-  monitor ports of every sink and the link factory from restricted clients.
-  Hiding alone would not do: WirePlumber links a recording stream to the
-  default source on the client's behalf, with its own rights. So a hook
-  (`deny-restricted-capture.lua`) refuses to link a restricted client's
-  recording streams at all. It is loaded as required: if it ever fails to
-  load, WirePlumber does not start, rather than games quietly regaining the
-  microphone.
+  monitor ports of every sink and the link factory from `sandbox-game`
+  clients. Hiding alone would not do: WirePlumber links a recording stream to
+  the default source on the client's behalf, with its own rights. So a hook
+  (`deny-restricted-capture.lua`) refuses a game's recording streams outright,
+  failing them at once as if there were no microphone. It is loaded as
+  required: if it ever fails to load, WirePlumber does not start, rather than
+  games quietly regaining the microphone.
 
 Playback is unaffected for anything that speaks Pulse: SDL, OpenAL (mkxp-z),
 Wine and Proton, Chromium (NW.js), FMOD. A game that talks to ALSA and nothing
 else stays silent — ALSA's default goes through the PipeWire socket, and
 openSUSE's `alsa-plugins-pulse` conflicts with `pipewire-alsa`. Other apps'
-playback streams stay visible by name, though not recordable. The rules apply
-to every client WirePlumber considers restricted, which includes Pulse clients
-connecting over TCP.
+playback streams stay visible by name, though not recordable. Nothing else is
+affected: the rules match the `sandbox-game` class alone, and what WirePlumber
+allows any other client — the stock `restricted` class included — is left as
+it was.
 
 What goes where: `~/.config/pipewire/sandbox-pulse.conf`,
 `~/.config/systemd/user/sandbox-pulse.service`,
