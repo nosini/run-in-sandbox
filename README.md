@@ -74,6 +74,7 @@ What goes where:
 | `sandbox-game-lib` (mode 644) | `~/.local/bin/` |
 | `Sandbox game`, `Sandbox game preferences` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
+| `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
 
 `sandbox-game-lib` goes beside `sandbox-game`, not in the scripts directory: it
 holds the parts the launcher and the preferences dialog must agree on, and
@@ -135,6 +136,7 @@ working directory.
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
 | memory and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
+| Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
 
@@ -251,6 +253,11 @@ sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 ```
+
+`sandbox-game --help` lists the options. With bash-completion, Tab completes
+them too, along with running sandboxes after `--stop`, Proton installs after
+`--proton=`, and the command: type `/game/` and it lists the game's folder, as
+the sandbox will see it.
 
 `CMD` refers to the game at `/game`, not at its path on disk:
 

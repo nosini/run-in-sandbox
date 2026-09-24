@@ -177,6 +177,58 @@ stop_sandboxes() {                    # $1 = NAME, empty for all
 }
 
 # ---- args ------------------------------------------------------------------
+# The short version. The header above says why each of these is the way it is.
+usage() {
+    cat <<'EOF'
+usage: sandbox-game [OPTIONS] GAMEDIR CMD...
+       sandbox-game --stop NAME | --stop-all
+       sandbox-game --print-name GAMEDIR | --list-proton | --help
+
+Runs CMD in a bwrap sandbox: no network, no home directory, GAMEDIR at /game
+as an overlay. Everything the game writes lands in ~/game-sandboxes/NAME/.
+CMD refers to the game at /game, not at its path on disk.
+
+Display (default: gamescope's private Xwayland)
+  --wayland             native Wayland; with --proton, Proton's winewayland
+  --gamescope[=ARGS]    run inside gamescope, passing ARGS (quote them all)
+  --host-x11            the host X server -- other X apps can be watched and
+                        controlled; never for a game you do not trust
+  --headless            no display at all
+
+Runtimes
+  --proton[=VER]        CMD is a Windows .exe, run with Proton: the newest
+                        found, or VER by name or path ($PROTON_DIR wins)
+  --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
+
+Access
+  --net                 the internet, and only that: no LAN, nothing on this
+                        machine, nothing incoming (needs pasta)
+  --ro SRC DST          bind SRC in read-only at DST
+
+Other
+  --name NAME           sandbox name, else derived from GAMEDIR
+  --env K=V             set a variable inside; repeatable, applied last
+  --mangohud            the MangoHud overlay (also: MANGOHUD=1)
+
+Managing sandboxes
+  --stop NAME           end a running sandbox and everything in it
+  --stop-all            end every running sandbox
+  --print-name GAMEDIR  the sandbox name a folder gets
+  --list-proton         the Proton installs found, newest first
+  -h, --help            this
+
+Examples
+  sandbox-game ~/Games/SomeRenpyGame /game/SomeRenpyGame.sh
+  sandbox-game --proton ~/Games/SomeWindowsGame /game/game.exe
+  sandbox-game --net --proton=GE-Proton10 ~/Games/Online /game/bin/client.exe
+  sandbox-game --mkxp ~/Games/SomeVXAceGame
+
+Read on the host: PROTON_DIR, MKXP_DIR, NWJS_DIR, SANDBOX_TOOLS_DIR,
+SANDBOX_SECCOMP=log, MANGOHUD=1. Sound is playback only once
+`install.sh --restrict-audio` has set that up. More in the README.
+EOF
+}
+
 # Shared by both spellings of --env, so "--env FOO" is rejected as loudly as
 # "--env=FOO" instead of quietly setting FOO to itself.
 add_env() {                           # reads $_e as KEY=VALUE
@@ -200,6 +252,7 @@ while [ "$#" -gt 0 ]; do
         --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
         --list-proton) list_protons; exit 0 ;;
+        -h|--help)   usage; exit 0 ;;
         --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
         --stop=*)    stop_sandboxes "${1#--stop=}"; exit ;;
         --stop-all)  stop_sandboxes ""; exit ;;
@@ -213,13 +266,14 @@ while [ "$#" -gt 0 ]; do
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
         --)          shift; break ;;
-        -*)          echo "unknown option: $1" >&2; exit 1 ;;
+        -*)          echo "unknown option: $1 (see sandbox-game --help)" >&2; exit 1 ;;
         *)           break ;;
     esac
 done
 [ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
-GAMEDIR="$(realpath "${1:?usage: sandbox-game [--wayland] [--name NAME] [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...}")"; shift
+[ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
+GAMEDIR="$(realpath "$1")"; shift
 # --mkxp supplies its own command: the runtime is the program.
 [ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }

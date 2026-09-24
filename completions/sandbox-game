@@ -1,0 +1,161 @@
+# bash completion for sandbox-game                         -*- shell-script -*-
+# Installed to ~/.local/share/bash-completion/completions/ by install.sh, where
+# bash-completion picks it up the first time sandbox-game is completed.
+#
+# Completes the options; running sandboxes after --stop; existing ones after
+# --name; Proton installs after --proton=; directories for GAMEDIR; and, for
+# the command, paths inside GAMEDIR written the way the sandbox sees them --
+# type /game/ and it lists the game's folder.
+
+# bash-completion 2.12 renamed its helpers; use whichever this one has.
+_sandbox_game_init()
+{
+    if declare -F _comp_initialize >/dev/null; then
+        _comp_initialize -s -- "$@"
+    else
+        _init_completion -s
+    fi
+}
+_sandbox_game_filedir()
+{
+    if declare -F _comp_compgen_filedir >/dev/null; then
+        _comp_compgen_filedir "$@"
+    else
+        _filedir "$@"
+    fi
+}
+
+# Running sandboxes, as `sandbox-attach --list` names them.
+_sandbox_game_running()
+{
+    sandbox-attach --list 2>/dev/null | awk 'NR > 1 && NF >= 2 { print $1 }'
+}
+
+# Sandboxes that exist, running or not: the folders in ~/game-sandboxes.
+_sandbox_game_known()
+{
+    local d
+    for d in ~/game-sandboxes/*/; do
+        [[ -d $d ]] && d=${d%/} && printf '%s\n' "${d##*/}"
+    done
+}
+
+# A word as typed -- quotes and backslashes and all -- as the shell will see
+# it, in REPLY. bash-completion 2.12 renamed this helper too, and made it
+# refuse anything that is not plainly a word.
+_sandbox_game_dequote()
+{
+    if declare -F _comp_dequote >/dev/null; then
+        _comp_dequote "$1" || return
+        REPLY=${REPLY[0]-}
+    else
+        REPLY=$(dequote "$1")
+    fi
+}
+
+# The command, as the sandbox sees it: /game/... is the game folder, and so is
+# a relative path, the sandbox starting out in /game. $1 = the game folder as
+# typed. Anything else absolute is the host's /usr and the like.
+_sandbox_game_inside()
+{
+    local REPLY root base prefix m r
+    _sandbox_game_dequote "$1" || return
+    root=$(realpath -- "${REPLY/#\~/$HOME}" 2>/dev/null) || return
+    if [[ $cur == /game || $cur == /game/* ]]; then
+        base=$root${cur#/game} prefix=/game
+    elif [[ $cur == /* ]]; then
+        if [[ /game/ == "$cur"* ]]; then
+            COMPREPLY=(/game/)
+            compopt -o nospace 2>/dev/null
+        else
+            _sandbox_game_filedir
+        fi
+        return
+    else
+        base=$root/$cur prefix=
+    fi
+    local IFS=$'\n'
+    COMPREPLY=()
+    for m in $(compgen -f -- "$base"); do
+        [[ -d $m ]] && m+=/
+        r=${m#"$root"}
+        COMPREPLY+=("${prefix:-${r#/}}${prefix:+$r}")
+    done
+    # Quote what the shell needs quoted, and let a folder's slash stand without
+    # a space, so the next level is one Tab away.
+    compopt -o filenames 2>/dev/null
+    [[ ${#COMPREPLY[@]} -ne 1 || ${COMPREPLY[0]} == */ ]] && compopt -o nospace 2>/dev/null
+}
+
+_sandbox_game()
+{
+    local cur prev words cword was_split split
+    _sandbox_game_init || return
+
+    # Where are we? Options run up to GAMEDIR; everything after it is CMD.
+    local i skip=0 gamedir="" at=-1
+    for ((i = 1; i < cword; i++)); do
+        if ((skip)); then ((skip--)); continue; fi
+        case ${words[i]} in
+            --name | --env | --stop | --print-name) skip=1 ;;
+            --ro) skip=2 ;;
+            --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
+            -*) ;;
+            *) gamedir=${words[i]}; at=$i; break ;;
+        esac
+    done
+    if ((at >= 0 && cword > at)); then
+        if ((cword == at + 1)); then
+            _sandbox_game_inside "$gamedir"
+        else
+            _sandbox_game_filedir      # arguments to the game's own command
+        fi
+        return
+    fi
+
+    # An option's value. --opt=value arrives split into prev and cur.
+    local split_here=""
+    [[ ${words[cword]} == "$prev="* ]] && split_here=1
+    case $prev in
+        --stop)
+            COMPREPLY=($(compgen -W "$(_sandbox_game_running)" -- "$cur"))
+            return ;;
+        --name)
+            COMPREPLY=($(compgen -W "$(_sandbox_game_known)" -- "$cur"))
+            return ;;
+        --print-name)
+            _sandbox_game_filedir -d
+            return ;;
+        --ro)
+            _sandbox_game_filedir
+            return ;;
+        --env | --gamescope)
+            return ;;
+        --proton)
+            if [[ $split_here ]]; then
+                if [[ $cur == [/~.]* ]]; then
+                    _sandbox_game_filedir -d
+                else
+                    local IFS=$'\n'
+                    COMPREPLY=($(compgen -W "$(sandbox-game --list-proton 2>/dev/null)" -- "$cur"))
+                fi
+                return
+            fi ;;
+        --mkxp)
+            [[ $split_here ]] && { _sandbox_game_filedir -d; return; } ;;
+    esac
+    # --ro's second argument is a path inside the sandbox: nothing to offer.
+    if ((cword >= 3)) && [[ ${words[cword - 2]} == --ro ]]; then
+        return
+    fi
+
+    if [[ $cur == -* ]]; then
+        COMPREPLY=($(compgen -W '--wayland --gamescope --gamescope= --host-x11
+            --headless --proton --proton= --mkxp --mkxp= --net --ro --name --env
+            --mangohud --stop --stop-all --print-name --list-proton --help' -- "$cur"))
+        [[ ${COMPREPLY-} == *= ]] && compopt -o nospace
+        return
+    fi
+    _sandbox_game_filedir -d                   # GAMEDIR
+}
+complete -F _sandbox_game sandbox-game

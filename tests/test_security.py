@@ -391,6 +391,44 @@ print(json.dumps({{
         second.wait(timeout=10)
         self.assertEqual(second.returncode, 0)
 
+    def test_help_and_completion_know_every_option(self):
+        # Taken from the option parser itself, so neither can fall behind it.
+        import re
+        parser = (ROOT / "sandbox-game").read_text()
+        options = set(re.findall(r"^\s+(?:-h\|)?(--[a-z0-9-]+)(?:=\*)?\)", parser, re.M))
+        self.assertIn("--proton", options)
+        help_text = self.cli("--help").stdout
+        completion = (ROOT / "completions" / "sandbox-game").read_text()
+        for option in sorted(options):
+            self.assertIn(option, help_text, f"--help does not mention {option}")
+            self.assertRegex(completion, rf"(?<![\w-]){re.escape(option)}(?![\w-])",
+                             f"completion does not offer {option}")
+
+    def test_completion_lists_options_and_the_game_folder(self):
+        bash_completion = Path("/usr/share/bash-completion/bash_completion")
+        if not bash_completion.exists():
+            self.skipTest("bash-completion is not installed")
+        (self.game / "bin").mkdir()
+        (self.game / "bin" / "game.exe").write_text("")
+        (self.game / "read me.txt").write_text("")
+        def tab(*words):
+            script = f"""
+                source {bash_completion} 2>/dev/null
+                source {ROOT / "completions" / "sandbox-game"}
+                COMP_WORDS=(sandbox-game "$@"); COMP_CWORD=$(( ${{#COMP_WORDS[@]}} - 1 ))
+                COMP_LINE="${{COMP_WORDS[*]}}"; COMP_POINT=${{#COMP_LINE}}
+                _sandbox_game sandbox-game "${{COMP_WORDS[COMP_CWORD]}}" \\
+                    "${{COMP_WORDS[COMP_CWORD-1]}}" 2>/dev/null
+                printf '%s\\n' "${{COMPREPLY[@]}}"
+            """
+            return subprocess.run(["bash", "-c", script, "tab", *words], env=self.env,
+                                  capture_output=True, text=True).stdout.split("\n")[:-1]
+        self.assertIn("--proton=", tab("--pro"))
+        self.assertEqual(tab(str(self.game), "/g"), ["/game/"])
+        self.assertEqual(sorted(tab(str(self.game), "/game/")),
+                         ["/game/bin/", "/game/read me.txt"])
+        self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
+
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""
         bindir = self.base / "bin"

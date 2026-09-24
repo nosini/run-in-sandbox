@@ -1,0 +1,31 @@
+# bash completion for sandbox-attach                       -*- shell-script -*-
+# Installed to ~/.local/share/bash-completion/completions/ by install.sh.
+# Completes the options, running sandboxes after --name, and files for the
+# program to run (host paths in the tools folder or a sandbox's home are
+# translated by sandbox-attach itself).
+
+_sandbox_attach()
+{
+    local cur prev words cword was_split split
+    if declare -F _comp_initialize >/dev/null; then
+        _comp_initialize -s -- "$@" || return
+    else
+        _init_completion -s || return
+    fi
+
+    if [[ $prev == --name ]]; then
+        COMPREPLY=($(compgen -W "$(sandbox-attach --list 2>/dev/null |
+            awk 'NR > 1 && NF >= 2 { print $1 }')" -- "$cur"))
+        return
+    fi
+    if [[ $cur == -* ]]; then
+        COMPREPLY=($(compgen -W '--name --list --shell --exec --help' -- "$cur"))
+        return
+    fi
+    if declare -F _comp_compgen_filedir >/dev/null; then
+        _comp_compgen_filedir
+    else
+        _filedir
+    fi
+}
+complete -F _sandbox_attach sandbox-attach

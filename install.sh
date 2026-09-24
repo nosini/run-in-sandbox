@@ -40,6 +40,13 @@ each() {
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
 }
 
+# The bash completions, from completions/, where bash-completion looks for a
+# user's own: it loads one the first time its command is completed.
+each_completion() {
+    "$@" 644 sandbox-game   "$DATA/bash-completion/completions"
+    "$@" 644 sandbox-attach "$DATA/bash-completion/completions"
+}
+
 # The same for --restrict-audio, whose files come from audio/.
 each_audio() {
     "$@" 644 sandbox-pulse.conf          "$CONF/pipewire"
@@ -57,6 +64,9 @@ remove_one() {
 install_one() {
     install -Dm"$1" "$SRC/$2" "$3/$2"; say "installed $3/$2"
 }
+install_completion() {
+    install -Dm"$1" "$SRC/completions/$2" "$3/$2"; say "installed $3/$2"
+}
 AUDIO_CHANGED=0
 install_audio() {
     cmp -s "$SRC/audio/$2" "$3/$2" && return 0
@@ -68,6 +78,7 @@ AUDIO=0
 case "${1:-}" in
     --uninstall)
         each remove_one
+        each_completion remove_one
         if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
             systemctl --user disable --now sandbox-pulse.service 2>/dev/null || true
             each_audio remove_one
@@ -101,6 +112,7 @@ fi
 
 # ---- install ----------------------------------------------------------------
 each install_one
+each_completion install_completion
 mkdir -p "$TOOLS"
 say "tools folder: $TOOLS (unpack a portable Cheat Engine here)"
 
