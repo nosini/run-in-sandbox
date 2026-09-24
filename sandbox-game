@@ -250,24 +250,31 @@ delete_sandbox() {                    # $1 = NAME
 # Throw away what the game changed in its own install folder -- rw/, the
 # overlay's upper layer -- so an updated install shows through again instead
 # of the copies the old one left. home/ (saves, settings) and the Wine prefix
-# are not touched, and neither is any "save" folder in rw/: RPG Maker MV and
-# MZ keep their saves inside the install (www/save, save).
+# are not touched, and neither is anything in rw/ with "save" in its name, in
+# any case: plenty of engines keep saves inside the install -- RPG Maker MV
+# and MZ in www/save or save, Ren'Py in game/saves, RPG Maker XP/VX/VX Ace
+# as Save01.rxdata and the like right in the game folder, others in SaveData.
+# Matching by name keeps a little too much at worst: an updated file that
+# happens to be called that stays hidden, rather than a save being lost.
 reset_install() {                     # $1 = NAME
     stopped_sandbox "$1" || return 1
     local d="$SANDBOXES/$1" keep=() changed f
-    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -maxdepth 3 -type d -iname save | sed 's|^\./||')
+    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -maxdepth 4 -iname '*save*' -print -prune |
+                        sed 's|^\./||')
     # Everything but directories -- files, links, and the character devices
     # overlayfs uses to mark a deletion -- outside the saves being kept.
     changed="$(cd "$d/rw" && find . -mindepth 1 ! -type d | sed 's|^\./||' |
         awk -v keep="$(printf '%s\n' ${keep[@]+"${keep[@]}"})" '
             BEGIN { n = split(keep, k, "\n") }
-            { for (i = 1; i <= n; i++) if (k[i] != "" && index($0, k[i] "/") == 1) next; print }')"
+            { for (i = 1; i <= n; i++)
+                  if (k[i] != "" && ($0 == k[i] || index($0, k[i] "/") == 1)) next
+              print }')"
     [ -n "$changed" ] || {
         echo "$1: nothing changed in its install folder${keep[0]:+, apart from its saves}"; return 0; }
     echo "$1: changes to its install folder, to be discarded:"
     awk -F/ '{ n[$1]++ } END { for (t in n) printf "  %s (%d file%s)\n", t, n[t], (n[t] > 1 ? "s" : "") }' \
         <<<"$changed" | sort
-    for f in ${keep[@]+"${keep[@]}"}; do echo "kept: $f (saves)"; done
+    for f in ${keep[@]+"${keep[@]}"}; do echo "kept: $f (looks like a save)"; done
     confirm "Discard them?" || { echo "left alone"; return 1; }
     unlock_work "$d"
     rm -rf -- "$d/rw.keep"
@@ -321,8 +328,8 @@ Managing sandboxes
   --stop NAME           end a running sandbox and everything in it
   --stop-all            end every running sandbox
   --reset-install NAME  discard the game's changes to its install folder
-                        (after updating it); saves, settings and any "save"
-                        folder in there are kept
+                        (after updating it); settings, and anything in there
+                        named like a save, are kept
   --delete NAME         delete a sandbox: saves, settings, Wine prefix
   --print-name GAMEDIR  the sandbox name a folder gets
   --list-proton         the Proton installs found, newest first

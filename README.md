@@ -395,9 +395,12 @@ files reflinked on XFS or btrfs — once for each of them.
 `--reset-install NAME` is for after updating a game. Everything the game wrote
 into its own install folder lives in `rw/`, and shadows the install beneath it:
 left there, an old copy of a file would hide the updated one. This throws `rw/`
-away, and lists what goes first, but keeps any `save` folder in it (RPG Maker
-MV and MZ keep their saves inside the install, in `www/save` or `save`), and
-leaves `home/` and the Wine prefix alone.
+away, and lists what goes first, but keeps anything in it with "save" in its
+name, in any case — plenty of engines keep saves inside the install: RPG Maker
+MV and MZ in `www/save`, Ren'Py in `game/saves`, RPG Maker XP/VX/VX Ace as
+`Save01.rxdata` and the like in the game folder itself. That keeps a little too
+much at worst: an updated file that happens to be named so stays hidden, rather
+than a save being lost. `home/` and the Wine prefix are left alone.
 
 `--delete NAME` removes the whole capture folder; the game's preferences stay.
 Both refuse while the game runs, and ask first when run in a terminal.

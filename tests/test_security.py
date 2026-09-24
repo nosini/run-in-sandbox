@@ -445,7 +445,11 @@ print(json.dumps({{
         (self.game / "www").mkdir()
         (self.game / "www" / "data.js").write_text("original\n")
         (self.game / "www" / "old.js").write_text("original\n")
-        self.run_guest("mkdir -p /game/www/save; echo s > /game/www/save/file1.rpgsave; "
+        # Saves as three engines keep them in the install: RPG Maker MV/MZ,
+        # Ren'Py, and RPG Maker XP/VX/VX Ace (a file, not a folder).
+        self.run_guest("mkdir -p /game/www/save /game/game/saves; "
+                       "echo s > /game/www/save/file1.rpgsave; "
+                       "echo r > /game/game/saves/1-1-LT1.save; echo x > /game/Save01.rxdata; "
                        "echo changed > /game/www/data.js; rm /game/www/old.js; "
                        'echo cfg > "$HOME/config"; sleep 1', "--name", "managed")
         capture = self.home / "game-sandboxes" / "managed"
@@ -454,10 +458,12 @@ print(json.dumps({{
         self.assertRegex(listing, r"(?m)^managed\s+\S+\s+(<1m|\dm)\s+\d{4}-\d\d-\d\d ")
 
         result = self.cli("--reset-install", "managed")
-        self.assertIn("kept: www/save", result.stdout)
-        seen = self.run_guest("cat /game/www/data.js /game/www/old.js /game/www/save/file1.rpgsave",
+        for kept in ("www/save", "game/saves", "Save01.rxdata"):
+            self.assertIn(f"kept: {kept}", result.stdout)
+        seen = self.run_guest("cat /game/www/data.js /game/www/old.js /game/www/save/file1.rpgsave "
+                              "/game/game/saves/1-1-LT1.save /game/Save01.rxdata",
                               "--name", "managed").stdout.split()
-        self.assertEqual(seen, ["original", "original", "s"])      # saves kept, the rest undone
+        self.assertEqual(seen, ["original", "original", "s", "r", "x"])  # saves kept, the rest undone
         self.assertEqual((capture / "home" / "config").read_text(), "cfg\n")
         self.assertIn("nothing changed", self.cli("--reset-install", "managed").stdout)
 
