@@ -17,8 +17,8 @@ you:
   configs, the Wine prefix — delete it and the game is factory-fresh.
 - **Less kernel to aim at.** No nested user namespaces, a seccomp filter
   over the syscalls and socket types a game never needs, only the GPU's
-  render nodes, Landlock holding the game to its mounts, and memory and task
-  limits, so a runaway game cannot take the desktop with it.
+  render nodes, Landlock holding the game to its mounts, and memory, CPU and
+  task limits, so a runaway game cannot take the desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is always
@@ -136,7 +136,7 @@ working directory.
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
-| memory and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
+| memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
@@ -603,14 +603,16 @@ passed into the sandbox, so a directory left open by whatever started
 another Landlock domain, and that is Cheat Engine's whole job. What it runs is
 still inside the sandbox's mounts, filter and scope.
 
-**Memory and task limits.** The sandbox runs in a transient systemd scope,
-`sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM and 4096 tasks. That
-turns a leak or a fork bomb into a dead game instead of a frozen desktop, and
-gives you a handle on it:
+**Memory, CPU and task limits.** The sandbox runs in a transient systemd
+scope, `sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM, 4096 tasks,
+and all but one core's worth of CPU time. That turns a leak or a fork bomb
+into a dead game instead of a frozen desktop, leaves the rest of the desktop
+a core however hard the game (or a miner hidden in it) works, and gives you a
+handle on it:
 
 ```sh
 systemctl --user list-units 'sandbox-game-*'
-systemctl --user status sandbox-game-<name>-<pid>.scope   # memory and task use
+systemctl --user status sandbox-game-<name>-<pid>.scope   # memory, CPU and task use
 ```
 
 To end a sandbox, `sandbox-game --stop NAME` is simpler and works without

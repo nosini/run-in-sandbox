@@ -959,9 +959,10 @@ SECCOMP_BPF="$(mktemp)"
 exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
 
 # ---- resource limits -------------------------------------------------------
-# A transient scope puts the whole sandbox in a cgroup of its own, so a leak or
-# a fork bomb runs into these ceilings instead of taking the desktop down, and
-# gives it a name: systemctl --user status|kill sandbox-game-NAME-PID.scope.
+# A transient scope puts the whole sandbox in a cgroup of its own, so a leak,
+# a fork bomb or a busy loop runs into these ceilings instead of taking the
+# desktop down, and gives it a name:
+# systemctl --user status|kill sandbox-game-NAME-PID.scope.
 # systemd-run execs bwrap in place, so --die-with-parent still means this shell.
 # Without a user manager to ask -- a bare TTY, some containers -- say so and go on:
 # this guards the desktop's responsiveness, not the game's reach.
@@ -971,6 +972,13 @@ if command -v systemd-run >/dev/null \
     SCOPE=( systemd-run --user --scope --quiet --collect
             --unit "sandbox-game-$NAME-$$"
             -p MemoryMax=80% -p TasksMax=4096 )
+    # All but one core's worth of CPU time, so the rest of the desktop keeps
+    # one however hard the game -- or a miner hiding in it -- works. Not a
+    # lower CPUWeight: that only counts against the other apps beside it in
+    # app.slice, and would have the game give way to a busy browser tab.
+    # A game rarely keeps every core busy; shader compiles lose 1/N.
+    CPUS="$(nproc 2>/dev/null || echo 1)"
+    [ "$CPUS" -lt 2 ] || SCOPE+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" )
     # systemd-run 254+ expands ${VAR} in the command it runs, as unit files
     # do, and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch
     # script arrived as `b=`. The command line is ours, not a unit's; hand it
@@ -979,7 +987,7 @@ if command -v systemd-run >/dev/null \
         && SCOPE+=( --expand-environment=no )
     SCOPE+=( -- )
 else
-    echo "warning: no systemd user manager; running without memory or task limits" >&2
+    echo "warning: no systemd user manager; running without memory, CPU or task limits" >&2
 fi
 
 # --disable-userns shuts the door the kernel is most often attacked through:

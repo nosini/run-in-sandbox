@@ -172,6 +172,22 @@ class SecurityTests(unittest.TestCase):
             self.skipTest("systemd user manager unreachable; scope not used")
         self.assertEqual(result.stdout, literal)
 
+    def test_scope_leaves_the_desktop_a_core(self):
+        # Needs the user manager, as above. The scope's cgroup is readable in
+        # the host's cgroup tree under /sys, found by its name.
+        if "XDG_RUNTIME_DIR" not in os.environ:
+            self.skipTest("no XDG_RUNTIME_DIR, so no systemd user manager")
+        cpus = len(os.sched_getaffinity(0))
+        if cpus < 2:
+            self.skipTest("one CPU: nothing to leave over")
+        self.env["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
+        result = self.cli("--headless", self.game, "/bin/sh", "-c",
+                          "cat $(find /sys/fs/cgroup -path '*/sandbox-game-game-*.scope/cpu.max')")
+        if "no systemd user manager" in result.stderr:
+            self.skipTest("systemd user manager unreachable; scope not used")
+        self.assertEqual(result.stdout.split(), [str((cpus - 1) * 100000), "100000"],
+                         "no CPU cap; is the cpu controller delegated to the user manager?")
+
     def test_home_devices_network_and_overlay_are_isolated(self):
         (self.home / "host-secret").write_text("private")
         (self.game / "original").write_text("original")

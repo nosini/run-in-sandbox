@@ -222,7 +222,7 @@ SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
 [ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
 [ -n "$SECCOMP" ] || { echo "$SELF: sandbox-seccomp not found beside $SELF or on PATH" >&2; exit 1; }
 
-# Join the game's cgroup as well, so its memory and task limits cover what is
+# Join the game's cgroup as well, so its memory, CPU and task limits cover what is
 # attached too, and stopping the scope stops both. Best effort: the scope is
 # only there when sandbox-game found a systemd user manager to ask for one.
 CG="$(sed -n 's/^0:://p' "/proc/$TARGET/cgroup" 2>/dev/null || true)"
