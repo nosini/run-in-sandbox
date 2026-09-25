@@ -39,6 +39,7 @@ each() {
     "$@" 644 sandbox-game-lib         "$BIN"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
+    "$@" 755 "Stop sandboxed game"      "$SCRIPTS"
 }
 
 # The bash completions, from completions/, where bash-completion looks for a

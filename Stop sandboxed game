@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Nautilus script: right-click a game and end its sandbox -- for a game hung in
+# fullscreen, or one that will not quit, without reaching for a terminal. Runs
+# sandbox-game --stop for whatever sandbox that game runs in, after asking:
+# anything unsaved is lost.
+#
+# Install beside the launcher:
+#   D=~/.local/share/nautilus/scripts
+#   install -Dm755 "Stop sandboxed game" "$D/Stop sandboxed game"
+#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+set -uo pipefail
+
+SANDBOX="$HOME/.local/bin/sandbox-game"
+[ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
+msg() { command -v zenity >/dev/null && zenity --info  --no-wrap --text="$1" 2>/dev/null \
+            || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
+            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+[ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
+
+LIB="$(dirname "$SANDBOX")/sandbox-game-lib"
+# shellcheck source=sandbox-game-lib
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found beside sandbox-game:\n$LIB"
+
+SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
+[ -n "$SEL" ] || SEL="$(pwd)"
+SEL="$(realpath "$SEL")"
+[ -e "$SEL" ] || die "Selection not found:\n$SEL"
+# Same mapping the launcher uses, so this finds the sandbox it started.
+resolve_selection "$SEL"
+NAME="$("$SANDBOX" --print-name "$R_GAMEDIR")" \
+    || die "sandbox-game could not derive a name for:\n$R_GAMEDIR"
+
+if command -v zenity >/dev/null; then
+    zenity --question --no-wrap --title="Stop sandboxed game" \
+        --text="Stop $NAME?\n\nAnything not saved is lost." 2>/dev/null || exit 0
+fi
+if ! OUT="$("$SANDBOX" --stop "$NAME" 2>&1)"; then
+    case "$OUT" in
+        "no running sandbox"*) msg "$NAME is not running." ;;
+        *) die "Could not stop $NAME:\n$OUT" ;;
+    esac
+fi

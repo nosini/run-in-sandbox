@@ -73,7 +73,7 @@ What goes where:
 |---|---|
 | `sandbox-game`, `sandbox-attach`, `sandbox-seccomp`, `sandbox-landlock` | `~/.local/bin/` |
 | `sandbox-game-lib` (mode 644) | `~/.local/bin/` |
-| `Sandbox game`, `Sandbox game preferences` | `~/.local/share/nautilus/scripts/` |
+| `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
 | `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
 
@@ -251,6 +251,10 @@ the last 80 lines in a window.
 Proton version and internet access, saved per game or as the library-wide default. Turning gamescope
 on opens a second dialog for resolution and fullscreen. This is why there is one
 launcher entry rather than one per flag combination.
+
+**Stop sandboxed game** — right-click the game, as for launching it, to end
+its sandbox after a confirmation: `sandbox-game --stop` for a game hung in
+fullscreen or one that will not quit, without a terminal.
 
 ### From the shell
 
