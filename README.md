@@ -457,8 +457,9 @@ the desktop, nor the loaded kernel modules, kernel or firmware.
 All of it comes minus what identifies the machine. Each game gets a `machine-id` of its own (which engines such as Unity
 turn into a device ID), stable across launches; the hostname is `localhost`
 and the boot ID is fresh every launch. MAC addresses, disk, NVMe, USB and
-battery serials, controller Bluetooth addresses, `/etc/fstab` and the SSH host
-keys read as empty. A game that had already run before this existed keeps
+battery serials, controller Bluetooth addresses, `/etc/fstab`, the kernel
+command line (which tends to name the root filesystem by UUID), the loaded
+module list and the SSH host keys read as empty. A game that had already run before this existed keeps
 seeing the real machine-id, in case it keyed its saves to it; delete its
 `machine-id` file to give it a fresh one.
 

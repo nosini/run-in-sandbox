@@ -823,8 +823,10 @@ ID_ARGS+=( --ro-bind-data 8 /proc/sys/kernel/random/boot_id )
 # Each covered with an empty file. Only what any user can read is worth
 # hiding; the rest (DMI serials, most VPD pages) is root-only already. A real
 # file, not /dev/null: /sys is mounted nodev, where a device node will not open.
+# The kernel command line too, which tends to name the root filesystem by
+# UUID, and /proc/modules, the driver list /sys/module is hidden for.
 : > "$CAP/.empty"
-for f in /etc/fstab /etc/crypttab /etc/hostid \
+for f in /etc/fstab /etc/crypttab /etc/hostid /proc/cmdline /proc/modules \
          /sys/class/net/*/address /sys/class/ieee80211/*/macaddress \
          /sys/class/ieee80211/*/addresses /sys/class/bluetooth/*/address \
          /sys/class/input/*/uniq \

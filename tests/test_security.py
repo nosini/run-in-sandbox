@@ -211,10 +211,13 @@ class SecurityTests(unittest.TestCase):
     def test_sys_describes_devices_not_the_machine(self):
         # The device half of /sys, where GPUs, CPUs and input are found; not
         # the cgroup tree naming every app running, nor modules, kernel or
-        # firmware.
+        # firmware. Nor, in /proc, the boot command line (the root
+        # filesystem's UUID, often) or the loaded modules.
         result = self.run_guest("ls /sys; test -e /sys/devices/system/cpu/online; "
                                 "for d in fs module kernel firmware power; do "
-                                "test ! -e /sys/$d || echo exposed: $d; done")
+                                "test ! -e /sys/$d || echo exposed: $d; done; "
+                                "for f in cmdline modules; do "
+                                "test ! -s /proc/$f || echo exposed: $f; done")
         self.assertEqual(result.stdout.split(), ["block", "bus", "class", "dev", "devices"],
                          result.stderr)
 
