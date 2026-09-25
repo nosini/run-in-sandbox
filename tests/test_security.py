@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,23 +174,49 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(result.stdout, literal)
 
     def test_scope_leaves_the_desktop_a_core(self):
-        # Needs the user manager, as above. The scope's cgroup is readable in
-        # the host's cgroup tree under /sys, found by its name.
+        # Needs the user manager, as above. Read from out here: the game sees
+        # no cgroup tree. The scope is named after the launcher's PID.
         if "XDG_RUNTIME_DIR" not in os.environ:
             self.skipTest("no XDG_RUNTIME_DIR, so no systemd user manager")
         cpus = len(os.sched_getaffinity(0))
         if cpus < 2:
             self.skipTest("one CPU: nothing to leave over")
         self.env["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
-        result = self.cli("--headless", self.game, "/bin/sh", "-c",
-                          "cat $(find /sys/fs/cgroup -path '*/sandbox-game-game-*.scope/cpu.max')")
-        if "no systemd user manager" in result.stderr:
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", self.game, "sleep", "60"],
+            env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        uid = os.getuid()
+        manager = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service")
+        scope = None
+        for _ in range(100):
+            scope = next(manager.glob(f"**/sandbox-game-game-{proc.pid}.scope"), None)
+            if scope or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        cpu_max = (scope / "cpu.max").read_text().split() \
+            if scope and (scope / "cpu.max").exists() else None
+        self.cli("--stop", "game", check=False)
+        stderr = proc.communicate(timeout=15)[1]
+        if "no systemd user manager" in stderr:
             self.skipTest("systemd user manager unreachable; scope not used")
-        if "cpu controller delegated" in result.stderr:
+        if "cpu controller delegated" in stderr:
             # Said at launch, which is all the launcher can do about it.
             self.skipTest("no cpu controller delegated to the user manager (as warned)")
-        self.assertEqual(result.stdout.split(), [str((cpus - 1) * 100000), "100000"],
+        self.assertIsNotNone(scope, stderr)
+        self.assertEqual(cpu_max, [str((cpus - 1) * 100000), "100000"],
                          "no CPU cap, and no warning about it either")
+
+    def test_sys_describes_devices_not_the_machine(self):
+        # The device half of /sys, where GPUs, CPUs and input are found; not
+        # the cgroup tree naming every app running, nor modules, kernel or
+        # firmware.
+        result = self.run_guest("ls /sys; test -e /sys/devices/system/cpu/online; "
+                                "for d in fs module kernel firmware power; do "
+                                "test ! -e /sys/$d || echo exposed: $d; done")
+        self.assertEqual(result.stdout.split(), ["block", "bus", "class", "dev", "devices"],
+                         result.stderr)
 
     def test_home_devices_network_and_overlay_are_isolated(self):
         (self.home / "host-secret").write_text("private")

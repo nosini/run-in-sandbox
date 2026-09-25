@@ -1000,6 +1000,16 @@ else
     echo "warning: no systemd user manager; running without memory, CPU or task limits" >&2
 fi
 
+# Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find
+# GPUs, CPUs, input and sensors there -- as Flatpak does. The rest is about the
+# machine rather than its hardware: /sys/fs/cgroup names every app and service
+# running on the desktop, /sys/module every driver loaded, /sys/kernel and
+# /sys/firmware the kernel and the board.
+SYS_ARGS=()
+for d in block bus class dev devices; do
+    SYS_ARGS+=( --ro-bind-try "/sys/$d" "/sys/$d" )
+done
+
 # --disable-userns shuts the door the kernel is most often attacked through:
 # without it the game could make a user namespace of its own, and with it every
 # capability that namespace confers. It needs --unshare-user outright, where
@@ -1010,7 +1020,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${BASE_ENV[@]}"
     --ro-bind /usr /usr
     --ro-bind /etc /etc
-    --ro-bind /sys /sys
+    "${SYS_ARGS[@]}"
     --symlink usr/lib   /lib
     --symlink usr/lib64 /lib64
     --symlink usr/bin   /bin

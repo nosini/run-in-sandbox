@@ -438,8 +438,13 @@ terminal devices are not exposed; controllers requiring raw device access are
 currently unavailable. Sound goes through a Pulse socket; see [Sound](#sound).
 `~/.config/MangoHud` is mounted read-only under `--mangohud`.
 
-`/etc`, `/sys` and `/proc` come from the host, minus what identifies the
-machine. Each game gets a `machine-id` of its own (which engines such as Unity
+`/etc` and `/proc` come from the host, and of `/sys` the part that describes
+devices (`block`, `bus`, `class`, `dev`, `devices`: where drivers, Mesa, SDL
+and Wine find GPUs, CPUs, input and sensors), as under Flatpak. Not the
+cgroup tree in `/sys/fs/cgroup`, which names every app and service running on
+the desktop, nor the loaded kernel modules, kernel or firmware.
+
+All of it comes minus what identifies the machine. Each game gets a `machine-id` of its own (which engines such as Unity
 turn into a device ID), stable across launches; the hostname is `localhost`
 and the boot ID is fresh every launch. MAC addresses, disk, NVMe, USB and
 battery serials, controller Bluetooth addresses, `/etc/fstab` and the SSH host
