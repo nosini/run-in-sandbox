@@ -164,6 +164,12 @@ RPG Maker ships `package.json` with an empty `"name"`, which NW.js refuses to
 start with. The launcher fills it in with the game's folder name; the edited
 copy is a captured write in `rw/`, and a name that is already set is left alone.
 
+NW.js is Chromium, and tells the sound server it is "Chromium" like every
+Chromium browser, so an audio router (pulsemeeter, qpwgraph rules) would send
+the game wherever the browsers go. The launcher renames its sound client to
+the game's folder name (non-alphanumerics as `_`), the name its process runs
+under too.
+
 #### Windows games — Proton
 
 Any Proton install, meaning any directory holding an executable `proton`

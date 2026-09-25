@@ -147,6 +147,10 @@ EOF
     # renamed to the game, then exec it against the app. $1=name $2=app-path
     # $3=the fix above $4=ozone platform, appended below once the display
     # preferences are known.
+    # Chromium tells the sound server it is "Chromium", like every Chromium
+    # browser, so a router such as pulsemeeter sends the game wherever the
+    # browsers go. PULSE_PROP_OVERRIDE renames the client to the game; plain
+    # PULSE_PROP only fills in what the application left unset.
     # --no-sandbox costs nothing measurable: NW.js 0.110 was checked running
     # without it, and none of its processes carried a seccomp filter beyond
     # sandbox-game's own. Chromium's sandbox needs the user namespaces that
@@ -154,6 +158,7 @@ EOF
     # anyway. Passed so that no NW.js build goes looking for a setuid helper.
     CMD=( sh -c '
         set -e
+        export PULSE_PROP_OVERRIDE="application.name=$1"
         [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" || true
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
