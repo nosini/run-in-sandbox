@@ -870,6 +870,24 @@ print(json.dumps({{
         self.assertNotIn("DISPLAY", args)
         self.assertIn("SDL_VIDEODRIVER", args)
 
+    def test_renpy_without_wayland_driver_gets_xwayland(self):
+        # Ren'Py builds its SDL into lib/*linux-ARCH/; one without the Wayland
+        # driver cannot run under --wayland, so it gets the private Xwayland.
+        (self.game / "renpy").mkdir()
+        lib = self.game / "lib" / f"py3-linux-{os.uname().machine}"
+        lib.mkdir(parents=True)
+        engine = lib / "librenpython.so"
+        engine.write_bytes(b"\0SDL X11 video driver\0")
+        args = self.recorded_args("--wayland")
+        self.assertIn("gamescope", args)
+        self.assertNotIn("SDL_VIDEODRIVER", args)
+        self.assertNotIn("DISPLAY", args)
+        # A build with the driver keeps native Wayland.
+        engine.write_bytes(b"\0SDL X11 video driver\0SDL Wayland video driver\0")
+        args = self.recorded_args("--wayland")
+        self.assertNotIn("gamescope", args)
+        self.assertIn("SDL_VIDEODRIVER", args)
+
 
 if __name__ == "__main__":
     if not shutil.which("bwrap"):

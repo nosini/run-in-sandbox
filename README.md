@@ -694,8 +694,12 @@ every child, and Chromium spawns a zygote and its own renderer processes — the
 window never appears and the process hangs until killed. An FPS counter on a 2D
 RPG Maker game is no loss.
 
-**`--wayland` is not for every engine.** Stock Ren'Py's bundled SDL is
-x11/Xwayland only. Under `--proton` it sets `STEAM_COMPAT_CONFIG=wayland`, which
+**`--wayland` is not for every engine.** Ren'Py bundles its own SDL, and
+older builds (8.0 among them) have no Wayland driver in it: forced onto
+Wayland they die at the GL test with "wayland not available". The launcher
+looks for the driver in the game's `lib/` and, when only the X11 one is
+there, drops `--wayland` for gamescope's private Xwayland, with a note in the
+launch log. Under `--proton` it sets `STEAM_COMPAT_CONFIG=wayland`, which
 GE, DW and CachyOS builds honour. Builds without winewayland need the default
 gamescope mode; host X is never silently exposed as a fallback.
 

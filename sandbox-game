@@ -18,8 +18,9 @@
 #                                            to edit -- only created if absent)
 #
 #   --wayland   force SDL onto native Wayland (SDL_VIDEODRIVER=wayland), no X.
-#               Only for engines whose SDL has a Wayland backend -- NOT stock
-#               Ren'Py, whose bundled SDL is x11/Xwayland only.
+#               Only for engines whose SDL has a Wayland backend. Older
+#               Ren'Py builds bundle an SDL without one; for those it is
+#               dropped, with a note, for gamescope's private Xwayland.
 #               With --proton it selects Proton's winewayland driver instead
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
 #               builds without that driver need --gamescope for Xwayland.
@@ -406,6 +407,25 @@ NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 # The sandbox name doubles as the key everything else files a game under, so
 # hand it out rather than have callers reimplement derive_name().
 [ "$PRINT_NAME" = 0 ] || { printf '%s\n' "$NAME"; exit 0; }
+
+# Ren'Py carries its own SDL, built into its lib/*linux-ARCH/ binaries, and
+# before some 8.x release built it without the Wayland driver: forced onto
+# Wayland, such a build dies at its GL test with "wayland not available".
+# Where the X11 driver is there and the Wayland one is not, --wayland gives
+# way to the default, gamescope's private Xwayland. Only when both driver
+# names can be looked for: a layout this does not know is left alone.
+renpy_without_wayland() {
+    [ -d "$GAMEDIR/renpy" ] || return 1
+    local libs=( "$GAMEDIR"/lib/*linux-"$(uname -m)" )
+    [ -d "${libs[0]}" ] || return 1
+    grep -r -a -q -F "SDL X11 video driver" "${libs[@]}" 2>/dev/null \
+        && ! grep -r -a -q -F "SDL Wayland video driver" "${libs[@]}" 2>/dev/null
+}
+if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] && renpy_without_wayland; then
+    echo "note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
+         "private Xwayland instead of --wayland" >&2
+    WAYLAND=0
+fi
 
 # Never silently fall back to the host X server. Existing gamescope=0
 # preferences still get the safe default unless host X was explicitly allowed.
