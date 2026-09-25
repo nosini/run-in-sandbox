@@ -185,8 +185,11 @@ class SecurityTests(unittest.TestCase):
                           "cat $(find /sys/fs/cgroup -path '*/sandbox-game-game-*.scope/cpu.max')")
         if "no systemd user manager" in result.stderr:
             self.skipTest("systemd user manager unreachable; scope not used")
+        if "cpu controller delegated" in result.stderr:
+            # Said at launch, which is all the launcher can do about it.
+            self.skipTest("no cpu controller delegated to the user manager (as warned)")
         self.assertEqual(result.stdout.split(), [str((cpus - 1) * 100000), "100000"],
-                         "no CPU cap; is the cpu controller delegated to the user manager?")
+                         "no CPU cap, and no warning about it either")
 
     def test_home_devices_network_and_overlay_are_isolated(self):
         (self.home / "host-secret").write_text("private")

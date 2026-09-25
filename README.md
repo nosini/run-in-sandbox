@@ -615,6 +615,18 @@ systemctl --user list-units 'sandbox-game-*'
 systemctl --user status sandbox-game-<name>-<pid>.scope   # memory, CPU and task use
 ```
 
+The memory and CPU limits need those controllers delegated to the systemd
+user manager, as upstream systemd does and Fedora and Arch leave it. openSUSE
+does not: it empties `Delegate=` in `user@.service` for performance reasons, and
+the limits are then accepted and never applied. `sandbox-game` checks, and
+says at launch which limits are missing. To have them:
+
+```sh
+sudo mkdir -p /etc/systemd/system/user@.service.d
+printf '[Service]\nDelegate=pids memory cpu\n' | sudo tee /etc/systemd/system/user@.service.d/zz-delegate.conf
+sudo systemctl daemon-reload     # then log out and back in
+```
+
 To end a sandbox, `sandbox-game --stop NAME` is simpler and works without
 systemd too.
 

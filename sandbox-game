@@ -966,27 +966,37 @@ exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
 # systemd-run execs bwrap in place, so --die-with-parent still means this shell.
 # Without a user manager to ask -- a bare TTY, some containers -- say so and go on:
 # this guards the desktop's responsiveness, not the game's reach.
-SCOPE=()
+#
+# All but one core's worth of CPU time, so the rest of the desktop keeps one
+# however hard the game -- or a miner hiding in it -- works. Not a lower
+# CPUWeight: that only counts against the other apps beside it in app.slice,
+# and would have the game give way to a busy browser tab. A game rarely keeps
+# every core busy; shader compiles lose 1/N.
+LIMITS=( -p MemoryMax=80% -p TasksMax=4096 ); CONTROLLERS=( memory )
+CPUS="$(nproc 2>/dev/null || echo 1)"
+[ "$CPUS" -lt 2 ] || { LIMITS+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" ); CONTROLLERS+=( cpu ); }
+SCOPE=( systemd-run --user --scope --quiet --collect )
+# systemd-run 254+ expands ${VAR} in the command it runs, as unit files do,
+# and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch script
+# arrived as `b=`. The command line is ours, not a unit's; hand it over as
+# written. Older versions neither expand nor know the switch.
+systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
+    && SCOPE+=( --expand-environment=no )
+# A trial scope with the same limits, which names each one its cgroup has no
+# file for. The user manager can only set what it was delegated: openSUSE
+# ships user@.service with Delegate= emptied, and there memory and CPU limits
+# are accepted without a word and never applied.
 if command -v systemd-run >/dev/null \
-   && systemd-run --user --scope --quiet --collect -- true 2>/dev/null; then
-    SCOPE=( systemd-run --user --scope --quiet --collect
-            --unit "sandbox-game-$NAME-$$"
-            -p MemoryMax=80% -p TasksMax=4096 )
-    # All but one core's worth of CPU time, so the rest of the desktop keeps
-    # one however hard the game -- or a miner hiding in it -- works. Not a
-    # lower CPUWeight: that only counts against the other apps beside it in
-    # app.slice, and would have the game give way to a busy browser tab.
-    # A game rarely keeps every core busy; shader compiles lose 1/N.
-    CPUS="$(nproc 2>/dev/null || echo 1)"
-    [ "$CPUS" -lt 2 ] || SCOPE+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" )
-    # systemd-run 254+ expands ${VAR} in the command it runs, as unit files
-    # do, and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch
-    # script arrived as `b=`. The command line is ours, not a unit's; hand it
-    # over as written. Older versions neither expand nor know the switch.
-    systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
-        && SCOPE+=( --expand-environment=no )
-    SCOPE+=( -- )
+   && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
+        d="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)"
+        for c do [ -e "$d/$c.max" ] || printf "%s " "$c"; done' sh "${CONTROLLERS[@]}" 2>/dev/null)"; then
+    SCOPE+=( --unit "sandbox-game-$NAME-$$" "${LIMITS[@]}" -- )
+    UNLIMITED="${UNLIMITED% }"
+    [ -z "$UNLIMITED" ] || echo "warning: running without ${UNLIMITED// / or } limits: the systemd" \
+        "user manager has no ${UNLIMITED// / or } controller delegated to it" \
+        "(see \"Memory, CPU and task limits\" in the README)" >&2
 else
+    SCOPE=()
     echo "warning: no systemd user manager; running without memory, CPU or task limits" >&2
 fi
 
