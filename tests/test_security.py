@@ -4,15 +4,87 @@
 Uses real bubblewrap for filesystem/namespace checks and temporary command
 recorders for display policy checks, without opening a game window.
 """
+import ctypes
+import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_seccomp():
+    # A script without .py, so spelled out; no bytecode left next to it.
+    loader = SourceFileLoader("sandbox_seccomp", str(ROOT / "sandbox-seccomp"))
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader))
+    sys.dont_write_bytecode, saved = True, sys.dont_write_bytecode
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = saved
+    return module
+
+
+SOCKET_PROBE = r"""
+import ctypes, errno, mmap, os, socket, sys
+
+
+def refused(family, kind=socket.SOCK_DGRAM, pair=False):
+    try:
+        made = (socket.socketpair if pair else socket.socket)(family, kind)
+    except OSError as e:
+        return e.errno == errno.EAFNOSUPPORT
+    for s in made if pair else (made,):
+        s.close()
+    return False
+
+
+def i386(nr, a, b, c, via_socketcall=False):
+    # Raw int 0x80 from 64-bit code, which the kernel takes as an i386
+    # syscall; socketcall's argument block has to sit below 4 GiB (MAP_32BIT).
+    page = mmap.mmap(-1, 4096, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | 0x40,
+                     prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
+    base = ctypes.addressof(ctypes.c_char.from_buffer(page))
+    ctypes.memmove(base + 2048, (ctypes.c_uint32 * 3)(a, b, c), 12)
+    regs = (102, 1, base + 2048, 0) if via_socketcall else (nr, a, b, c)
+    code = b"\x53"                                     # push rbx
+    for op, value in zip((0xB8, 0xBB, 0xB9, 0xBA), regs):  # mov eax/ebx/ecx/edx
+        code += bytes([op]) + value.to_bytes(4, "little")
+    code += b"\xcd\x80\x5b\xc3"                        # int 0x80; pop rbx; ret
+    ctypes.memmove(base, code, len(code))
+    return ctypes.CFUNCTYPE(ctypes.c_int)(base)()
+
+
+AF_ALG, AF_VSOCK, AF_TIPC, AF_BLUETOOTH, AF_CAN = 38, 40, 30, 31, 29
+if sys.argv[1] == "native":
+    for family in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6, socket.AF_NETLINK):
+        socket.socket(family, socket.SOCK_DGRAM).close()
+    assert all(refused(f) for f in (AF_ALG, AF_VSOCK, AF_TIPC, AF_BLUETOOTH, AF_CAN))
+    print("unix inet inet6 netlink open; alg vsock tipc bluetooth can refused")
+    # socket() is 41 on x86_64, 198 on aarch64.
+    nr = {"x86_64": 41, "aarch64": 198}[os.uname().machine]
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.syscall(nr, ctypes.c_long(1 << 32 | socket.AF_UNIX), socket.SOCK_STREAM, 0)
+    assert fd == -1 and ctypes.get_errno() == errno.EAFNOSUPPORT, fd
+    assert refused(AF_TIPC, socket.SOCK_SEQPACKET, pair=True)
+    for s in socket.socketpair():
+        s.close()
+    print("high bits refused; socketpair tipc refused")
+else:
+    SEQPACKET = 5
+    print(i386(359, socket.AF_UNIX, socket.SOCK_STREAM, 0),
+          i386(359, AF_ALG, SEQPACKET, 0),
+          i386(359, socket.AF_UNIX, socket.SOCK_STREAM, 0, via_socketcall=True),
+          i386(359, AF_ALG, SEQPACKET, 0, via_socketcall=True))
+"""
 
 
 class SecurityTests(unittest.TestCase):
@@ -133,6 +205,65 @@ class SecurityTests(unittest.TestCase):
                                 '! unshare -U true 2>/dev/null; '
                                 f'python3 -c "{probe}"')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_only_ordinary_socket_families(self):
+        # The families games use open; the rest are refused, also when asked
+        # for with high bits set (the kernel reads an int), through socketpair,
+        # and through the i386 syscalls that 64-bit code reaches with int 0x80.
+        if not load_seccomp().socketcall_closable():
+            self.skipTest("this system's 32-bit glibc makes sockets through "
+                          "socketcall, so families are not filtered")
+        (self.game / "probe.py").write_text(SOCKET_PROBE)
+        on_x86 = os.uname().machine == "x86_64"
+        if on_x86:
+            outside = subprocess.run(["python3", self.game / "probe.py", "i386"],
+                                     capture_output=True, text=True, timeout=15)
+            # No 32-bit syscalls here (ia32_emulation=0): nothing to check.
+            on_x86 = outside.returncode == 0
+        result = self.run_guest("python3 /game/probe.py native"
+                                + ("; python3 /game/probe.py i386" if on_x86 else ""))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "unix inet inet6 netlink open; "
+                                   "alg vsock tipc bluetooth can refused")
+        self.assertEqual(lines[1], "high bits refused; socketpair tipc refused")
+        if on_x86:
+            # Direct i386 socket() sees the family; socketcall() cannot.
+            fd, alg, via_socketcall, alg_via_socketcall = map(int, lines[2].split())
+            self.assertGreaterEqual(fd, 0)
+            self.assertEqual((alg, via_socketcall, alg_via_socketcall), (-97, -97, -97))
+
+    def test_socket_families_are_filtered_only_where_socketcall_can_close(self):
+        seccomp = load_seccomp()
+
+        def i386_libc(path, kernel):
+            # An ELF header, one PT_NOTE program header, and the GNU ABI tag.
+            header = b"\x7fELF\x01\x01\x01" + bytes(9) + struct.pack(
+                "<HHIIIIIHHHHHH", 3, 3, 1, 0, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+            phdr = struct.pack("<8I", 4, 84, 0, 0, 32, 32, 4, 4)
+            note = struct.pack("<3I", 4, 16, 1) + b"GNU\0" + struct.pack("<4I", 0, *kernel)
+            path.write_bytes(header + phdr + note)
+            return str(path)
+
+        old = i386_libc(self.base / "old.so", (3, 2, 0))
+        new = i386_libc(self.base / "new.so", (4, 3, 0))
+        self.assertEqual(seccomp.min_kernel(new), (4, 3, 0))
+        self.assertIsNone(seccomp.min_kernel(sys.executable))   # not i386
+        for libcs, closable in (((new,), True), ((new, old), False), ((), True)):
+            seccomp.I386_LIBCS = libcs
+            self.assertEqual(seccomp.socketcall_closable(), closable, libcs)
+        if os.uname().machine != "x86_64":
+            return
+        # With an old one installed, no socket rule at all: libseccomp would
+        # carry it over to socketcall and cut 32-bit programs off from sockets.
+        for libcs, filtered in (((new,), True), ((old,), False)):
+            seccomp.I386_LIBCS = libcs
+            lib = seccomp.load_lib()
+            lib.seccomp_export_pfc.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            with tempfile.TemporaryFile() as out:
+                lib.seccomp_export_pfc(seccomp.build(lib), out.fileno())
+                out.seek(0)
+                self.assertEqual(b'"socketcall"' in out.read(), filtered, libcs)
 
     def test_descriptors_from_outside_are_closed(self):
         # A descriptor inherited from outside names something past every
@@ -361,9 +492,10 @@ print(json.dumps({{
         # The rules act at routing. Raw packets skip routing, and pasta passes
         # on whatever reaches it, so the LAN block holds only as long as the
         # game can write nothing but routed traffic -- and cannot add, change
-        # or take down an interface. No capabilities over the namespace, and
-        # the seccomp filter does not look at socket families: this is it.
-        self.assertIn(seen["packet"], ("EPERM", "EACCES"), "raw packet socket allowed")
+        # or take down an interface. No capabilities over the namespace does
+        # that; for packet sockets the filter refuses the family as well.
+        self.assertIn(seen["packet"], ("EAFNOSUPPORT", "EPERM", "EACCES"),
+                      "raw packet socket allowed")
         self.assertIn(seen["raw_ip"], ("EPERM", "EACCES"), "raw IP socket allowed")
         for change in ("link_add", "addr_add", "link_down"):
             self.assertNotEqual(seen[change], 0, f"the game could {change.replace('_', ' ')}")

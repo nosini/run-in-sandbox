@@ -16,9 +16,9 @@ you:
 - **Everything in one folder.** `~/game-sandboxes/<name>/` holds the saves, the
   configs, the Wine prefix — delete it and the game is factory-fresh.
 - **Less kernel to aim at.** No nested user namespaces, a seccomp filter
-  over the syscalls a game never needs, only the GPU's render nodes, Landlock
-  holding the game to its mounts, and memory and task limits, so a runaway
-  game cannot take the desktop with it.
+  over the syscalls and socket types a game never needs, only the GPU's
+  render nodes, Landlock holding the game to its mounts, and memory and task
+  limits, so a runaway game cannot take the desktop with it.
 
 The default display uses gamescope's private Xwayland, the device filesystem is
 private, and the game's environment starts from an allowlist. Audio is always
@@ -550,9 +550,22 @@ for: `bpf`, `perf_event_open`, `io_uring_*`, kernel-mode `userfaultfd`, the
 kernel keyring, new-style mount calls, and namespace creation as a second lock
 behind `--disable-userns`. Both the 64-bit and the i386 syscall tables are covered,
 since 64-bit code can make 32-bit syscalls too. `sandbox-seccomp` holds the
-list and the reasons behind it. There is no socket address-family filter,
-because on i386 it cannot be enforced (see the comment there). The launcher
-refuses to start if the filter cannot be built.
+list and the reasons behind it. The launcher refuses to start if the filter
+cannot be built.
+
+Sockets come only in the families games use: local, IPv4, IPv6 and netlink,
+as under Flatpak. The rest (`AF_ALG`, `AF_VSOCK`, `AF_TIPC`, Bluetooth, CAN and
+two dozen more) are rarely used kernel code, loaded on demand for anyone
+who asks, with a long record of exploitable bugs; they fail with
+`EAFNOSUPPORT`. On i386, sockets can also be made through `socketcall()`,
+which hides the family from the filter, so that route has to be closed for
+the rest to mean anything — and it can only be where the system's 32-bit
+glibc does not use it. `sandbox-seccomp` reads the kernel version each
+installed 32-bit glibc was built for: 4.3 or newer (openSUSE) makes sockets
+through the direct syscall, and the families are filtered; 3.2 (Fedora,
+Debian, Arch) makes every socket through `socketcall()`, and they are not.
+A 32-bit program shipping an old glibc of its own cannot open any socket
+where the filter is on, its display included.
 
 If a game breaks and the filter is a suspect, run it once from the shell with
 `SANDBOX_SECCOMP=log`: every rule then logs instead of blocking. With auditd

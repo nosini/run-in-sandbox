@@ -20,11 +20,25 @@
 # ptrace stays allowed: wineserver needs it to read another process's memory,
 # and so does anything attached with sandbox-attach.
 #
-# No socket address-family filter, although Flatpak and podman have one. On
-# i386, socket() still arrives through socketcall(), whose arguments sit behind
-# a pointer seccomp cannot follow, so the family is invisible there: filtering
-# it would cut every 32-bit program off from the display, and filtering only
-# the direct syscall is undone by one int 0x80 from 64-bit code.
+# Sockets only of the families a game has a use for -- local, IPv4, IPv6 and
+# netlink, which glibc and udev use to ask about interfaces and devices -- as
+# Flatpak does. The rest (AF_ALG, AF_VSOCK, AF_TIPC, AF_RDS, Bluetooth, CAN, the
+# ham-radio and telecom protocols ...) are rarely used code that the kernel
+# nonetheless loads on demand for anyone who asks, and have been a steady
+# source of exploitable bugs; they fail with EAFNOSUPPORT, as they would on a
+# kernel built without them.
+# On i386, socket() can also arrive through socketcall(), whose arguments sit
+# behind a pointer seccomp cannot follow, and 64-bit code can reach it with one
+# int 0x80. So the families are only filtered where socketcall can be refused
+# for making sockets outright: where every 32-bit glibc installed makes them
+# through the direct syscall instead, which it does when built for kernel 4.3
+# or newer (openSUSE's is; Fedora's, Debian's and Arch's are built for 3.2 and
+# make every socket through socketcall). Elsewhere the filter would be undone
+# by one int 0x80 anyway, while libseccomp's own rewrite of the socket rules
+# for i386 would cut every 32-bit program off from sockets altogether.
+# A 32-bit program carrying an old glibc of its own -- statically linked, or
+# shipped next to the binary -- still fails here: socket() gets EAFNOSUPPORT,
+# whatever the family, display included. SANDBOX_SECCOMP=log shows it.
 #
 # Talks to libseccomp directly through ctypes rather than its Python bindings:
 # the library is on every system that has systemd, the bindings are a separate
@@ -33,12 +47,17 @@
 # syscalls through int 0x80, so the i386 table has to be covered just as well.
 import ctypes
 import errno
+import glob
 import os
+import struct
 import sys
 
-EPERM, ENOSYS = errno.EPERM, errno.ENOSYS
+EPERM, ENOSYS, EAFNOSUPPORT = errno.EPERM, errno.ENOSYS, errno.EAFNOSUPPORT
 ACT_ALLOW, ACT_LOG = 0x7FFF0000, 0x7FFC0000
-CMP_MASKED_EQ = 7
+CMP_EQ, CMP_GE, CMP_MASKED_EQ = 4, 5, 7
+AF_UNIX, AF_INET, AF_INET6, AF_NETLINK = 1, 2, 10, 16
+SOCKET_FAMILIES = (AF_UNIX, AF_INET, AF_INET6, AF_NETLINK)
+SYS_SOCKET, SYS_SOCKETPAIR = 1, 8       # socketcall()'s first argument
 CLONE_NEWUSER = 0x10000000
 UFFD_USER_MODE_ONLY = 1
 ARCH_X86_64, ARCH_X86 = 0xC000003E, 0x40000003
@@ -80,6 +99,45 @@ BLOCK = {
         "io_uring_setup", "io_uring_enter", "io_uring_register",
     ],
 }
+
+
+# Where distributions keep the 32-bit libc: Fedora and openSUSE, Arch, Debian.
+I386_LIBCS = ("/usr/lib/libc.so.6", "/usr/lib32/libc.so.6",
+              "/usr/lib/i386-linux-gnu/libc.so.6", "/lib/i386-linux-gnu/libc.so.6")
+EM_386, PT_NOTE, NT_GNU_ABI_TAG = 3, 4, 1
+
+
+def min_kernel(path):
+    """The oldest kernel an i386 glibc was built for (--enable-kernel), as
+    its ELF ABI tag note records it; None if the file is no i386 ELF."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(1 << 16)          # headers and notes come first
+    except OSError:
+        return None
+    if data[:5] != b"\x7fELF\x01" or struct.unpack_from("<H", data, 18)[0] != EM_386:
+        return None
+    phoff, = struct.unpack_from("<I", data, 28)
+    phentsize, phnum = struct.unpack_from("<HH", data, 42)
+    for i in range(phnum):
+        kind, offset, _, _, size = struct.unpack_from("<5I", data, phoff + i * phentsize)
+        pos = offset
+        while kind == PT_NOTE and pos + 12 <= min(offset + size, len(data)):
+            namesz, descsz, ntype = struct.unpack_from("<3I", data, pos)
+            name = data[pos + 12:pos + 12 + namesz]
+            desc = pos + 12 + (namesz + 3 & ~3)
+            if name == b"GNU\0" and ntype == NT_GNU_ABI_TAG and descsz >= 16:
+                return struct.unpack_from("<3I", data, desc + 4)
+            pos = desc + (descsz + 3 & ~3)
+    return None
+
+
+def socketcall_closable():
+    """Whether no 32-bit program linked against the system's glibc needs
+    socketcall to make a socket."""
+    tags = {min_kernel(p) for p in I386_LIBCS if os.path.exists(p)}
+    tags.discard(None)
+    return all(tag >= (4, 3, 0) for tag in tags)
 
 
 class ArgCmp(ctypes.Structure):
@@ -142,6 +200,24 @@ def build(lib):
     # falls back to something slower when refused altogether.
     rule(act(EPERM), "userfaultfd",
          ArgCmp(0, CMP_MASKED_EQ, UFFD_USER_MODE_ONLY, 0))
+    if compat == ARCH_X86 and not socketcall_closable():
+        return ctx
+    # libseccomp takes one comparison per argument, so no ranges: every family
+    # below the highest allowed one by itself, and then everything above it.
+    # 64-bit values with high bits set, which the kernel would cut down to an
+    # int, compare above it too.
+    for name in ("socket", "socketpair"):
+        for family in range(max(SOCKET_FAMILIES)):
+            if family not in SOCKET_FAMILIES:
+                rule(act(EAFNOSUPPORT), name, ArgCmp(0, CMP_EQ, family, 0))
+        rule(act(EAFNOSUPPORT), name,
+             ArgCmp(0, CMP_GE, max(SOCKET_FAMILIES) + 1, 0))
+    # Only i386 has socketcall. libseccomp already refuses these two calls
+    # through it whenever socket() and socketpair() have rules; saying so here
+    # keeps that from resting on a detail of the library. The same errno, or
+    # libseccomp takes the two for conflicting rules.
+    for call in (SYS_SOCKET, SYS_SOCKETPAIR):
+        rule(act(EAFNOSUPPORT), "socketcall", ArgCmp(0, CMP_EQ, call, 0))
     return ctx
 
 
