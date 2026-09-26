@@ -261,11 +261,14 @@ delete_sandbox() {                    # $1 = NAME
 reset_install() {                     # $1 = NAME
     stopped_sandbox "$1" || return 1
     local d="$SANDBOXES/$1" keep=() changed f
-    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -maxdepth 4 -iname '*save*' -print -prune |
+    # At any depth: rw/ holds only what the game changed, so this is quick,
+    # and a save nested deeper than a guess would be gone for good.
+    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -iname '*save*' -print -prune |
                         sed 's|^\./||')
-    # Everything but directories -- files, links, and the character devices
-    # overlayfs uses to mark a deletion -- outside the saves being kept.
-    changed="$(cd "$d/rw" && find . -mindepth 1 ! -type d | sed 's|^\./||' |
+    # Files, links, the character devices overlayfs uses to mark a deletion,
+    # and directories the game made and left empty -- outside the saves being
+    # kept. Other directories are only there to hold those.
+    changed="$(cd "$d/rw" && find . -mindepth 1 \( ! -type d -o -empty \) | sed 's|^\./||' |
         awk -v keep="$(printf '%s\n' ${keep[@]+"${keep[@]}"})" '
             BEGIN { n = split(keep, k, "\n") }
             { for (i = 1; i <= n; i++)

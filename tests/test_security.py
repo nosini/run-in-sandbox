@@ -754,9 +754,11 @@ print(json.dumps({{
         (self.game / "www" / "old.js").write_text("original\n")
         # Saves as three engines keep them in the install: RPG Maker MV/MZ,
         # Ren'Py, and RPG Maker XP/VX/VX Ace (a file, not a folder).
-        self.run_guest("mkdir -p /game/www/save /game/game/saves; "
+        # And one nested deep, where no depth limit may lose it.
+        self.run_guest("mkdir -p /game/www/save /game/game/saves /game/a/b/c/d/e/saves; "
                        "echo s > /game/www/save/file1.rpgsave; "
                        "echo r > /game/game/saves/1-1-LT1.save; echo x > /game/Save01.rxdata; "
+                       "echo d > /game/a/b/c/d/e/saves/slot.dat; "
                        "echo changed > /game/www/data.js; rm /game/www/old.js; "
                        'echo cfg > "$HOME/config"; sleep 1', "--name", "managed")
         capture = self.home / "game-sandboxes" / "managed"
@@ -765,14 +767,19 @@ print(json.dumps({{
         self.assertRegex(listing, r"(?m)^managed\s+\S+\s+(<1m|\dm)\s+\d{4}-\d\d-\d\d ")
 
         result = self.cli("--reset-install", "managed")
-        for kept in ("www/save", "game/saves", "Save01.rxdata"):
+        for kept in ("www/save", "game/saves", "Save01.rxdata", "a/b/c/d/e/saves"):
             self.assertIn(f"kept: {kept}", result.stdout)
         seen = self.run_guest("cat /game/www/data.js /game/www/old.js /game/www/save/file1.rpgsave "
-                              "/game/game/saves/1-1-LT1.save /game/Save01.rxdata",
+                              "/game/game/saves/1-1-LT1.save /game/Save01.rxdata "
+                              "/game/a/b/c/d/e/saves/slot.dat",
                               "--name", "managed").stdout.split()
-        self.assertEqual(seen, ["original", "original", "s", "r", "x"])  # saves kept, the rest undone
+        self.assertEqual(seen, ["original", "original", "s", "r", "x", "d"])  # saves kept, the rest undone
         self.assertEqual((capture / "home" / "config").read_text(), "cfg\n")
         self.assertIn("nothing changed", self.cli("--reset-install", "managed").stdout)
+        # A directory the game made and left empty is a change too.
+        (capture / "rw" / "created-dir").mkdir()
+        self.assertIn("created-dir", self.cli("--reset-install", "managed").stdout)
+        self.assertFalse((capture / "rw" / "created-dir").exists())
 
         # Never while it runs, and only ever a name under ~/game-sandboxes.
         import time
