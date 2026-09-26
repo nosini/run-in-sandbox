@@ -146,11 +146,12 @@ def main():
         acc = flags & os.O_ACCMODE
         allowed = (READ_FILE if acc in (os.O_RDONLY, os.O_RDWR) else 0) \
             | (WRITE_FILE | TRUNCATE if acc in (os.O_WRONLY, os.O_RDWR) else 0)
+        # Not every file takes a path rule -- a memfd, for one, is refused
+        # with EBADFD. Such a descriptor keeps working as it is; it only
+        # cannot be reopened by path, as before this rule existed.
         rule = PathBeneathAttr(allowed_access=allowed & handled, parent_fd=fd)
-        if libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
-                        ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),
-                        ctypes.c_uint32(0)) < 0:
-            fail(f"adding descriptor {std}")
+        libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
+                     ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule), ctypes.c_uint32(0))
         os.close(fd)
 
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:

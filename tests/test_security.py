@@ -338,6 +338,18 @@ class SecurityTests(unittest.TestCase):
                                env=self.env, capture_output=True, text=True,
                                pass_fds=(outside,), timeout=15)
         self.assertNotIn("private", stray.stdout)
+        # Nor read through as it is, whatever its number: Landlock does not
+        # stop that. 300 is past bash's own 255.
+        secret = os.open(self.home / "host-secret", os.O_RDONLY)
+        high = os.dup2(secret, 300)
+        os.close(secret)
+        self.addCleanup(os.close, high)
+        stray = subprocess.run([str(ROOT / "sandbox-game"), "--headless", self.game,
+                                "python3", "-c", "import os; print(os.read(300, 100))"],
+                               env=self.env, capture_output=True, text=True,
+                               pass_fds=(high,), timeout=15)
+        self.assertNotIn("private", stray.stdout)
+        self.assertIn("Bad file descriptor", stray.stderr)
 
     def test_game_can_reopen_its_own_output(self):
         # `echo ... >/dev/stderr` opens the file behind the descriptor afresh,
@@ -355,6 +367,15 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(out.read_text(), "out\n")
         self.assertIn("err", err.read_text().splitlines())
         self.assertNotIn("readable", err.read_text())
+        # An anonymous file takes no Landlock rule; the launch goes on, and
+        # the descriptor works as it is.
+        memfd = os.memfd_create("output")
+        self.addCleanup(os.close, memfd)
+        rc = subprocess.run([str(ROOT / "sandbox-game"), "--headless", self.game, "echo", "hi"],
+                            env=self.env, stdout=memfd, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, timeout=15).returncode
+        os.lseek(memfd, 0, os.SEEK_SET)
+        self.assertEqual((rc, os.read(memfd, 100)), (0, b"hi\n"))
 
     def test_reopened_output_goes_no_further_than_the_descriptor(self):
         # Rights follow how each descriptor was opened: a read-only stdout is
@@ -462,6 +483,15 @@ class SecurityTests(unittest.TestCase):
             env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.home / "game-sandboxes" / name / "home" / "attached").is_file())
+        # A descriptor handed to sandbox-attach stays outside: what is attached
+        # runs without Landlock, and namespaces do not revoke an open file.
+        secret = os.open(self.home / "host-secret", os.O_RDONLY)
+        self.addCleanup(os.close, secret)
+        leak = subprocess.run(
+            [str(ROOT / "sandbox-attach"), "--name", name, "--exec", "--", "/bin/sh", "-c",
+             f"cat <&{secret}"],
+            env=self.env, capture_output=True, text=True, pass_fds=(secret,), timeout=15)
+        self.assertNotIn("private", leak.stdout)
 
     def test_preferences_save_explicit_permissions(self):
         bindir = self.home / ".local" / "bin"

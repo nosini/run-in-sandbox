@@ -573,11 +573,14 @@ fi
 # descriptor it inherits, and one that names something outside -- a directory
 # left open by whatever launched this -- reaches past every mount, reopened
 # through /proc/self/fd/N. Landlock refuses that too (see below); this does it
-# on kernels without Landlock as well. Bash reads this script through a
-# descriptor of its own, up at 255, which has to stay.
+# on kernels without Landlock as well -- and reading or writing through one
+# that is already open, which Landlock does not stop. Every number above 2,
+# however high; bash reads this script through a descriptor of its own,
+# usually 255, which has to stay, and is known by being this script.
 for fd in /proc/self/fd/*; do
     fd="${fd##*/}"
-    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] && [ "$fd" -lt 250 ] || continue
+    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] || continue
+    [[ "/proc/self/fd/$fd" -ef "$0" ]] && continue
     eval "exec $fd>&-"
 done
 

@@ -222,6 +222,17 @@ SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
 [ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
 [ -n "$SECCOMP" ] || { echo "$SELF: sandbox-seccomp not found beside $SELF or on PATH" >&2; exit 1; }
 
+# Only stdin, stdout and stderr go in, as with sandbox-game: a descriptor
+# inherited from whatever ran this would carry a host file, directory or
+# socket past the namespaces into the sandbox -- and what is attached runs
+# without Landlock. Bash's own descriptor on this script stays.
+for fd in /proc/self/fd/*; do
+    fd="${fd##*/}"
+    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] || continue
+    [[ "/proc/self/fd/$fd" -ef "$0" ]] && continue
+    eval "exec $fd>&-"
+done
+
 # Join the game's cgroup as well, so its memory, CPU and task limits cover what is
 # attached too, and stopping the scope stops both. Best effort: the scope is
 # only there when sandbox-game found a systemd user manager to ask for one.

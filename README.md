@@ -627,9 +627,11 @@ log is written, never read back — and no ioctls on a terminal reopened so.
 no rule of its own. On a kernel without Landlock the game starts regardless, with a
 warning.
 
-Stray descriptors are also simply closed: only stdin, stdout and stderr are
-passed into the sandbox, so a directory left open by whatever started
-`sandbox-game` never gets there at all.
+Stray descriptors are also simply closed, whatever their number: only stdin,
+stdout and stderr are passed into the sandbox, so a file or directory left
+open by whatever started `sandbox-game` never gets there at all — neither to
+be reopened nor to be read through as it is, which Landlock would not stop.
+`sandbox-attach` closes them the same way.
 
 `sandbox-attach` does not go through Landlock: a process cannot ptrace one in
 another Landlock domain, and that is Cheat Engine's whole job. What it runs is
