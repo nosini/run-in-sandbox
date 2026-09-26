@@ -546,7 +546,8 @@ renpy_without_wayland() {
     [ -d "${libs[0]}" ] || return 1
     # The shared objects only (librenpython.so, or a separate libSDL2): the
     # rest need not be read on every launch.
-    mapfile -t sos < <(find "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
+    # -H: the arch folder itself may be a symlink.
+    mapfile -t sos < <(find -H "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
     [ "${#sos[@]}" -gt 0 ] || return 1
     grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
         && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
@@ -1212,9 +1213,12 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
         --tmpfs|--proc)         LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
         # What bwrap --dev makes, one by one: all of /dev would take in the
         # device nodes bound into it as well, card nodes included. (fd, stdin
-        # and the like are links into /proc; ptmx one into pts.)
+        # and the like are links into /proc; ptmx one into pts.) Not console:
+        # with a terminal on stdout, bwrap binds that host terminal there, and
+        # a rule for it would open it up by any path, ioctls and all. Games
+        # have no use for it; their own output is sandbox-landlock's business.
         --dev)                  LL_ARGS+=( --ls "${BWRAP[i+1]}" )
-                                for n in null zero full random urandom tty console pts shm; do
+                                for n in null zero full random urandom tty pts shm; do
                                     LL_ARGS+=( --rw "${BWRAP[i+1]}/$n" )
                                 done
                                 i=$((i + 2)) ;;

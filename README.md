@@ -620,8 +620,11 @@ this adds is refusal of anything that reaches past the mounts anyway: a file
 descriptor from outside, reopened through `/proc/self/fd/N`, or a slip in the
 mount plan. The one such file allowed is the game's own output: `echo … >/dev/stderr`
 reopens the launch log or the terminal that way, so whatever stdin, stdout
-and stderr point at stays open to it, as far as the descriptors already go
-(written to, not read back). On a kernel without Landlock the game starts regardless, with a
+and stderr point at stays open to it, no further than each descriptor goes:
+read only if it was opened for reading, written only if for writing — the
+log is written, never read back — and no ioctls on a terminal reopened so.
+`/dev/console`, where bwrap puts the terminal a game was started from, gets
+no rule of its own. On a kernel without Landlock the game starts regardless, with a
 warning.
 
 Stray descriptors are also simply closed: only stdin, stdout and stderr are

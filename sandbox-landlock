@@ -30,6 +30,7 @@ sandbox-attach does not go through this: Landlock refuses to let a process
 ptrace one in a different Landlock domain, and ptrace is Cheat Engine's job.
 """
 import ctypes
+import fcntl
 import os
 import stat
 import sys
@@ -128,19 +129,23 @@ def main():
     # The game's own stdin, stdout and stderr: `echo ... >/dev/stderr` opens
     # the file behind them afresh, through /proc/self/fd, and that file -- the
     # launch log, the host terminal -- is in no mount. So whatever they point
-    # at, as far as the descriptors already go: read for 0, write for 1 and 2,
-    # truncate with it, which `>` asks for and the inherited descriptor could
-    # do anyway. Not reading the log back, and no ioctls on a terminal.
+    # at, no further than each descriptor goes: read if it was opened for
+    # reading, write if for writing, and truncate with write, which `>` asks
+    # for and the descriptor could do anyway. The log, opened write-only, is
+    # not read back; a terminal gets no ioctls on the new descriptor.
     # Pipes and sockets need nothing: Landlock does not look at those.
-    for std, allowed in ((0, READ_FILE), (1, WRITE_FILE | TRUNCATE),
-                         (2, WRITE_FILE | TRUNCATE)):
+    for std in (0, 1, 2):
         try:
             mode = os.fstat(std).st_mode
-            if not (stat.S_ISREG(mode) or stat.S_ISCHR(mode)):
+            flags = fcntl.fcntl(std, fcntl.F_GETFL)
+            if not (stat.S_ISREG(mode) or stat.S_ISCHR(mode)) or flags & os.O_PATH:
                 continue
             fd = os.open(f"/proc/self/fd/{std}", os.O_PATH | os.O_CLOEXEC)
         except OSError:
             continue
+        acc = flags & os.O_ACCMODE
+        allowed = (READ_FILE if acc in (os.O_RDONLY, os.O_RDWR) else 0) \
+            | (WRITE_FILE | TRUNCATE if acc in (os.O_WRONLY, os.O_RDWR) else 0)
         rule = PathBeneathAttr(allowed_access=allowed & handled, parent_fd=fd)
         if libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
                         ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),

@@ -356,6 +356,42 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("err", err.read_text().splitlines())
         self.assertNotIn("readable", err.read_text())
 
+    def test_reopened_output_goes_no_further_than_the_descriptor(self):
+        # Rights follow how each descriptor was opened: a read-only stdout is
+        # not written through /proc/self/fd, a write-only stdin not read.
+        kept, secret = self.base / "kept", self.base / "secret"
+        kept.write_text("keep\n")
+        secret.write_text("secret\n")
+        with open(kept) as ro, open(secret, "a") as wo:
+            rc = subprocess.run([str(ROOT / "sandbox-game"), "--headless", self.game, "/bin/sh", "-c",
+                                 "(echo overwritten >/proc/self/fd/1) 2>/dev/null && exit 3; "
+                                 "(cat /proc/self/fd/0 >/dev/null) 2>/dev/null && exit 4; exit 0"],
+                                env=self.env, stdin=wo, stdout=ro, stderr=subprocess.DEVNULL,
+                                timeout=15).returncode
+        self.assertEqual(rc, 0, "3: read-only stdout written, 4: write-only stdin read")
+        self.assertEqual(kept.read_text(), "keep\n")
+        # A terminal on stdout is bound onto /dev/console by bwrap. That is the
+        # same file as stdout, so it opens as far as stdout goes -- but no
+        # ioctls on a new descriptor, by either path; a rule of the console's
+        # own used to allow them.
+        probe = ('import errno, os, termios\n'
+                 'def ioctl(path):\n'
+                 '    try: termios.tcgetattr(os.open(path, os.O_WRONLY)); return "ok"\n'
+                 '    except (OSError, termios.error) as e: return errno.errorcode[e.args[0]]\n'
+                 'print("stdout", ioctl("/dev/stdout"), "console", ioctl("/dev/console"),\n'
+                 '      file=open(os.environ["OUT"], "w"))\n')
+        (self.game / "tty.py").write_text(probe)
+        result_file = self.home / "game-sandboxes" / "game" / "home" / "result"
+        leader, follower = os.openpty()
+        self.addCleanup(os.close, leader)
+        with os.fdopen(follower, "w") as tty:
+            subprocess.run([str(ROOT / "sandbox-game"), "--headless", "--env",
+                            "OUT=" + str(self.home / "result"), self.game,
+                            "python3", "/game/tty.py"],
+                           env=self.env, stdin=subprocess.DEVNULL, stdout=tty,
+                           stderr=subprocess.DEVNULL, timeout=15)
+        self.assertEqual(result_file.read_text().split(), ["stdout", "EACCES", "console", "EACCES"])
+
     def test_landlock_holds_the_game_to_its_mounts(self):
         # Wired in: the command starts with the helper, given the mounts.
         args = self.recorded_args()
@@ -950,6 +986,12 @@ print(json.dumps({{
         args = self.recorded_args("--wayland")
         self.assertNotIn("gamescope", args)
         self.assertIn("SDL_VIDEODRIVER", args)
+        # The arch folder may be a symlink; it is searched all the same.
+        engine.write_bytes(b"\0SDL X11 video driver\0")
+        real = self.game / "lib" / "real"
+        lib.rename(real)
+        lib.symlink_to("real")
+        self.assertIn("gamescope", self.recorded_args("--wayland"))
 
 
 if __name__ == "__main__":
