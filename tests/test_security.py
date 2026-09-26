@@ -432,6 +432,18 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertIn("STEAM_COMPAT_CONFIG", args)
 
+    def test_ntsync_only_for_proton(self):
+        # A young driver: Wine's thread synchronisation needs it, nothing else.
+        proton = self.base / "proton"
+        proton.mkdir()
+        binary = proton / "proton"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+        args = self.recorded_args("--proton=" + str(proton))
+        i = args.index("/dev/ntsync")
+        self.assertEqual(args[i - 1:i + 2], ["--dev-bind-try", "/dev/ntsync", "/dev/ntsync"])
+        self.assertNotIn("/dev/ntsync", self.recorded_args())
+
     def test_machine_identifiers_are_stand_ins(self):
         read = lambda path: Path(path).read_text().strip()
         probe = ('printf "%s|%s|%s|" "$(cat /proc/sys/kernel/random/boot_id)" '

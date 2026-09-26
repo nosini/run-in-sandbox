@@ -713,6 +713,13 @@ if [ "$HEADLESS" = 0 ]; then
         VIDEO_ENV+=( --setenv WAYLAND_DISPLAY wayland-0 )
     fi
 fi
+# Proton only: /dev/ntsync, where kernels 6.14 and newer do Windows' thread
+# synchronisation -- mutexes, semaphores, events, waiting on several at once
+# -- for Wine, instead of wineserver or fsync doing it in user space. Wine and
+# Proton builds that know it use it when they can open it, and CPU-bound games
+# gain from that. It is a young driver, and one more within a game's reach,
+# so no other engine gets it. -try: kernels without it leave it out.
+[ -z "$PROTON" ] || DEVICE_ARGS+=( --dev-bind-try /dev/ntsync /dev/ntsync )
 if [ "$WAYLAND" = 1 ]; then
     if [ -n "$PROTON" ]; then
         VIDEO_ENV+=( --setenv STEAM_COMPAT_CONFIG wayland )

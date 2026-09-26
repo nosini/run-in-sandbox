@@ -187,6 +187,13 @@ directory exists somewhere on the list — unpacking a Proton-GE release into
 fresh under the capture directory, so existing Steam prefixes are never touched,
 and the Proton install is mounted read-only.
 
+Proton games also get `/dev/ntsync` where the kernel has it (6.14 and newer):
+Windows' thread synchronisation done in the kernel instead of by wineserver or
+fsync, which Wine and Proton builds that know it use on their own, to the
+benefit of CPU-bound games. It is a young driver, one more within a game's
+reach, so no other engine gets it. `sandbox-game --check` says whether it is
+there and yours to open.
+
 #### RPG Maker XP/VX/VX Ace — mkxp-z
 
 [mkxp-z](https://github.com/mkxp-z/mkxp-z) reimplements the RGSS runtimes, so
