@@ -326,6 +326,23 @@ class SecurityTests(unittest.TestCase):
                                pass_fds=(outside,), timeout=15)
         self.assertNotIn("private", stray.stdout)
 
+    def test_game_can_reopen_its_own_output(self):
+        # `echo ... >/dev/stderr` opens the file behind the descriptor afresh,
+        # and from Nautilus that is the launch log, in no mount: allowed, as
+        # far as the descriptor goes -- written, not read back.
+        out, err = self.base / "out.log", self.base / "err.log"
+        probe = ('echo out >/dev/stdout; echo err >>/dev/stderr; '
+                 'python3 -c "open(\'/dev/stdout\').read()" 2>/dev/null '
+                 '&& echo readable >>/dev/stderr || true')
+        with open(out, "w") as o, open(err, "w") as e:
+            rc = subprocess.run([str(ROOT / "sandbox-game"), "--headless", self.game,
+                                 "/bin/sh", "-ec", probe], env=self.env, stdout=o,
+                                stderr=e, stdin=subprocess.DEVNULL, timeout=15).returncode
+        self.assertEqual(rc, 0, err.read_text())
+        self.assertEqual(out.read_text(), "out\n")
+        self.assertIn("err", err.read_text().splitlines())
+        self.assertNotIn("readable", err.read_text())
+
     def test_landlock_holds_the_game_to_its_mounts(self):
         # Wired in: the command starts with the helper, given the mounts.
         args = self.recorded_args()

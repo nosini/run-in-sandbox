@@ -618,7 +618,10 @@ everything it starts. Where the kernel supports it (Landlock ABI 6), signals
 and abstract Unix sockets are scoped to the game's own processes as well. What
 this adds is refusal of anything that reaches past the mounts anyway: a file
 descriptor from outside, reopened through `/proc/self/fd/N`, or a slip in the
-mount plan. On a kernel without Landlock the game starts regardless, with a
+mount plan. The one such file allowed is the game's own output: `echo … >/dev/stderr`
+reopens the launch log or the terminal that way, so whatever stdin, stdout
+and stderr point at stays open to it, as far as the descriptors already go
+(written to, not read back). On a kernel without Landlock the game starts regardless, with a
 warning.
 
 Stray descriptors are also simply closed: only stdin, stdout and stderr are

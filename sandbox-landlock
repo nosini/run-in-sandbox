@@ -10,9 +10,10 @@ sandbox-game passes the sandbox's own mount plan: every writable mount as
 --rw, every read-only one as --ro, and the root as --ls (listing only). So
 Landlock allows nothing the mounts do not -- and goes on refusing when
 something reaches past them anyway: a file descriptor inherited from outside,
-reopened through /proc/self/fd/N (the file manager hands a game its log file
-that way), or a mistake in the mount plan itself. It is the second lock on
-the same door.
+reopened through /proc/self/fd/N, or a mistake in the mount plan itself. It
+is the second lock on the same door. The exception is the game's own stdin,
+stdout and stderr -- from the file manager, the launch log -- which it may
+reopen as far as the descriptors already go (see main).
 
 --rw   read, write, create, remove, execute, ioctl on devices
 --ro   read and execute
@@ -122,6 +123,29 @@ def main():
                         ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),
                         ctypes.c_uint32(0)) < 0:
             fail(f"adding {path}")
+        os.close(fd)
+
+    # The game's own stdin, stdout and stderr: `echo ... >/dev/stderr` opens
+    # the file behind them afresh, through /proc/self/fd, and that file -- the
+    # launch log, the host terminal -- is in no mount. So whatever they point
+    # at, as far as the descriptors already go: read for 0, write for 1 and 2,
+    # truncate with it, which `>` asks for and the inherited descriptor could
+    # do anyway. Not reading the log back, and no ioctls on a terminal.
+    # Pipes and sockets need nothing: Landlock does not look at those.
+    for std, allowed in ((0, READ_FILE), (1, WRITE_FILE | TRUNCATE),
+                         (2, WRITE_FILE | TRUNCATE)):
+        try:
+            mode = os.fstat(std).st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISCHR(mode)):
+                continue
+            fd = os.open(f"/proc/self/fd/{std}", os.O_PATH | os.O_CLOEXEC)
+        except OSError:
+            continue
+        rule = PathBeneathAttr(allowed_access=allowed & handled, parent_fd=fd)
+        if libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
+                        ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),
+                        ctypes.c_uint32(0)) < 0:
+            fail(f"adding descriptor {std}")
         os.close(fd)
 
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
