@@ -133,11 +133,12 @@ list_protons() {                      # every install found, newest first
 # gamescope and anything sandbox-attach put in there. The capture's home is
 # how a sandbox is recognised: `--bind ~/game-sandboxes/NAME/home $HOME`.
 outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
-    local p self_ns args i name
-    self_ns="$(readlink /proc/self/ns/user)"
+    local p args i name
     for p in /proc/[0-9]*; do
         p="${p##*/}"
-        [ "$(readlink "/proc/$p/ns/user" 2>/dev/null)" = "$self_ns" ] || continue
+        # Same user namespace: -ef compares the namespaces' inodes, without a
+        # readlink process per entry. Other users' processes fail the stat.
+        [[ "/proc/$p/ns/user" -ef /proc/self/ns/user ]] || continue
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
@@ -541,10 +542,14 @@ NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 # names can be looked for: a layout this does not know is left alone.
 renpy_without_wayland() {
     [ -d "$GAMEDIR/renpy" ] || return 1
-    local libs=( "$GAMEDIR"/lib/*linux-"$(uname -m)" )
+    local libs=( "$GAMEDIR"/lib/*linux-"$(uname -m)" ) sos
     [ -d "${libs[0]}" ] || return 1
-    grep -r -a -q -F "SDL X11 video driver" "${libs[@]}" 2>/dev/null \
-        && ! grep -r -a -q -F "SDL Wayland video driver" "${libs[@]}" 2>/dev/null
+    # The shared objects only (librenpython.so, or a separate libSDL2): the
+    # rest need not be read on every launch.
+    mapfile -t sos < <(find "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
+    [ "${#sos[@]}" -gt 0 ] || return 1
+    grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
+        && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
 }
 if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] && renpy_without_wayland; then
     echo "sandbox-game: note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
@@ -1195,9 +1200,10 @@ i=0
 while [ "$i" -lt "${#BWRAP[@]}" ]; do
     case "${BWRAP[i]}" in
         --bind|--bind-try|--dev-bind|--dev-bind-try)
-            # A card node is there for gamescope to see, not to be opened.
+            # A card node bound on its own is there for gamescope to see, not
+            # to be opened. (SANDBOX_GPU_CARD=1 binds /dev/dri whole instead.)
             case "${BWRAP[i+2]}" in
-                /dev/dri/card*) [ "${SANDBOX_GPU_CARD:-0}" = 1 ] && LL_ARGS+=( --rw "${BWRAP[i+2]}" ) ;;
+                /dev/dri/card*) ;;
                 *) LL_ARGS+=( --rw "${BWRAP[i+2]}" ) ;;
             esac
             i=$((i + 3)) ;;
