@@ -95,7 +95,7 @@ def main():
         sys.exit(__doc__.split("\n\n")[0])
 
     if abi < 1:
-        print("warning: no Landlock in this kernel; running without it", file=sys.stderr)
+        print("sandbox-landlock: warning: no Landlock in this kernel; running without it", file=sys.stderr)
         os.execvp(cmd[0], cmd)
 
     handled = ABI_FS[min(abi, 5)]

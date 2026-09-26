@@ -261,11 +261,14 @@ GAME=$!
 # display it had to change) come before the game starts, and the log only
 # reaches a window when the launch fails. So show them once the game is under
 # way -- not when it has already died, which gets the failure window instead.
-# Its lines start "warning: " or "note: ", continuations are indented.
+# Its lines, and sandbox-landlock's, say whose they are -- "sandbox-game:
+# warning: " -- so a game's own "warning: " lines stay out of it; indented
+# lines continue one. The title names the tool, so the lines go without.
 (
     sleep 3
     kill -0 "$GAME" 2>/dev/null || exit 0
-    w="$(awk '/^(warning|note): / { p = 1; print; next } p && /^ / { print; next } { p = 0 }' "$LOG")"
+    w="$(awk '/^sandbox-(game|landlock): (warning|note): / { p = 1; sub(/^sandbox-[a-z]+: /, ""); print; next }
+              p && /^ / { sub(/^ +/, "  "); print; next } { p = 0 }' "$LOG")"
     [ -n "$w" ] || exit 0
     notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null \
         || zenity --notification --text="sandbox-game: ${BASE}\n$w" 2>/dev/null || true

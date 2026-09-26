@@ -108,34 +108,49 @@ I386_LIBCS = ("/usr/lib/libc.so.6", "/usr/lib32/libc.so.6",
 EM_386, PT_NOTE, NT_GNU_ABI_TAG = 3, 4, 1
 
 
+UNKNOWN = (0, 0, 0)       # an i386 libc whose kernel cannot be read: assume the worst
+
+
 def min_kernel(path):
     """The oldest kernel an i386 glibc was built for (--enable-kernel), as
-    its ELF ABI tag note records it; None if the file is no i386 ELF."""
+    its ELF ABI tag note records it; UNKNOWN for an i386 ELF without a
+    readable note, None for a file that is no i386 ELF."""
     try:
-        with open(path, "rb") as f:
-            data = f.read(1 << 16)          # headers and notes come first
+        f = open(path, "rb")
     except OSError:
         return None
-    if data[:5] != b"\x7fELF\x01" or struct.unpack_from("<H", data, 18)[0] != EM_386:
-        return None
-    phoff, = struct.unpack_from("<I", data, 28)
-    phentsize, phnum = struct.unpack_from("<HH", data, 42)
-    for i in range(phnum):
-        kind, offset, _, _, size = struct.unpack_from("<5I", data, phoff + i * phentsize)
-        pos = offset
-        while kind == PT_NOTE and pos + 12 <= min(offset + size, len(data)):
-            namesz, descsz, ntype = struct.unpack_from("<3I", data, pos)
-            name = data[pos + 12:pos + 12 + namesz]
-            desc = pos + 12 + (namesz + 3 & ~3)
-            if name == b"GNU\0" and ntype == NT_GNU_ABI_TAG and descsz >= 16:
-                return struct.unpack_from("<3I", data, desc + 4)
-            pos = desc + (descsz + 3 & ~3)
-    return None
+    with f:
+        head = f.read(52)
+        if len(head) < 52 or head[:5] != b"\x7fELF\x01" \
+                or struct.unpack_from("<H", head, 18)[0] != EM_386:
+            return None
+        try:
+            phoff, = struct.unpack_from("<I", head, 28)
+            phentsize, phnum = struct.unpack_from("<HH", head, 42)
+            f.seek(phoff)
+            phdrs = f.read(phentsize * phnum)
+            for i in range(phnum):
+                kind, offset, _, _, size = struct.unpack_from("<5I", phdrs, i * phentsize)
+                if kind != PT_NOTE:
+                    continue
+                f.seek(offset)
+                notes = f.read(size)
+                pos = 0
+                while pos + 12 <= len(notes):
+                    namesz, descsz, ntype = struct.unpack_from("<3I", notes, pos)
+                    name = notes[pos + 12:pos + 12 + namesz]
+                    desc = pos + 12 + (namesz + 3 & ~3)
+                    if name == b"GNU\0" and ntype == NT_GNU_ABI_TAG and descsz >= 16:
+                        return struct.unpack_from("<3I", notes, desc + 4)
+                    pos = desc + (descsz + 3 & ~3)
+        except (OSError, struct.error):     # truncated or malformed
+            pass
+    return UNKNOWN
 
 
 def socketcall_users():
-    """The 32-bit glibcs installed that make sockets through socketcall, with
-    the kernel each was built for."""
+    """The 32-bit glibcs installed that make sockets through socketcall, or
+    may, with the kernel each was built for (UNKNOWN when it does not say)."""
     found = ((p, min_kernel(p)) for p in I386_LIBCS if os.path.exists(p))
     return [(p, tag) for p, tag in found if tag is not None and tag < (4, 3, 0)]
 
@@ -147,7 +162,9 @@ def socketcall_closable():
 
 
 def families_filtered(lib):
-    return COMPAT.get(lib.seccomp_arch_native()) != ARCH_X86 or socketcall_closable()
+    # i386 syscalls arrive as the compat table on x86_64, natively on i386.
+    native = lib.seccomp_arch_native()
+    return ARCH_X86 not in (native, COMPAT.get(native)) or socketcall_closable()
 
 
 class ArgCmp(ctypes.Structure):
@@ -239,8 +256,10 @@ def main():
             print("socket families filtered")
         else:
             path, tag = socketcall_users()[0]
-            print(f"socket families not filtered: {path} is built for kernel "
-                  f"{tag[0]}.{tag[1]} and makes sockets through socketcall")
+            why = ("does not say which kernel it is built for, so may make sockets"
+                   if tag == UNKNOWN else
+                   f"is built for kernel {tag[0]}.{tag[1]} and makes sockets")
+            print(f"socket families not filtered: {path} {why} through socketcall")
         return
     if len(sys.argv) > 1:
         rc = lib.seccomp_load(ctx)

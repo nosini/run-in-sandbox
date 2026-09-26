@@ -496,7 +496,8 @@ while [ "$#" -gt 0 ]; do
         --list-proton) list_protons; exit 0 ;;
         -h|--help)   usage; exit 0 ;;
         --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
-        --stop=*)    stop_sandboxes "${1#--stop=}"; exit ;;
+        --stop=*)    _n="${1#--stop=}"   # empty is --stop-all's job, never this one's
+                     stop_sandboxes "${_n:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
         --stop-all)  stop_sandboxes ""; exit ;;
         --list)      list_sandboxes; exit ;;
         --check)     check_host; exit ;;
@@ -546,7 +547,7 @@ renpy_without_wayland() {
         && ! grep -r -a -q -F "SDL Wayland video driver" "${libs[@]}" 2>/dev/null
 }
 if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] && renpy_without_wayland; then
-    echo "note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
+    echo "sandbox-game: note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
          "private Xwayland instead of --wayland" >&2
     WAYLAND=0
 fi
@@ -766,8 +767,8 @@ if [ "$GS" = 1 ]; then
             GS_CMD+=( --mangoapp )
         else
             # Not fatal: losing the overlay beats refusing to start the game.
-            echo "warning: --mangohud under gamescope needs the mangoapp package;" >&2
-            echo "         running without the overlay (openSUSE: zypper in mangoapp)" >&2
+            echo "sandbox-game: warning: --mangohud under gamescope needs the mangoapp package;" >&2
+            echo "                       running without the overlay (openSUSE: zypper in mangoapp)" >&2
         fi
     fi
     set -- "${GS_CMD[@]}" -- "$@"
@@ -863,8 +864,8 @@ if [ -S "$SANDBOX_PULSE" ]; then
     AUDIO_ARGS=( --ro-bind "$SANDBOX_PULSE" "$RT/pulse/native"
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 else
-    echo "warning: no playback-only sound server; the game can record and load sound server modules" >&2
-    echo "         (./install.sh --restrict-audio sets one up)" >&2
+    echo "sandbox-game: warning: no playback-only sound server; the game can record and load sound server modules" >&2
+    echo "                       (./install.sh --restrict-audio sets one up)" >&2
     AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
         --ro-bind-try "$RT/pulse" "$RT/pulse"
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
@@ -903,7 +904,9 @@ cleanup() {
     # --net: pasta outlives the game unless told otherwise; see "network".
     if [ -n "$PASTA_PID" ]; then
         local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"
-        [[ "$p" =~ ^[0-9]+$ ]] && kill "$p" 2>/dev/null
+        # Already gone, if it crashed: under set -e a failing kill would end
+        # the cleanup here, playtime and exit status with it.
+        [[ ! "$p" =~ ^[0-9]+$ ]] || kill "$p" 2>/dev/null || true
         rm -f "$PASTA_PID"
     fi
     # One line per launch -- start, seconds played -- for --list. Here rather
@@ -1118,12 +1121,12 @@ exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
 # still means this shell.
 if probe_limits; then
     SCOPE+=( --unit "sandbox-game-$NAME-$$" "${LIMITS[@]}" -- )
-    [ -z "$UNLIMITED" ] || echo "warning: running without ${UNLIMITED// / or } limits: the systemd" \
+    [ -z "$UNLIMITED" ] || echo "sandbox-game: warning: running without ${UNLIMITED// / or } limits: the systemd" \
         "user manager has no ${UNLIMITED// / or } controller delegated to it" \
         "(see \"Memory, CPU and task limits\" in the README)" >&2
 else
     SCOPE=()
-    echo "warning: no systemd user manager; running without memory, CPU or task limits" >&2
+    echo "sandbox-game: warning: no systemd user manager; running without memory, CPU or task limits" >&2
 fi
 
 # Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find

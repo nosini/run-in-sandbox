@@ -296,11 +296,24 @@ class SecurityTests(unittest.TestCase):
 
         old = i386_libc(self.base / "old.so", (3, 2, 0))
         new = i386_libc(self.base / "new.so", (4, 3, 0))
+        # An i386 ELF that does not say: assumed to use socketcall.
+        untagged = self.base / "untagged.so"
+        untagged.write_bytes(Path(new).read_bytes()[:52].replace(
+            struct.pack("<HH", 32, 1), struct.pack("<HH", 32, 0)))
         self.assertEqual(seccomp.min_kernel(new), (4, 3, 0))
+        self.assertEqual(seccomp.min_kernel(untagged), seccomp.UNKNOWN)
         self.assertIsNone(seccomp.min_kernel(sys.executable))   # not i386
-        for libcs, closable in (((new,), True), ((new, old), False), ((), True)):
+        for libcs, closable in (((new,), True), ((new, old), False), ((), True),
+                                ((new, str(untagged)), False)):
             seccomp.I386_LIBCS = libcs
             self.assertEqual(seccomp.socketcall_closable(), closable, libcs)
+        # i386 syscalls come natively on an i386 host, as compat on x86_64;
+        # neither table on aarch64.
+        seccomp.I386_LIBCS = (old,)
+        for native, filtered in ((seccomp.ARCH_X86, False), (seccomp.ARCH_X86_64, False),
+                                 (seccomp.ARCH_AARCH64, True)):
+            host = type("Lib", (), {"seccomp_arch_native": lambda self, n=native: n})()
+            self.assertEqual(seccomp.families_filtered(host), filtered, hex(native))
         if os.uname().machine != "x86_64":
             return
         # With an old one installed, no socket rule at all: libseccomp would
@@ -654,6 +667,10 @@ print(json.dumps({{
         missing = self.cli("--stop", "no-such-game", check=False)
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn("no running sandbox named 'no-such-game'", missing.stderr)
+        # An empty name is a mistake, not --stop-all: nothing may be stopped.
+        empty = self.cli("--stop=", check=False)
+        self.assertNotEqual(empty.returncode, 0)
+        self.assertEqual(empty.stdout, "")
 
         self.assertEqual(self.cli("--stop", "game").stdout.strip(), "stopped game")
         first.wait(timeout=10)
