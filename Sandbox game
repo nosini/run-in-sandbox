@@ -30,7 +30,8 @@
 # release directory there whole (the binary needs its stdlib/ beside it) or set
 # MKXP_DIR=/path. Its config lands in ~/game-sandboxes/<name>/mkxp.json and is
 # yours to edit -- that is where a soundfont, RTP paths or fontSub would go.
-# Errors show in a zenity dialog; full output logs to
+# Errors show in a zenity dialog, warnings as a notification once the game is
+# up; full output logs to
 #   ~/game-sandboxes/<name>-lastrun.log
 set -uo pipefail
 
@@ -254,10 +255,28 @@ RUN=( "$SANDBOX" )
 [ "$ALLOW_MANGOHUD" = 1 ] || RUN=( env -u MANGOHUD "$SANDBOX" )
 
 msg "Launching ${BASE}…"
-if "${RUN[@]}" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1; then
+"${RUN[@]}" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1 &
+GAME=$!
+# sandbox-game's own warnings and notes (no sound restriction, no limits, a
+# display it had to change) come before the game starts, and the log only
+# reaches a window when the launch fails. So show them once the game is under
+# way -- not when it has already died, which gets the failure window instead.
+# Its lines start "warning: " or "note: ", continuations are indented.
+(
+    sleep 3
+    kill -0 "$GAME" 2>/dev/null || exit 0
+    w="$(awk '/^(warning|note): / { p = 1; print; next } p && /^ / { print; next } { p = 0 }' "$LOG")"
+    [ -n "$w" ] || exit 0
+    notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null \
+        || zenity --notification --text="sandbox-game: ${BASE}\n$w" 2>/dev/null || true
+) &
+NOTE=$!
+if wait "$GAME"; then
+    kill "$NOTE" 2>/dev/null
     exit 0
 else
     rc=$?
+    kill "$NOTE" 2>/dev/null
     if command -v zenity >/dev/null; then
         { echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
           | zenity --text-info --title="sandbox-game failed (${BASE})" \

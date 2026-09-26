@@ -252,7 +252,9 @@ dragging its `Game.exe` through Wine. Several `.exe` candidates get a picker,
 with obvious junk (installers, crash handlers, redistributables) filtered out.
 
 Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
-the last 80 lines in a window.
+the last 80 lines in a window. Warnings from the launcher itself (no
+playback-only sound, limits it cannot set, a display mode it had to change)
+come up as a notification a few seconds into a launch that is going well.
 
 **Sandbox game preferences** — the video backend, MangoHud, gamescope, the
 Proton version and internet access, saved per game or as the library-wide default. Turning gamescope
