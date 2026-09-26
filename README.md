@@ -248,8 +248,10 @@ looks like a launcher: `www`/`index.html`/`package.json` for RPG Maker MV/MZ,
 the `.sh`, the `.exe`. Dispatch runs in that order, so a Ren'Py or Unity game
 shipping both a `.sh` and a `.exe` runs the Linux build rather than emulating
 the Windows one, and an RPG Maker VX Ace game runs under mkxp-z rather than
-dragging its `Game.exe` through Wine. Several `.exe` candidates get a picker,
-with obvious junk (installers, crash handlers, redistributables) filtered out.
+dragging its `Game.exe` through Wine. `.exe` files are looked for at the top
+level first, then deeper — past a top level with nothing but junk
+(installers, uninstallers, crash handlers, redistributables) in it — and
+several candidates get a picker, with the junk filtered out.
 
 Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
 the last 80 lines in a window. Warnings from the launcher itself (no
@@ -425,7 +427,8 @@ than a save being lost. `home/` and the Wine prefix are left alone.
 `--delete NAME` removes the whole capture folder; the game's preferences stay.
 Both refuse while the game runs, and ask first when run in a terminal.
 
-`mkxp.json` is generated from the runtime's own commented one on first launch
+`mkxp.json` is generated from the runtime's own commented one on first launch,
+however that is laid out, with `gameFolder` and the preload scripts added,
 and then left alone, so per-game tweaks — a soundfont, RTP paths, `fontSub` —
 survive the next start.
 
@@ -693,6 +696,11 @@ gamescope_args=-f -W 2560 -H 1440
 env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
 ```
+
+A key left out of a game's file comes from `defaults`; a key there with
+nothing after it is a value of its own, the empty one — `gamescope_args=` is
+how a game turns off the defaults' fullscreen or resolution, and what the
+dialog writes when that is the answer.
 
 The key is the sandbox name, so preferences and captured writes stay in step.
 Two games whose folders have the same name share a sandbox; give one of them

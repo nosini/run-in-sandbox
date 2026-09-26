@@ -67,14 +67,18 @@ is_rgss() {
 EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet|redist|crashhandler|crashreport|crashsender|touchup|nwjc|notification_helper|python'
 
 find_exes() {                                  # $1 = dir -> best guess first
-    local dir="$1" d list keep
-    for d in 1 5; do                           # top level first, then deeper
+    local dir="$1" d list="" keep=""
+    # Top level first, then deeper -- but only stopping at a level with a
+    # candidate that is not junk: an uninstaller alone at the top, with the
+    # game in bin/, would otherwise be the one picked, and run.
+    for d in 1 5; do
         list="$(find "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null)"
-        [ -n "$list" ] && break
+        keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*\.exe$" <<<"$list")"
+        [ -n "$keep" ] && break
     done
-    [ -n "$list" ] || return 0
-    keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*\.exe$" <<<"$list")"
+    # Nothing but junk anywhere: offer that rather than nothing.
     [ -n "$keep" ] && list="$keep"
+    [ -n "$list" ] || return 0
     # Rank: filename echoing the folder name first, then biggest -- the real
     # binary is rarely the small one. awk keeps the folder name literal, so a
     # game called "S.T.A.L.K.E.R." is not read as a regex.
@@ -272,7 +276,7 @@ GAME=$!
     [ -n "$w" ] || exit 0
     notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null \
         || zenity --notification --text="sandbox-game: ${BASE}\n$w" 2>/dev/null || true
-) &
+) </dev/null >/dev/null 2>&1 &
 NOTE=$!
 if wait "$GAME"; then
     kill "$NOTE" 2>/dev/null

@@ -700,14 +700,43 @@ if [ -n "$MKXP_SPEC" ]; then
         done
         echo; echo '    ],'
     }
+    # Ours go in right after the object's opening brace, wherever that is --
+    # the first { outside a comment or a string -- and the runtime's settings
+    # follow as they were. mkxp-z reads JSON5: comments, trailing commas.
+    # No brace to be found and there is nothing to keep: a config of our own,
+    # and a word about it, rather than a file that will not parse.
+    read -r -d '' MKXP_MERGE <<'PY' || true
+import sys
+text, ours = open(sys.argv[1], encoding="utf-8").read(), sys.stdin.read()
+i, n = 0, len(text)
+while i < n:
+    if text.startswith("//", i):
+        j = text.find("\n", i)
+        i = n if j < 0 else j
+    elif text.startswith("/*", i):
+        j = text.find("*/", i + 2)
+        i = n if j < 0 else j + 2
+    elif text[i] in "\"'":
+        j = i + 1
+        while j < n and text[j] != text[i]:
+            j += 2 if text[j] == "\\" else 1
+        i = j + 1
+    elif text[i] == "{":
+        sys.stdout.write(text[:i + 1] + "\n" + ours + text[i + 1:])
+        sys.exit(0)
+    else:
+        i += 1
+sys.exit(1)
+PY
     if [ ! -f "$CAP/mkxp.json" ]; then
-        if [ "$(head -n1 "$MKXP/mkxp.json" 2>/dev/null)" = "{" ]; then
-            { echo '{'
-              echo '    // added by sandbox-game: the game is bind-mounted at /game'
-              echo '    "gameFolder": "/game",'
-              mkxp_preload
-              tail -n +2 "$MKXP/mkxp.json"; } > "$CAP/mkxp.json"
+        OURS="$(echo '    // added by sandbox-game: the game is bind-mounted at /game'
+                echo '    "gameFolder": "/game",'; mkxp_preload)"
+        if [ -f "$MKXP/mkxp.json" ] \
+           && python3 -c "$MKXP_MERGE" "$MKXP/mkxp.json" <<<"$OURS" > "$CAP/mkxp.json"; then
+            :
         else
+            [ ! -f "$MKXP/mkxp.json" ] || echo "sandbox-game: warning: no settings found" \
+                "in $MKXP/mkxp.json; $CAP/mkxp.json starts without them" >&2
             { echo '{'; mkxp_preload
               echo '    "gameFolder": "/game"'; echo '}'; } > "$CAP/mkxp.json"
         fi

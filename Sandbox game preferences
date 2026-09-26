@@ -172,18 +172,42 @@ USES_GS=$G
 # without it would want. Resolution and
 # fullscreen are the two knobs; anything else in gamescope_args was put there
 # by hand and is parsed out, left alone, and put back.
-GA_OUT="$(kept gamescope_args "")"
-if [ "$USES_GS" = 1 ]; then
-    GA_W=""; GA_H=""; GA_F=0; GA_REST=(); i=0
-    read -r -a GA_IN <<<"$GA_OUT"
-    while [ "$i" -lt "${#GA_IN[@]}" ]; do
-        case "${GA_IN[$i]}" in
-            -W|--output-width)  GA_W="${GA_IN[$((i+1))]:-}"; i=$((i+2)) ;;
-            -H|--output-height) GA_H="${GA_IN[$((i+1))]:-}"; i=$((i+2)) ;;
+# A game's own file that says nothing gets the defaults' options, so those are
+# what the dialog starts from; the file only gets a line of its own once the
+# answer differs from them -- an empty one included, which is how a game turns
+# off the defaults' fullscreen or resolution.
+# Options into the two the dialog asks about and the rest, and back in one
+# order -- which is also how two answers are compared, whatever order a hand
+# edit left them in.
+ga_parse() {                                   # $1 = options -> GA_W GA_H GA_F GA_REST
+    local in i=0
+    GA_W=""; GA_H=""; GA_F=0; GA_REST=()
+    read -r -a in <<<"$1"
+    while [ "$i" -lt "${#in[@]}" ]; do
+        case "${in[$i]}" in
+            -W|--output-width)  GA_W="${in[$((i+1))]:-}"; i=$((i+2)) ;;
+            -H|--output-height) GA_H="${in[$((i+1))]:-}"; i=$((i+2)) ;;
             -f|--fullscreen)    GA_F=1; i=$((i+1)) ;;
-            *)                  GA_REST+=( "${GA_IN[$i]}" ); i=$((i+1)) ;;
+            *)                  GA_REST+=( "${in[$i]}" ); i=$((i+1)) ;;
         esac
     done
+}
+ga_join() {
+    local out=()
+    [ -n "$GA_W" ] && [ -n "$GA_H" ] && out+=( -W "$GA_W" -H "$GA_H" )
+    [ "$GA_F" = 1 ] && out+=( -f )
+    out+=( "${GA_REST[@]}" )
+    printf '%s\n' "${out[*]}"
+}
+ga_same() { [ "$(ga_parse "$1"; ga_join)" = "$(ga_parse "$2"; ga_join)" ]; }
+
+GA_INHERITED=""
+[ "$TARGET" = "$CFGDIR/defaults" ] \
+    || GA_INHERITED="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
+if GA_OUT="$(file_get "$TARGET" gamescope_args)"; then GA_OWN=1
+else GA_OUT="$GA_INHERITED"; GA_OWN=0; fi
+if [ "$USES_GS" = 1 ]; then
+    ga_parse "$GA_OUT"
 
     R_NONE="Game default (no override)"
     R_CUR="$R_NONE"
@@ -208,12 +232,11 @@ if [ "$USES_GS" = 1 ]; then
         F_FS="$( awk -F'\t' 'NR==1 {print $2}' <<<"$GOUT")"
         [ -n "$F_RES" ] || F_RES="$R_CUR"
         [ -n "$F_FS"  ] || F_FS="$FS_CUR"
-        GA_NEW=()
+        GA_W=""; GA_H=""
         [ "$F_RES" != "$R_NONE" ] && [[ "$F_RES" =~ ^([0-9]+)x([0-9]+)$ ]] \
-            && GA_NEW+=( -W "${BASH_REMATCH[1]}" -H "${BASH_REMATCH[2]}" )
-        [ "$F_FS" = Yes ] && GA_NEW+=( -f )
-        GA_NEW+=( "${GA_REST[@]}" )
-        GA_OUT="${GA_NEW[*]}"
+            && GA_W="${BASH_REMATCH[1]}" GA_H="${BASH_REMATCH[2]}"
+        [ "$F_FS" = Yes ] && GA_F=1 || GA_F=0
+        GA_OUT="$(ga_join)"
     fi
 fi
 [ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
@@ -227,7 +250,11 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
     echo "mangohud=$M"
     echo "gamescope=$G"
     echo "net=$NET"
-    [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
+    if [ "$TARGET" = "$CFGDIR/defaults" ]; then
+        [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
+    elif [ "$GA_OWN" = 1 ] || ! ga_same "$GA_OUT" "$GA_INHERITED"; then
+        echo "gamescope_args=$GA_OUT"
+    fi
     [ -n "$ENV_KEEP" ] && echo "env=$ENV_KEEP"
     echo "proton=$P"
 } > "$TARGET" || die "Cannot write $TARGET"

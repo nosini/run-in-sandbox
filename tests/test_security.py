@@ -517,6 +517,89 @@ class SecurityTests(unittest.TestCase):
         for entry in ("host_x11=1", "wayland=0", "gamescope=0", "net=0"):
             self.assertIn(entry, settings.splitlines())
 
+    def test_launcher_looks_past_junk_for_the_game(self):
+        # An uninstaller alone at the top, the game in bin/: the game is what
+        # gets launched, not the one candidate found first.
+        (self.game / "unins000.exe").write_text("x")
+        (self.game / "bin").mkdir()
+        (self.game / "bin" / "game.exe").write_text("x")
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        (bindir / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        self.env["PATH"] = "/usr/bin:/bin"
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launched = recorded.read_text().splitlines()
+        self.assertIn("/game/bin/game.exe", launched)
+        self.assertNotIn("/game/unins000.exe", launched)
+
+    def test_a_game_can_turn_off_the_defaults_gamescope_options(self):
+        # The defaults say fullscreen at 1920x1080. A game's own "no override,
+        # not fullscreen" has to be written, as an empty value, or the
+        # defaults' options come back at launch; while an unchanged answer
+        # keeps the game following the defaults.
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        for script in ("sandbox-game", "sandbox-game-lib"):
+            (bindir / script).symlink_to(ROOT / script)
+        zenity = bindir / "zenity"
+        zenity.write_text('#!/bin/sh\ncase "$*" in\n'
+                          '  *Gamescope\\ options*) printf "%s\\n" "$TEST_GS_FORM" ;;\n'
+                          '  *--forms*) printf "%s\\n" "$TEST_FORM" ;;\n'
+                          'esac\n')
+        zenity.chmod(0o755)
+        config = self.home / ".config" / "sandbox-game"
+        config.mkdir(parents=True)
+        (config / "defaults").write_text("gamescope_args=-f -W 1920 -H 1080\n")
+        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        self.env["TEST_FORM"] = "\t".join(["Private Xwayland (gamescope)", "", "", "", "",
+                                           "This game only"])
+        name = self.cli("--print-name", self.game).stdout.strip()
+        own = config / "games" / name
+
+        def save(gs_form):
+            self.env["TEST_GS_FORM"] = gs_form
+            result = subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return [l for l in own.read_text().splitlines() if l.startswith("gamescope_args")]
+
+        def effective():
+            return subprocess.run(["bash", "-c", f'. "{ROOT / "sandbox-game-lib"}"; '
+                                   f'NAME={name}; cfg_get gamescope_args unset'],
+                                  env=self.env, capture_output=True, text=True).stdout.strip()
+
+        self.assertEqual(save("1920x1080\tYes"), [])            # as inherited: no line
+        self.assertEqual(effective(), "-f -W 1920 -H 1080")
+        self.assertEqual(save("Game default (no override)\tNo"), ["gamescope_args="])
+        self.assertEqual(effective(), "")
+
+    def test_mkxp_config_keeps_the_runtimes_settings(self):
+        # However the runtime's mkxp.json is laid out -- here on one line,
+        # after a comment with a brace in it -- its settings carry over into
+        # the game's, with gameFolder added.
+        mkxp = self.base / "mkxp-z"
+        mkxp.mkdir()
+        (mkxp / "mkxp-z").write_text("#!/bin/sh\n")
+        (mkxp / "mkxp-z").chmod(0o755)
+        (mkxp / "mkxp.json").write_text(
+            '// the runtime config {\n'
+            '{"rgssVersion": 3, "fontSub": ["Arial>Liberation Sans"], "RTP": ["/rtp"]}\n')
+        self.recorded_args("--mkxp=" + str(mkxp))
+        config = (self.home / "game-sandboxes" / "game" / "mkxp.json").read_text()
+        for setting in ('"rgssVersion": 3', '"fontSub"', '"RTP"', '"gameFolder": "/game"'):
+            self.assertIn(setting, config)
+        self.assertTrue(config.startswith("// the runtime config {\n{\n"), config)
+
     def test_proton_wayland_does_not_fall_back_to_host_x(self):
         proton = self.base / "proton"
         proton.mkdir()

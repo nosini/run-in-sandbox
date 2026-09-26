@@ -15,14 +15,16 @@ CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
 # a single file copies values across scopes in whichever direction the save
 # happens to go. Read rather than sourced -- these files are edited by hand as
 # often as by the dialog, and a stray line should not run as code.
+# A key that is there with nothing after it is a value, the empty one: that
+# is how a game's own file says "none" where the defaults say something, as
+# with gamescope_args. Only a key that is not there at all falls through.
 file_get() {                                   # $1 = file, $2 = key
     local v
-    [ -f "$1" ] || return 1
+    [ -f "$1" ] && grep -q "^[[:space:]]*$2[[:space:]]*=" "$1" || return 1
     v="$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | tail -n1)"
     # Trailing blanks survive that substitution, and a file saved with CRLF
     # leaves a \r that would make "1" compare unequal to 1 -- invisibly.
     v="${v%"${v##*[![:space:]]}"}"
-    [ -n "$v" ] || return 1
     printf '%s\n' "$v"
 }
 
