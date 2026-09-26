@@ -444,6 +444,20 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(args[i - 1:i + 2], ["--dev-bind-try", "/dev/ntsync", "/dev/ntsync"])
         self.assertNotIn("/dev/ntsync", self.recorded_args())
 
+    def test_check_reports_every_protection(self):
+        result = self.cli("--check", check=False)
+        lines = result.stdout.splitlines()
+        marks = {line.split()[1]: line.split()[0] for line in lines}
+        self.assertEqual(list(marks), ["sandbox", "seccomp", "landlock", "limits", "sound",
+                                       "gpu", "gamescope", "network", "ntsync"], result.stdout)
+        self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
+        # Exit status 1 exactly when something a sandbox should have is missing:
+        # here at least the playback-only server, the test runtime dir having none.
+        self.assertEqual(marks["sound"], "!!")
+        self.assertEqual(result.returncode, 1)
+        filtered = load_seccomp().socketcall_closable() or os.uname().machine != "x86_64"
+        self.assertEqual(marks["seccomp"], "ok" if filtered else "--")
+
     def test_machine_identifiers_are_stand_ins(self):
         read = lambda path: Path(path).read_text().strip()
         probe = ('printf "%s|%s|%s|" "$(cat /proc/sys/kernel/random/boot_id)" '

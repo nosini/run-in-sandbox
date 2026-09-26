@@ -289,6 +289,128 @@ reset_install() {                     # $1 = NAME
     echo "reset $1"
 }
 
+# ---- resource limits and host checks ---------------------------------------
+# A transient scope puts the whole sandbox in a cgroup of its own, so a leak,
+# a fork bomb or a busy loop runs into these ceilings instead of taking the
+# desktop down, and gives it a name:
+# systemctl --user status|kill sandbox-game-NAME-PID.scope.
+#
+# All but one core's worth of CPU time, so the rest of the desktop keeps one
+# however hard the game -- or a miner hiding in it -- works. Not a lower
+# CPUWeight: that only counts against the other apps beside it in app.slice,
+# and would have the game give way to a busy browser tab. A game rarely keeps
+# every core busy; shader compiles lose 1/N.
+#
+# Sets LIMITS (the scope properties), CPUS, SCOPE (systemd-run up to its
+# options) and UNLIMITED (the controllers a scope here cannot limit, space
+# separated); returns 1 when there is no user manager to ask. It asks with a
+# trial scope carrying the same limits, which names each one its cgroup has no
+# file for: the user manager can only set what it was delegated. openSUSE
+# ships user@.service with Delegate= emptied, and there memory and CPU limits
+# are accepted without a word and never applied.
+probe_limits() {
+    local controllers=( memory )
+    LIMITS=( -p MemoryMax=80% -p TasksMax=4096 )
+    CPUS="$(nproc 2>/dev/null || echo 1)"
+    [ "$CPUS" -lt 2 ] || { LIMITS+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" ); controllers+=( cpu ); }
+    SCOPE=( systemd-run --user --scope --quiet --collect )
+    # systemd-run 254+ expands ${VAR} in the command it runs, as unit files
+    # do, and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch
+    # script arrived as `b=`. The command line is ours, not a unit's; hand it
+    # over as written. Older versions neither expand nor know the switch.
+    systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
+        && SCOPE+=( --expand-environment=no )
+    command -v systemd-run >/dev/null \
+        && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
+            d="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)"
+            for c do [ -e "$d/$c.max" ] || printf "%s " "$c"; done' sh "${controllers[@]}" 2>/dev/null)" \
+        || return 1
+    UNLIMITED="${UNLIMITED% }"
+}
+
+# sandbox-game --check: what of all this holds on this machine, one line
+# each. "!!" is something a sandbox here goes without that it would normally
+# have, and makes the exit status 1; "--" something optional or not
+# available here by design.
+check_host() {
+    local here rt out abi failed=0 nodes=()
+    here="$(dirname "$(realpath "$0")")"
+    rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    _check_line() { printf '  %s  %-12s %s\n' "$1" "$2" "$3"; [ "$1" != '!!' ] || failed=1; }
+    _check_helper() { [ -e "$here/$1" ] && echo "$here/$1" || command -v "$1" || true; }
+
+    if ! command -v bwrap >/dev/null; then
+        _check_line '!!' sandbox "bwrap is not installed"
+    elif out="$(bwrap --unshare-all --unshare-user --disable-userns --ro-bind / / true 2>&1)"; then
+        _check_line ok sandbox "$(bwrap --version), nested user namespaces off"
+    else
+        _check_line '!!' sandbox "cannot start one: $out"
+    fi
+
+    if [ -z "$(_check_helper sandbox-seccomp)" ]; then
+        _check_line '!!' seccomp "sandbox-seccomp not found"
+    elif ! out="$("$(_check_helper sandbox-seccomp)" --status 2>&1)"; then
+        _check_line '!!' seccomp "cannot build the filter: $out"
+    elif [ "$out" = "socket families filtered" ]; then
+        _check_line ok seccomp "syscall filter, socket families filtered"
+    else
+        _check_line -- seccomp "syscall filter; $out"
+    fi
+
+    abi="$(python3 "$(_check_helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
+    if [ "$abi" -ge 6 ] 2>/dev/null; then
+        _check_line ok landlock "ABI $abi: files, and signals and abstract sockets scoped"
+    elif [ "$abi" -ge 1 ] 2>/dev/null; then
+        _check_line ok landlock "ABI $abi: files only (signal and socket scoping need ABI 6)"
+    else
+        _check_line '!!' landlock "not available: not in this kernel, or not in its lsm= list"
+    fi
+
+    if ! probe_limits; then
+        _check_line '!!' limits "no systemd user manager: no memory, CPU or task limits"
+    elif [ -n "$UNLIMITED" ]; then
+        _check_line '!!' limits "no ${UNLIMITED// / or } limit: not delegated to the user manager (README: \"Memory, CPU and task limits\")"
+    elif [ "$CPUS" -ge 2 ]; then
+        _check_line ok limits "80% of memory, $((CPUS - 1)) of $CPUS cores, 4096 tasks"
+    else
+        _check_line ok limits "80% of memory, 4096 tasks"
+    fi
+
+    if [ -S "$rt/sandbox-pulse/native" ]; then
+        _check_line ok sound "playback only (sandbox-pulse)"
+    else
+        _check_line '!!' sound "the desktop's own sockets: games can record (./install.sh --restrict-audio)"
+    fi
+
+    for out in /dev/dri/renderD*; do [ ! -c "$out" ] || nodes+=( "${out##*/}" ); done
+    if [ "${#nodes[@]}" -gt 0 ]; then
+        _check_line ok gpu "render nodes: ${nodes[*]}"
+    else
+        _check_line '!!' gpu "no render node: no GPU acceleration in games"
+    fi
+
+    if command -v gamescope >/dev/null; then
+        _check_line ok gamescope "installed: the default private Xwayland works"
+    else
+        _check_line '!!' gamescope "not installed: the default display needs it (--wayland does not)"
+    fi
+
+    if command -v pasta >/dev/null && command -v ip >/dev/null; then
+        _check_line ok network "--net available (pasta)"
+    else
+        _check_line -- network "--net unavailable: needs pasta (passt) and ip (iproute2)"
+    fi
+
+    if [ -c /dev/ntsync ] && [ -r /dev/ntsync ] && [ -w /dev/ntsync ]; then
+        _check_line ok ntsync "/dev/ntsync, given to Proton games"
+    elif [ -c /dev/ntsync ]; then
+        _check_line -- ntsync "/dev/ntsync is there but not yours to open (mode $(stat -c %a /dev/ntsync))"
+    else
+        _check_line -- ntsync "no /dev/ntsync: kernel older than 6.14, or the module not loaded"
+    fi
+    return "$failed"
+}
+
 # ---- args ------------------------------------------------------------------
 # The short version. The header above says why each of these is the way it is.
 usage() {
@@ -296,7 +418,7 @@ usage() {
 usage: sandbox-game [OPTIONS] GAMEDIR CMD...
        sandbox-game --list | --stop NAME | --stop-all
        sandbox-game --reset-install NAME | --delete NAME
-       sandbox-game --print-name GAMEDIR | --list-proton | --help
+       sandbox-game --print-name GAMEDIR | --list-proton | --check | --help
 
 Runs CMD in a bwrap sandbox: no network, no home directory, GAMEDIR at /game
 as an overlay. Everything the game writes lands in ~/game-sandboxes/NAME/.
@@ -334,6 +456,7 @@ Managing sandboxes
   --delete NAME         delete a sandbox: saves, settings, Wine prefix
   --print-name GAMEDIR  the sandbox name a folder gets
   --list-proton         the Proton installs found, newest first
+  --check               which protections hold on this machine, one line each
   -h, --help            this
 
 Examples
@@ -376,6 +499,7 @@ while [ "$#" -gt 0 ]; do
         --stop=*)    stop_sandboxes "${1#--stop=}"; exit ;;
         --stop-all)  stop_sandboxes ""; exit ;;
         --list)      list_sandboxes; exit ;;
+        --check)     check_host; exit ;;
         --delete)    delete_sandbox "${2:?--delete needs a sandbox name}"; exit ;;
         --reset-install) reset_install "${2:?--reset-install needs a sandbox name}"; exit ;;
         --name)      NAME="$2"; shift 2 ;;
@@ -988,39 +1112,12 @@ SECCOMP_BPF="$(mktemp)"
 exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
 
 # ---- resource limits -------------------------------------------------------
-# A transient scope puts the whole sandbox in a cgroup of its own, so a leak,
-# a fork bomb or a busy loop runs into these ceilings instead of taking the
-# desktop down, and gives it a name:
-# systemctl --user status|kill sandbox-game-NAME-PID.scope.
-# systemd-run execs bwrap in place, so --die-with-parent still means this shell.
-# Without a user manager to ask -- a bare TTY, some containers -- say so and go on:
-# this guards the desktop's responsiveness, not the game's reach.
-#
-# All but one core's worth of CPU time, so the rest of the desktop keeps one
-# however hard the game -- or a miner hiding in it -- works. Not a lower
-# CPUWeight: that only counts against the other apps beside it in app.slice,
-# and would have the game give way to a busy browser tab. A game rarely keeps
-# every core busy; shader compiles lose 1/N.
-LIMITS=( -p MemoryMax=80% -p TasksMax=4096 ); CONTROLLERS=( memory )
-CPUS="$(nproc 2>/dev/null || echo 1)"
-[ "$CPUS" -lt 2 ] || { LIMITS+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" ); CONTROLLERS+=( cpu ); }
-SCOPE=( systemd-run --user --scope --quiet --collect )
-# systemd-run 254+ expands ${VAR} in the command it runs, as unit files do,
-# and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch script
-# arrived as `b=`. The command line is ours, not a unit's; hand it over as
-# written. Older versions neither expand nor know the switch.
-systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
-    && SCOPE+=( --expand-environment=no )
-# A trial scope with the same limits, which names each one its cgroup has no
-# file for. The user manager can only set what it was delegated: openSUSE
-# ships user@.service with Delegate= emptied, and there memory and CPU limits
-# are accepted without a word and never applied.
-if command -v systemd-run >/dev/null \
-   && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
-        d="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)"
-        for c do [ -e "$d/$c.max" ] || printf "%s " "$c"; done' sh "${CONTROLLERS[@]}" 2>/dev/null)"; then
+# See probe_limits. Without a user manager to ask -- a bare TTY, some
+# containers -- say so and go on: this guards the desktop's responsiveness,
+# not the game's reach. systemd-run execs bwrap in place, so --die-with-parent
+# still means this shell.
+if probe_limits; then
     SCOPE+=( --unit "sandbox-game-$NAME-$$" "${LIMITS[@]}" -- )
-    UNLIMITED="${UNLIMITED% }"
     [ -z "$UNLIMITED" ] || echo "warning: running without ${UNLIMITED// / or } limits: the systemd" \
         "user manager has no ${UNLIMITED// / or } controller delegated to it" \
         "(see \"Memory, CPU and task limits\" in the README)" >&2

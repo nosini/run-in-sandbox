@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # sandbox-seccomp            write the filter to stdout, as bwrap --seccomp wants
 # sandbox-seccomp CMD...     install it on this process and exec CMD
+# sandbox-seccomp --status   build it, and say whether socket families are filtered
 #   The seccomp filter every sandbox runs under. The second form is how
 #   sandbox-attach brings a program into a running sandbox under the same
 #   filter as the game: nsenter cannot install one, and a program left
@@ -132,12 +133,21 @@ def min_kernel(path):
     return None
 
 
+def socketcall_users():
+    """The 32-bit glibcs installed that make sockets through socketcall, with
+    the kernel each was built for."""
+    found = ((p, min_kernel(p)) for p in I386_LIBCS if os.path.exists(p))
+    return [(p, tag) for p, tag in found if tag is not None and tag < (4, 3, 0)]
+
+
 def socketcall_closable():
     """Whether no 32-bit program linked against the system's glibc needs
     socketcall to make a socket."""
-    tags = {min_kernel(p) for p in I386_LIBCS if os.path.exists(p)}
-    tags.discard(None)
-    return all(tag >= (4, 3, 0) for tag in tags)
+    return not socketcall_users()
+
+
+def families_filtered(lib):
+    return COMPAT.get(lib.seccomp_arch_native()) != ARCH_X86 or socketcall_closable()
 
 
 class ArgCmp(ctypes.Structure):
@@ -200,7 +210,7 @@ def build(lib):
     # falls back to something slower when refused altogether.
     rule(act(EPERM), "userfaultfd",
          ArgCmp(0, CMP_MASKED_EQ, UFFD_USER_MODE_ONLY, 0))
-    if compat == ARCH_X86 and not socketcall_closable():
+    if not families_filtered(lib):
         return ctx
     # libseccomp takes one comparison per argument, so no ranges: every family
     # below the highest allowed one by itself, and then everything above it.
@@ -224,6 +234,14 @@ def build(lib):
 def main():
     lib = load_lib()
     ctx = build(lib)
+    if sys.argv[1:] == ["--status"]:    # for sandbox-game --check
+        if families_filtered(lib):
+            print("socket families filtered")
+        else:
+            path, tag = socketcall_users()[0]
+            print(f"socket families not filtered: {path} is built for kernel "
+                  f"{tag[0]}.{tag[1]} and makes sockets through socketcall")
+        return
     if len(sys.argv) > 1:
         rc = lib.seccomp_load(ctx)
         if rc < 0:

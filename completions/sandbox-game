@@ -154,7 +154,7 @@ _sandbox_game()
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --gamescope --host-x11 --headless
             --proton --mkxp --net --ro --name --env --mangohud --list --stop
-            --stop-all --reset-install --delete --print-name --list-proton --help' -- "$cur"))
+            --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
         return
     fi
     _sandbox_game_filedir -d                   # GAMEDIR

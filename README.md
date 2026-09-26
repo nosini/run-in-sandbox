@@ -303,6 +303,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
+| `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, `--net`, NTSYNC. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
 | `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
 | `--stop-all` | the same, for every running sandbox |
 | `--list` | every sandbox: size, time played, when last played, whether running |
