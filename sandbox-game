@@ -1032,7 +1032,11 @@ for f in /etc/fstab /etc/crypttab /etc/hostid /proc/cmdline /proc/modules \
          /sys/class/drm/card*/device/unique_id /sys/class/drm/card*/device/serial_number \
          /sys/class/dmi/id/product_uuid /sys/class/dmi/id/*_serial; do
     [ -f "$f" ] && [ -r "$f" ] || continue
-    ID_ARGS+=( --ro-bind "$CAP/.empty" "$(realpath "$f")" )
+    # -try: a device can go between this and bwrap -- a wireless mouse or
+    # headset reconnecting takes its input and battery entries with it --
+    # and then there is nothing left to cover, where a plain bind would fail
+    # the launch.
+    ID_ARGS+=( --ro-bind-try "$CAP/.empty" "$(realpath "$f")" )
 done
 # The SSH host keys identify the machine as surely as a serial number does.
 [ ! -d /etc/ssh ] || ID_ARGS+=( --tmpfs /etc/ssh --remount-ro /etc/ssh )
