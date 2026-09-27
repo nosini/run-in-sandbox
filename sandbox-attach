@@ -218,8 +218,12 @@ NS=( -U -m -p -n -i -u )
 # unfiltered program beside the game is one the game could ptrace its way into.
 # So the filter goes on here, before nsenter, never to be off inside: it leaves
 # nsenter the setns and chroot it needs, which the game has no capability for.
-SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
-[ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
+# Beside this script (a checkout), then where install.sh puts it, then PATH.
+SECCOMP=""
+for d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
+    [ -x "$d/sandbox-seccomp" ] && { SECCOMP="$d/sandbox-seccomp"; break; }
+done
+[ -n "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
 [ -n "$SECCOMP" ] || { echo "$SELF: sandbox-seccomp not found beside $SELF or on PATH" >&2; exit 1; }
 
 # Only stdin, stdout and stderr go in, as with sandbox-game: a descriptor

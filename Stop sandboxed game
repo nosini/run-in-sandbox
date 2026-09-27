@@ -7,7 +7,7 @@
 # Install beside the launcher:
 #   D=~/.local/share/nautilus/scripts
 #   install -Dm755 "Stop sandboxed game" "$D/Stop sandboxed game"
-#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+#   install -Dm644 sandbox-game-lib ~/.local/lib/sandbox-game/sandbox-game-lib
 set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
@@ -18,9 +18,11 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
             || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
-LIB="$(dirname "$SANDBOX")/sandbox-game-lib"
+# Beside sandbox-game when that is a checkout, else where install.sh puts it.
+LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
+[ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
-. "$LIB" 2>/dev/null || die "sandbox-game-lib not found beside sandbox-game:\n$LIB"
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):\n$LIB"
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"

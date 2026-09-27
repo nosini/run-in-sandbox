@@ -14,7 +14,7 @@
 #   D=~/.local/share/nautilus/scripts
 #   install -Dm755 "Sandbox game" "$D/Sandbox game"
 #   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
-#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+#   install -Dm644 sandbox-game-lib ~/.local/lib/sandbox-game/sandbox-game-lib
 #
 # The files are plain key=value and meant to be hand-editable:
 #   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
@@ -35,9 +35,11 @@ die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 command -v zenity >/dev/null || die "zenity is needed for the preferences dialog."
 
-LIB="$(dirname "$SANDBOX")/sandbox-game-lib"
+# Beside sandbox-game when that is a checkout, else where install.sh puts it.
+LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
+[ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
-. "$LIB" 2>/dev/null || die "sandbox-game-lib not found beside sandbox-game:\n$LIB"
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):\n$LIB"
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"

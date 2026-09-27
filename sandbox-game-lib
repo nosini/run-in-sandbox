@@ -2,7 +2,7 @@
 # Sourced by the Nautilus scripts -- not executable, and deliberately not in the
 # scripts directory, where Nautilus would list it as a menu entry of its own.
 #
-#   install -Dm644 sandbox-game-lib ~/.local/bin/sandbox-game-lib
+#   install -Dm644 sandbox-game-lib ~/.local/lib/sandbox-game/sandbox-game-lib
 #
 # Everything here has to give the same answer in the launcher and in the
 # preferences dialog. Keying a game one way while launching it another means

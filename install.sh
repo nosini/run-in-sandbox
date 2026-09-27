@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # install.sh [--restrict-audio] [--uninstall]
-#   Install sandbox-game, sandbox-attach, sandbox-seccomp, sandbox-landlock and the Nautilus
-#   scripts for the current user. No root needed; nothing outside ~/.local is
-#   touched.
+#   Install sandbox-game and sandbox-attach into ~/.local/bin, their helpers
+#   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib) into
+#   ~/.local/lib/sandbox-game, and the Nautilus scripts, for the current user.
+#   No root needed; nothing outside ~/.local is touched.
 #
 #   --restrict-audio also sets up playback-only sound for the games: a second
 #   Pulse server of their own, and WirePlumber rules and a hook that keep them
@@ -24,6 +25,9 @@ REPO="https://codeberg.org/nosini/run-in-sandbox"
 REF="${REF:-main}"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 BIN="$HOME/.local/bin"
+# Private helpers: nothing anyone runs by hand, so not on PATH. sandbox-game
+# looks here after its own folder (see helper() there).
+HELPERS="$HOME/.local/lib/sandbox-game"
 SCRIPTS="$DATA/nautilus/scripts"
 # Must match sandbox-game's default, which mounts this folder at /tools.
 TOOLS="${SANDBOX_TOOLS_DIR:-$DATA/sandbox-game/tools}"
@@ -34,12 +38,20 @@ CONF="${XDG_CONFIG_HOME:-$HOME/.config}"
 each() {
     "$@" 755 sandbox-game             "$BIN"
     "$@" 755 sandbox-attach           "$BIN"
-    "$@" 755 sandbox-seccomp          "$BIN"
-    "$@" 755 sandbox-landlock         "$BIN"
-    "$@" 644 sandbox-game-lib         "$BIN"
+    "$@" 755 sandbox-seccomp          "$HELPERS"
+    "$@" 755 sandbox-landlock         "$HELPERS"
+    "$@" 644 sandbox-game-lib         "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
     "$@" 755 "Stop sandboxed game"      "$SCRIPTS"
+}
+
+# Where the helpers used to go, beside sandbox-game on PATH: cleared on every
+# install and uninstall, so no stale copy is found first or left behind.
+each_old() {
+    "$@" - sandbox-seccomp  "$BIN"
+    "$@" - sandbox-landlock "$BIN"
+    "$@" - sandbox-game-lib "$BIN"
 }
 
 # The bash completions, from completions/, where bash-completion looks for a
@@ -80,6 +92,8 @@ AUDIO=0
 case "${1:-}" in
     --uninstall)
         each remove_one
+        each_old remove_one
+        rmdir "$HELPERS" 2>/dev/null || true
         each_completion remove_one
         if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
             systemctl --user disable --now sandbox-pulse.service 2>/dev/null || true
@@ -114,6 +128,7 @@ fi
 
 # ---- install ----------------------------------------------------------------
 each install_one
+each_old remove_one
 each_completion install_completion
 mkdir -p "$TOOLS"
 say "tools folder: $TOOLS (unpack a portable Cheat Engine here)"
@@ -153,7 +168,7 @@ elif ! bwrap --help 2>&1 | grep -q -- --disable-userns; then
     warn "bwrap is older than 0.8 (no --disable-userns); sandbox-game will refuse to start"
 fi
 # The real test of python3 and libseccomp is building the filter.
-"$BIN/sandbox-seccomp" >/dev/null 2>&1 \
+"$HELPERS/sandbox-seccomp" --status >/dev/null 2>&1 \
     || warn "sandbox-seccomp cannot build the filter -- needs python3 and libseccomp.so.2"
 command -v gamescope >/dev/null \
     || warn "gamescope not found -- the default display mode needs it (--wayland does not)"

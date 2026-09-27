@@ -529,7 +529,10 @@ class SecurityTests(unittest.TestCase):
         (self.game / "bin" / "game.exe").write_text("x")
         bindir = self.home / ".local" / "bin"
         bindir.mkdir(parents=True)
-        (bindir / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        # Where install.sh puts it: the stand-in below is no checkout.
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
         recorded = self.base / "launched"
         stub = bindir / "sandbox-game"
         stub.write_text('#!/bin/sh\n'

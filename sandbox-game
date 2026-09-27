@@ -83,12 +83,21 @@
 #   sandbox-game --mkxp /mnt/General-HDD/Games/games/SomeVXAceGame
 set -euo pipefail
 
+# Helpers -- sandbox-seccomp, sandbox-landlock, sandbox-game-lib -- are looked
+# for beside this script (a checkout of the repo), then where install.sh puts
+# them, then on PATH.
+helper() {
+    local d
+    for d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
+        [ -e "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+    done
+    command -v "$1" || true
+}
+
 # Shared with the Nautilus scripts, which have to agree with this on what a
-# game can do: the Ren'Py check, for one. Found beside this script, as the
-# other helpers are, else on PATH.
-SHARED_LIB="$(dirname "$(realpath "$0")")/sandbox-game-lib"
-[ -f "$SHARED_LIB" ] || SHARED_LIB="$(command -v sandbox-game-lib || true)"
-[ -n "$SHARED_LIB" ] || { echo "sandbox-game-lib not found beside sandbox-game or on PATH" >&2; exit 1; }
+# game can do: the Ren'Py check, for one.
+SHARED_LIB="$(helper sandbox-game-lib)"
+[ -n "$SHARED_LIB" ] || { echo "sandbox-game-lib not found; run install.sh" >&2; exit 1; }
 # shellcheck source=sandbox-game-lib
 . "$SHARED_LIB"
 
@@ -349,10 +358,8 @@ probe_limits() {
 # available here by design.
 check_host() {
     local here rt out abi failed=0 nodes=()
-    here="$(dirname "$(realpath "$0")")"
     rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     _check_line() { printf '  %s  %-12s %s\n' "$1" "$2" "$3"; [ "$1" != '!!' ] || failed=1; }
-    _check_helper() { [ -e "$here/$1" ] && echo "$here/$1" || command -v "$1" || true; }
 
     if ! command -v bwrap >/dev/null; then
         _check_line '!!' sandbox "bwrap is not installed"
@@ -362,9 +369,9 @@ check_host() {
         _check_line '!!' sandbox "cannot start one: $out"
     fi
 
-    if [ -z "$(_check_helper sandbox-seccomp)" ]; then
+    if [ -z "$(helper sandbox-seccomp)" ]; then
         _check_line '!!' seccomp "sandbox-seccomp not found"
-    elif ! out="$("$(_check_helper sandbox-seccomp)" --status 2>&1)"; then
+    elif ! out="$("$(helper sandbox-seccomp)" --status 2>&1)"; then
         _check_line '!!' seccomp "cannot build the filter: $out"
     elif [ "$out" = "socket families filtered" ]; then
         _check_line ok seccomp "syscall filter, socket families filtered"
@@ -372,7 +379,7 @@ check_host() {
         _check_line -- seccomp "syscall filter; $out"
     fi
 
-    abi="$(python3 "$(_check_helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
+    abi="$(python3 "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
     if [ "$abi" -ge 6 ] 2>/dev/null; then
         _check_line ok landlock "ABI $abi: files, and signals and abstract sockets scoped"
     elif [ "$abi" -ge 1 ] 2>/dev/null; then
@@ -406,7 +413,7 @@ check_host() {
 
     if ! command -v gamescope >/dev/null; then
         _check_line '!!' gamescope "not installed: the default display needs it (--wayland does not)"
-    elif python3 "$(_check_helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
+    elif python3 "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
         _check_line ok gamescope "installed; games under it cannot reach the desktop's compositor"
     else
         _check_line -- gamescope "installed, but this kernel's Landlock cannot keep games under it off the desktop's compositor"
@@ -1180,9 +1187,8 @@ EOF
 # Compiled by sandbox-seccomp, which sits beside this script and says what it
 # blocks and why. Refuse to start without it rather than quietly run unfiltered.
 # bwrap reads the filter from an fd, so it is unlinked as soon as that is open.
-SECCOMP="$(dirname "$(realpath "$0")")/sandbox-seccomp"
-[ -x "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
-[ -n "$SECCOMP" ] || { echo "sandbox-seccomp not found beside sandbox-game or on PATH" >&2; exit 1; }
+SECCOMP="$(helper sandbox-seccomp)"
+[ -n "$SECCOMP" ] || { echo "sandbox-seccomp not found; run install.sh" >&2; exit 1; }
 SECCOMP_BPF="$(mktemp)"
 "$SECCOMP" > "$SECCOMP_BPF" || { rm -f "$SECCOMP_BPF"
     echo "could not build the seccomp filter; not starting unconfined" >&2; exit 1; }
@@ -1261,9 +1267,8 @@ BWRAP=( "${SCOPE[@]}" bwrap
 # anything that reaches past the mounts anyway: a file descriptor inherited
 # from outside, reopened through /proc/self/fd -- the file manager hands the
 # game its log file like that -- or a slip in the mount plan.
-LANDLOCK="$(dirname "$(realpath "$0")")/sandbox-landlock"
-[ -f "$LANDLOCK" ] || LANDLOCK="$(command -v sandbox-landlock || true)"
-[ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found beside sandbox-game or on PATH" >&2; exit 1; }
+LANDLOCK="$(helper sandbox-landlock)"
+[ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found; run install.sh" >&2; exit 1; }
 LL_ARGS=( --ls / --ro /run/sandbox-landlock )
 i=0
 while [ "$i" -lt "${#BWRAP[@]}" ]; do

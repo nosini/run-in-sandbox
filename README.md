@@ -71,15 +71,19 @@ What goes where:
 
 | File | Installed to |
 |---|---|
-| `sandbox-game`, `sandbox-attach`, `sandbox-seccomp`, `sandbox-landlock` | `~/.local/bin/` |
-| `sandbox-game-lib` (mode 644) | `~/.local/bin/` |
+| `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
+| `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` (mode 644) | `~/.local/lib/sandbox-game/` |
 | `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
 | `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
 
-`sandbox-game-lib` goes beside `sandbox-game`, not in the scripts directory: it
-holds the parts the launcher and the preferences dialog must agree on, and
-Nautilus lists anything in that directory as a menu entry of its own.
+The helpers are nothing to run by hand, so they stay off `PATH`, in the place
+for a program's private files. `sandbox-game-lib` holds the parts the launcher,
+the preferences dialog and `sandbox-game` must agree on; it is kept out of the
+scripts directory, where Nautilus would list it as a menu entry of its own.
+Each of them is looked for beside the script using it first, so a checkout
+runs as it is, then there, then on `PATH`. An earlier install kept them in
+`~/.local/bin/`; `install.sh` clears those copies out.
 
 Then right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
 
