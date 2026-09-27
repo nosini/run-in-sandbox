@@ -755,6 +755,14 @@ launch log. Under `--proton` it sets `STEAM_COMPAT_CONFIG=wayland`, which
 GE, DW and CachyOS builds honour. Builds without winewayland need the default
 gamescope mode; host X is never silently exposed as a fallback.
 
+Proton under gamescope always uses gamescope's Xwayland, `--wayland` or not.
+Wine's Wayland driver requires `wl_subcompositor` and `wp_viewporter`, which
+gamescope's own Wayland server does not offer, and with Proton's Wayland
+setting it is the only driver Wine tries: the game would run with no display
+at all, no window and no error. Inside gamescope the difference hardly
+matters — the picture goes through gamescope either way, and Xwayland is as
+far from the desktop.
+
 **gamescope and the overlay.** `gamescope --mangoapp` is the supported way to
 get MangoHud in there, and is what gets used — except when gamescope's own
 Wayland socket is exposed as well (which is what makes winewayland work under gamescope). mangoapp

@@ -24,6 +24,8 @@
 #               With --proton it selects Proton's winewayland driver instead
 #               (STEAM_COMPAT_CONFIG=wayland); GE/DW/CachyOS builds honour it,
 #               builds without that driver need --gamescope for Xwayland.
+#               Not under gamescope, whose Wayland server that driver cannot
+#               use: there Proton goes through gamescope's Xwayland.
 #   --name NAME override the sandbox name (else derived from the game dir).
 #   --net       give the game the internet, and only that: no LAN, nothing
 #               listening on this machine, no incoming connections. Through
@@ -749,6 +751,20 @@ PY
         --ro-bind "$CAP/mkxp.json" /mkxp/mkxp.json
     )
     set -- "/mkxp/$MKXP_BIN" "$@"
+fi
+
+# Wine's Wayland driver will not start on gamescope's own Wayland server: it
+# requires wl_subcompositor and wp_viewporter (winewayland.drv, wayland.c),
+# which gamescope does not offer. With Proton's Wayland setting that driver
+# is the only one Wine tries, and the game runs on with no display at all --
+# no window, no error. Inside gamescope it matters little: what the game
+# draws goes through gamescope either way, Xwayland is the path gamescope is
+# built around, and it is as far from the desktop. So Proton gets that. Said
+# in the log only, not as a notice: it is a known answer, not a problem.
+if [ -n "$PROTON" ] && [ "$GS" = 1 ] && [ "$WAYLAND" = 1 ]; then
+    echo "sandbox-game: Proton under gamescope uses gamescope's Xwayland: Wine's Wayland" \
+         "driver needs wl_subcompositor and wp_viewporter, which gamescope lacks" >&2
+    WAYLAND=0
 fi
 
 # Will gamescope end up serving a Wayland socket to its children? Either

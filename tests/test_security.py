@@ -641,6 +641,21 @@ class SecurityTests(unittest.TestCase):
         filtered = load_seccomp().socketcall_closable() or os.uname().machine != "x86_64"
         self.assertEqual(marks["seccomp"], "ok" if filtered else "--")
 
+    def test_proton_under_gamescope_uses_its_xwayland(self):
+        # Wine's Wayland driver needs protocols gamescope's server lacks, and
+        # Proton's Wayland setting leaves Wine nothing else: under gamescope,
+        # Proton is kept to gamescope's Xwayland even with --wayland.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--gamescope", "--wayland", "--proton=" + str(proton))
+        self.assertIn("gamescope", args)
+        self.assertNotIn("STEAM_COMPAT_CONFIG", args)
+        self.assertNotIn("--expose-wayland", args)
+        # Not Proton: --wayland under gamescope still gets gamescope's socket.
+        self.assertIn("--expose-wayland", self.recorded_args("--gamescope", "--wayland"))
+
     def test_machine_identifiers_are_stand_ins(self):
         read = lambda path: Path(path).read_text().strip()
         probe = ('printf "%s|%s|%s|" "$(cat /proc/sys/kernel/random/boot_id)" '
