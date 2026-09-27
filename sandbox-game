@@ -393,10 +393,12 @@ check_host() {
         _check_line '!!' gpu "no render node: no GPU acceleration in games"
     fi
 
-    if command -v gamescope >/dev/null; then
-        _check_line ok gamescope "installed: the default private Xwayland works"
-    else
+    if ! command -v gamescope >/dev/null; then
         _check_line '!!' gamescope "not installed: the default display needs it (--wayland does not)"
+    elif python3 "$(_check_helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
+        _check_line ok gamescope "installed; games under it cannot reach the desktop's compositor"
+    else
+        _check_line -- gamescope "installed, but this kernel's Landlock cannot keep games under it off the desktop's compositor"
     fi
 
     if command -v pasta >/dev/null && command -v ip >/dev/null; then
@@ -593,6 +595,7 @@ rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
 
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 WL="${WAYLAND_DISPLAY:-wayland-0}"
+HOST_WL=/run/host-wayland/wayland-0   # under gamescope, the desktop's socket in here
 CHDIR=/game
 
 # ---- proton ----------------------------------------------------------------
@@ -791,7 +794,12 @@ fi
 if [ "$GS" = 1 ]; then
     command -v gamescope >/dev/null || {
         echo "gamescope not found (openSUSE: zypper in gamescope)" >&2; exit 1; }
-    GS_CMD=( gamescope "${GS_ARGS[@]}" )
+    # The desktop's Wayland socket is gamescope's alone: it is mounted where
+    # only gamescope is told of it (see "display"), and the game, in a
+    # Landlock domain of its own below gamescope (see "landlock"), may not
+    # connect to it. A connection handed over instead will not do: gamescope
+    # makes several, one of them only to look and close again.
+    GS_CMD=( env WAYLAND_DISPLAY="$HOST_WL" gamescope "${GS_ARGS[@]}" )
     # gamescope serves no Wayland socket to its children unless asked, and
     # Proton only reaches for winewayland.drv when it can see WAYLAND_DISPLAY.
     # Without this the game quietly lands back on winex11.drv inside gamescope,
@@ -812,7 +820,8 @@ if [ "$GS" = 1 ]; then
             echo "                       running without the overlay (openSUSE: zypper in mangoapp)" >&2
         fi
     fi
-    set -- "${GS_CMD[@]}" -- "$@"
+    # Put in front of the game in "landlock", below, with a layer of its own
+    # between the two.
 fi
 
 # ---- environment, display and devices --------------------------------------
@@ -875,8 +884,17 @@ if [ "$HEADLESS" = 0 ]; then
             echo "Wayland socket not found: $WL_HOST; use --headless or explicitly opt into --host-x11" >&2
             exit 1
         }
-        DISPLAY_ARGS=( --ro-bind "$WL_HOST" "$RT/wayland-0" )
-        VIDEO_ENV+=( --setenv WAYLAND_DISPLAY wayland-0 )
+        if [ "$GS" = 1 ]; then
+            # Nested: the desktop's compositor is gamescope's business alone.
+            # Its socket goes in away from the runtime dir, where the game's
+            # Landlock layer, which grants connecting to sockets only where
+            # the game may write, grants nothing; and only gamescope's
+            # environment names it.
+            DISPLAY_ARGS=( --ro-bind "$WL_HOST" "$HOST_WL" )
+        else
+            DISPLAY_ARGS=( --ro-bind "$WL_HOST" "$RT/wayland-0" )
+            VIDEO_ENV+=( --setenv WAYLAND_DISPLAY wayland-0 )
+        fi
     fi
 fi
 # Proton only: /dev/ntsync, where kernels 6.14 and newer do Windows' thread
@@ -1267,7 +1285,17 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
     esac
 done
 BWRAP+=( --ro-bind "$LANDLOCK" /run/sandbox-landlock )
-set -- /run/sandbox-landlock "${LL_ARGS[@]}" -- "$@"
+if [ "$GS" = 1 ]; then
+    # gamescope in the outer domain, the game in one of its own inside it:
+    # Landlock then keeps the game from connecting to the desktop's socket,
+    # and from reaching into gamescope -- ptrace, /proc/PID/fd, pidfd_getfd --
+    # to use gamescope's connections. See sandbox-landlock for both options.
+    set -- /run/sandbox-landlock "${LL_ARGS[@]}" -- "${GS_CMD[@]}" -- \
+        /run/sandbox-landlock "${LL_ARGS[@]}" --unix-connect-where-writable \
+        --no-abstract-scope -- "$@"
+else
+    set -- /run/sandbox-landlock "${LL_ARGS[@]}" -- "$@"
+fi
 
 # Always a child rather than exec: the trap has to get a turn after the game
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The

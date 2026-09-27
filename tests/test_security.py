@@ -987,6 +987,98 @@ print(json.dumps({{
         for option in ("--unshare-user", "--disable-userns", "--seccomp"):
             self.assertIn(option, args)
 
+    def test_gamescope_alone_is_told_of_the_desktop_socket(self):
+        # Under gamescope the desktop's Wayland socket goes in away from the
+        # runtime dir, named only in gamescope's environment, and the game's
+        # own Landlock layer below gamescope connects to sockets only where it
+        # may write -- which is nowhere above that one.
+        host, inside = str(self.runtime / "wayland-0"), "/run/host-wayland/wayland-0"
+        args = self.recorded_args()
+        i = args.index(host)
+        self.assertEqual(args[i - 1:i + 2], ["--ro-bind", host, inside])
+        self.assertNotIn("WAYLAND_DISPLAY", args)       # not for the sandbox as a whole
+        gs = args.index("gamescope")
+        self.assertEqual(args[gs - 2:gs], ["env", "WAYLAND_DISPLAY=" + inside])
+        inner = args.index("--", gs) + 1
+        self.assertEqual(args[inner], "/run/sandbox-landlock")
+        rules = args[inner + 1:args.index("--", inner)]
+        for option in ("--unix-connect-where-writable", "--no-abstract-scope"):
+            self.assertIn(option, rules)
+        writable = [rules[k + 1] for k, r in enumerate(rules) if r == "--rw"]
+        self.assertFalse([w for w in writable if inside == w or inside.startswith(w.rstrip("/") + "/")],
+                         "a writable rule covers the desktop's socket")
+        self.assertEqual(args[-1], "/bin/true")
+        # Native Wayland talks to the desktop directly, as before.
+        direct = self.recorded_args("--wayland")
+        i = direct.index(host)
+        self.assertEqual(direct[i + 1], str(self.runtime / "wayland-0"))
+        self.assertNotIn("--unix-connect-where-writable", direct)
+
+    def test_inner_domain_connects_only_where_it_may_write(self):
+        # What keeps the game off the desktop's socket: from the inner layer, a
+        # socket under a read-only rule refuses the connection; one under a
+        # writable rule (gamescope's own, sound) takes it. The outer layer,
+        # gamescope's, reaches both.
+        landlock = str(ROOT / "sandbox-landlock")
+        if subprocess.run([landlock, "--has-unix-connect"]).returncode != 0:
+            self.skipTest("this kernel's Landlock cannot restrict connecting to sockets")
+        import socket
+        (self.base / "ro").mkdir()
+        (self.base / "rw").mkdir()
+        servers = []
+        for path in (self.base / "ro" / "wayland-0", self.base / "rw" / "gamescope-0"):
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(str(path))
+            srv.listen()
+            self.addCleanup(srv.close)
+            servers.append(str(path))
+        probe = self.base / "try.py"
+        probe.write_text("import socket, sys\n"
+                         "for p in sys.argv[1:]:\n"
+                         "    c = socket.socket(socket.AF_UNIX)\n"
+                         "    try: c.connect(p); print('connected')\n"
+                         "    except OSError as e: print(e.strerror.replace(' ', '_'))\n")
+        rules = ["--ro", "/usr", "--ro", "/proc", "--ro", str(probe), "--ro", str(ROOT),
+                 "--ro", str(self.base / "ro"), "--rw", str(self.base / "rw")]
+        outer = subprocess.run([landlock, *rules, "--", sys.executable, str(probe), *servers],
+                               capture_output=True, text=True, timeout=15).stdout.split()
+        inner = subprocess.run([landlock, *rules, "--", landlock, *rules,
+                                "--unix-connect-where-writable", "--no-abstract-scope", "--",
+                                sys.executable, str(probe), *servers],
+                               capture_output=True, text=True, timeout=15).stdout.split()
+        self.assertEqual(outer, ["connected", "connected"])
+        self.assertEqual(inner, ["Permission_denied", "connected"])
+
+    def test_inner_landlock_domain_keeps_out_of_its_parent(self):
+        # The layer below gamescope: from inside it, gamescope's descriptors
+        # are out of reach -- neither pidfd_getfd nor /proc/PID/fd. The parent
+        # lets any process trace it, so Yama's ptrace_scope is not what says no.
+        probe = self.base / "steal.py"
+        probe.write_text(
+            "import ctypes, os, subprocess, sys\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "if sys.argv[1] == 'parent':\n"
+            "    held = os.open('/etc/hostname', os.O_RDONLY)\n"
+            "    libc.prctl(0x59616d61, ctypes.c_ulong(-1), 0, 0, 0)\n"
+            "    sys.exit(subprocess.run(sys.argv[2:] + [sys.executable, __file__, 'child',\n"
+            "                            str(os.getpid()), str(held)]).returncode)\n"
+            "pid, fd = int(sys.argv[2]), int(sys.argv[3])\n"
+            "got = libc.syscall(438, os.pidfd_open(pid), fd, 0)\n"
+            "try:\n"
+            "    os.close(os.open(f'/proc/{pid}/fd/{fd}', os.O_RDONLY)); via_proc = True\n"
+            "except OSError:\n"
+            "    via_proc = False\n"
+            "print(got >= 0, via_proc)\n")
+        landlock = str(ROOT / "sandbox-landlock")
+        rules = ["--ro", "/usr", "--ro", "/proc", "--ro", "/etc", "--ro", str(self.base),
+                 "--ro", str(ROOT)]
+        def steal(*inner):
+            return subprocess.run([landlock, *rules, "--", sys.executable, str(probe), "parent",
+                                   *inner], capture_output=True, text=True, timeout=15).stdout.split()
+        if steal() != ["True", "True"]:
+            self.skipTest("taking a parent's descriptor is refused here even in one domain")
+        self.assertEqual(steal(landlock, *rules, "--no-abstract-scope", "--"), ["False", "False"])
+
     def test_playback_only_server_replaces_the_desktop_sockets(self):
         # With the sandbox sound server up, the game gets its socket alone --
         # never the PipeWire one, which would get around it.

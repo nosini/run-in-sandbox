@@ -441,9 +441,24 @@ discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
 `SANDBOX_SECCOMP` and `SANDBOX_GPU_CARD`, and `MANGOHUD=1` still selects the
 overlay.
 
-The default display exposes the Wayland socket for gamescope, which supplies a
-private Xwayland server. Native `--wayland` exposes no host X socket or cookie,
-including for Proton: builds lacking winewayland must use gamescope instead.
+Under gamescope (the default display, and `--gamescope`) the game never
+reaches the desktop's compositor. gamescope supplies a private Xwayland
+server, and, with `--wayland`, a Wayland socket of its own. The desktop's
+Wayland socket is mounted for gamescope at `/run/host-wayland/wayland-0`, away
+from the runtime directory and named only in gamescope's environment, and the
+game runs in a Landlock domain of its own below gamescope. From there it may
+connect to Unix sockets only where it may write — sound, gamescope's own
+sockets, X11 — not to that one; and it can neither ptrace gamescope nor take
+its descriptors, to use gamescope's connections instead. So a game cannot go
+around gamescope to the desktop: it gets a window, input while it has focus,
+and whatever gamescope passes on. The socket restriction needs a kernel whose
+Landlock can restrict connecting to sockets (7.2 can; `sandbox-game --check`
+says); on an older one the launch warns and goes ahead.
+
+Native `--wayland` without gamescope talks to the desktop's compositor
+directly: quicker, but the compositor is then within the game's reach. It
+exposes no host X socket or cookie, including for Proton: builds lacking
+winewayland must use gamescope instead.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided.
 
@@ -741,8 +756,8 @@ GE, DW and CachyOS builds honour. Builds without winewayland need the default
 gamescope mode; host X is never silently exposed as a fallback.
 
 **gamescope and the overlay.** `gamescope --mangoapp` is the supported way to
-get MangoHud in there, and is what gets used — except when the Wayland socket is
-exposed as well (which is what makes winewayland work under gamescope). mangoapp
+get MangoHud in there, and is what gets used — except when gamescope's own
+Wayland socket is exposed as well (which is what makes winewayland work under gamescope). mangoapp
 is a GLFW client: given a `WAYLAND_DISPLAY` it takes the Wayland path, libdecor
 cannot find the globals gamescope offers, it falls back to X11, fails there too,
 and gamescope's reaper restarts it forever. In that combination the shim is

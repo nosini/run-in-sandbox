@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""sandbox-landlock [--rw PATH | --ro PATH | --ls PATH]... -- CMD...
+"""sandbox-landlock [--rw PATH | --ro PATH | --ls PATH]...
+                 [--unix-connect-where-writable] [--no-abstract-scope] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
+   sandbox-landlock --has-unix-connect   exit 0 if the kernel can restrict
+                                         connecting to Unix sockets by path
 
 Runs inside the sandbox, as the first step of the game's command:
 restricts itself with Landlock to the paths it is given, then execs CMD,
@@ -18,9 +21,21 @@ reopen as far as the descriptors already go (see main).
 --rw   read, write, create, remove, execute, ioctl on devices
 --ro   read and execute
 --ls   list directories only
+--unix-connect-where-writable, --no-abstract-scope   see below
 
 Landlock also scopes signals and abstract unix sockets to the game's own
 processes, where the kernel supports that (ABI 6).
+
+Run a second time, below gamescope, it puts the game in a domain of its own
+inside gamescope's. Landlock lets no process reach into one outside its
+domain -- no ptrace, no /proc/PID/fd, no pidfd_getfd -- so the game cannot
+use gamescope's connections to the desktop. With
+--unix-connect-where-writable it may also connect to a Unix socket by path
+only under a --rw rule: the desktop's Wayland socket, mounted read-only for
+gamescope, is then out of its reach. (A kernel without that right gets a
+warning.) That layer does not scope abstract sockets, --no-abstract-scope:
+gamescope's Xwayland listens on one, and X11 clients do not fall back to its
+socket file when refused.
 
 On a kernel without Landlock the command runs anyway, with a warning, the way
 sandbox-game carries on without a systemd scope: it is defence in depth, and
@@ -47,6 +62,7 @@ REMOVE_DIR, REMOVE_FILE = 1 << 4, 1 << 5
 MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK = 1 << 6, 1 << 7, 1 << 8, 1 << 9
 MAKE_FIFO, MAKE_BLOCK, MAKE_SYM = 1 << 10, 1 << 11, 1 << 12
 REFER, TRUNCATE, IOCTL_DEV = 1 << 13, 1 << 14, 1 << 15
+RESOLVE_UNIX = 1 << 16          # connecting to a Unix socket by its path
 SCOPE_ABSTRACT_UNIX_SOCKET, SCOPE_SIGNAL = 1 << 0, 1 << 1
 
 # What each ABI version can handle; anything newer is left alone.
@@ -85,8 +101,23 @@ def main():
     if args == ["--abi"]:               # for sandbox-game --check
         print(max(abi, 0))
         return
-    rules = []
+    # Not tied to an ABI number here: the kernel says whether it knows the
+    # right by accepting a ruleset that handles it.
+    probe = RulesetAttr(handled_access_fs=RESOLVE_UNIX)
+    fd = libc.syscall(ctypes.c_long(SYS_CREATE_RULESET), ctypes.byref(probe),
+                      ctypes.c_size_t(8), ctypes.c_uint32(0))
+    has_unix = fd >= 0
+    if has_unix:
+        os.close(fd)
+    if args == ["--has-unix-connect"]:  # for sandbox-game --check
+        sys.exit(0 if has_unix else 1)
+    rules, unix, abstract = [], False, True
     while args and args[0] != "--":
+        if args[0] in ("--unix-connect-where-writable", "--no-abstract-scope"):
+            unix = unix or args[0] == "--unix-connect-where-writable"
+            abstract = abstract and args[0] != "--no-abstract-scope"
+            args = args[1:]
+            continue
         if len(args) < 2 or args[0] not in ("--rw", "--ro", "--ls"):
             sys.exit(__doc__.split("\n\n")[0])
         rules.append((args[0], args[1]))
@@ -100,11 +131,17 @@ def main():
         os.execvp(cmd[0], cmd)
 
     handled = ABI_FS[min(abi, 5)]
+    if unix and has_unix:
+        handled |= RESOLVE_UNIX         # granted by --rw, as everything handled is
+    elif unix:
+        print("sandbox-landlock: warning: this kernel's Landlock cannot restrict connecting to"
+              " sockets; under gamescope the game can reach the desktop's compositor",
+              file=sys.stderr)
     access = {"--rw": handled, "--ro": RO & handled, "--ls": READ_DIR}
     attr = RulesetAttr(handled_access_fs=handled)
     size = 8
     if abi >= 6:
-        attr.scoped = SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
+        attr.scoped = SCOPE_SIGNAL | (SCOPE_ABSTRACT_UNIX_SOCKET if abstract else 0)
         size = 24
     ruleset = libc.syscall(ctypes.c_long(SYS_CREATE_RULESET), ctypes.byref(attr),
                            ctypes.c_size_t(size), ctypes.c_uint32(0))
