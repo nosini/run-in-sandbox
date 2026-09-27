@@ -112,9 +112,13 @@ class SecurityTests(unittest.TestCase):
     def cli(self, *args, check=True):
         # No terminal on stdin, or anything that asks first (--delete,
         # --reset-install) would wait for an answer that never comes.
-        return subprocess.run([str(ROOT / "sandbox-game"), *map(str, args)],
-                              env=self.env, capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=15, check=check)
+        result = subprocess.run([str(ROOT / "sandbox-game"), *map(str, args)],
+                                env=self.env, capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL, timeout=15)
+        # A failed launch says why: CalledProcessError would keep stderr to itself.
+        if check and result.returncode != 0:
+            self.fail(f"sandbox-game exited {result.returncode}:\n{result.stderr}")
+        return result
 
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
