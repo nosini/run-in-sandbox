@@ -1054,6 +1054,28 @@ print(json.dumps({{
         self.env["DISPLAY"] = ":123"
         return json.loads(self.cli(*options, self.game, "/bin/true").stdout)
 
+    def test_title_bars_get_the_desktops_button_layout(self):
+        # GTK-drawn title bars read their buttons from GNOME's settings, which
+        # are not in the sandbox: that one value goes in, read-only, through
+        # GLib's keyfile backend. Anything but a plain layout stays out.
+        self.recorded_args()                          # sets up PATH and bin/
+        gsettings = self.base / "bin" / "gsettings"
+        keyfile = str(self.home / ".config" / "glib-2.0" / "settings" / "keyfile")
+        saved = self.home / "game-sandboxes" / "game" / "gsettings"
+        def with_layout(output, *options):
+            gsettings.write_text(f"#!/bin/sh\nprintf '%s\\n' {output!r}\n")
+            gsettings.chmod(0o755)
+            saved.unlink(missing_ok=True)
+            return self.recorded_args(*options)
+        args = with_layout("'appmenu:minimize,maximize,close'")
+        i = args.index(keyfile)
+        self.assertEqual(args[i - 2:i], ["--ro-bind", str(saved)])
+        self.assertIn("GSETTINGS_BACKEND", args)
+        self.assertEqual(saved.read_text(), "[org/gnome/desktop/wm/preferences]\n"
+                                            "button-layout='appmenu:minimize,maximize,close'\n")
+        self.assertNotIn("GSETTINGS_BACKEND", with_layout("'close'\n[evil]\nkey=1"))
+        self.assertNotIn("GSETTINGS_BACKEND", with_layout("'appmenu:close'", "--headless"))
+
     def test_default_display_is_private(self):
         args = self.recorded_args()
         self.assertIn("gamescope", args)

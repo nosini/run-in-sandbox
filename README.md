@@ -471,7 +471,11 @@ directly: quicker, but the compositor is then within the game's reach. It
 exposes no host X socket or cookie, including for Proton: builds lacking
 winewayland must use gamescope instead.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
-`--headless` exposes neither. No session D-Bus socket is provided.
+`--headless` exposes neither. No session D-Bus socket is provided. Without it,
+GTK cannot read the desktop's settings, so one is passed in: GNOME's title-bar
+button layout, read at launch and given to the game read-only through GLib's
+keyfile backend, so that title bars GTK draws — NW.js on Wayland, SDL games
+using libdecor — have minimize and maximize where the desktop does.
 
 `/dev` and its shared memory are private. Graphical modes expose GPU devices
 only: the render nodes (`/dev/dri/renderD*`) and any NVIDIA device nodes.

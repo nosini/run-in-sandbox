@@ -948,6 +948,23 @@ else
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 fi
 
+# ---- desktop settings ------------------------------------------------------
+# GTK takes a title bar's buttons from GNOME's button-layout setting, which it
+# reads through the settings portal or dconf -- neither is in here -- so every
+# title bar drawn through GTK (NW.js on Wayland, SDL's libdecor) fell back to
+# GTK's own default: a close button alone. That one setting goes in, read
+# once from the desktop, through GLib's keyfile backend and read-only; none
+# of the rest of the desktop's settings. Only a plain layout is taken --
+# button names, colons, commas -- so nothing else can end up in the file.
+GSET_ARGS=()
+if [ "$HEADLESS" = 0 ] && command -v gsettings >/dev/null \
+   && LAYOUT="$(gsettings get org.gnome.desktop.wm.preferences button-layout 2>/dev/null)" \
+   && [[ "$LAYOUT" =~ ^\'[a-z:,_-]*\'$ ]]; then
+    printf '[org/gnome/desktop/wm/preferences]\nbutton-layout=%s\n' "$LAYOUT" > "$CAP/gsettings"
+    GSET_ARGS=( --ro-bind "$CAP/gsettings" "$HOME/.config/glib-2.0/settings/keyfile"
+                --setenv GSETTINGS_BACKEND keyfile )
+fi
+
 # ---- overlay for the game's own install dir --------------------------------
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
 # back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
@@ -1247,6 +1264,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${EXTRA_RO[@]}"
     --bind "$CAP/home" "$HOME"
     --setenv HOME "$HOME"
+    "${GSET_ARGS[@]}"                 # inside the home just bound
     "${VIDEO_ENV[@]}"
     "${OVERLAY_ARGS[@]}"
     "${PROTON_ARGS[@]}"
