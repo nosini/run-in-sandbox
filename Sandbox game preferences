@@ -50,6 +50,8 @@ GAMEDIR="$R_GAMEDIR"
 BASE="$(basename "$GAMEDIR")"
 NAME="$("$SANDBOX" --print-name "$GAMEDIR")" \
     || die "sandbox-game could not derive a name for:\n$GAMEDIR"
+# What the launcher will run it with, so that only what that can do is offered.
+game_engine "$SEL"
 
 # ---- build the menus -------------------------------------------------------
 # zenity combos have no "select this one" switch: they open on their first
@@ -74,13 +76,30 @@ WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
 PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
 NET_NOW="$(cfg_get net 0)"
 
-V_X="Private Xwayland (gamescope)"; V_W="Native Wayland"
-V_HOST="Host X11 (allows access to other X apps)"
 M_OFF="Off"; M_ON="On"
 P_AUTO="Newest installed (auto)"
 
-[ "$WAYLAND_NOW" = 1 ] && V_CUR="$V_W" || V_CUR="$V_X"
-[ "$(cfg_get host_x11 0)" = 1 ] && V_CUR="$V_HOST"
+# Display: where the game draws, and whether gamescope is in between, as one
+# choice -- each entry says what happens, and only what this game can do is
+# offered. Saved as wayland=, gamescope= and host_x11= as ever.
+D_W="Native Wayland"; D_WG="Native Wayland, in gamescope"
+D_X="X11, in gamescope (private Xwayland)"
+D_H="Host X11 (other X apps can watch and control it)"
+if [ "$R_ENGINE" = native ] && renpy_without_wayland "$GAMEDIR"; then
+    D_OK=( "$D_X" "$D_H" )          # its SDL has no Wayland driver
+elif [ "$R_ENGINE" = proton ]; then
+    # Wine's Wayland driver needs wl_subcompositor and wp_viewporter, which
+    # gamescope's Wayland server lacks; the launcher uses its Xwayland there.
+    D_OK=( "$D_W" "$D_X" "$D_H" )
+else
+    D_OK=( "$D_W" "$D_WG" "$D_X" "$D_H" )
+fi
+if [ "$(cfg_get host_x11 0)" = 1 ]; then D_CUR="$D_H"
+elif [ "$WAYLAND_NOW" = 1 ] && [ "$GS_NOW" = 1 ]; then D_CUR="$D_WG"
+elif [ "$WAYLAND_NOW" = 1 ]; then D_CUR="$D_W"
+else D_CUR="$D_X"; fi
+# A setting this game cannot have opens as what it gets instead.
+[[ "|$(join_pipe "${D_OK[@]}")|" == *"|$D_CUR|"* ]] || D_CUR="$D_X"
 [ "$MHUD_NOW"    = 1 ] && M_CUR="$M_ON" || M_CUR="$M_OFF"
 [ "$PROTON_NOW" = auto ] && P_CUR="$P_AUTO" || P_CUR="$PROTON_NOW"
 
@@ -89,7 +108,7 @@ mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
 # combo would silently reopen on something else and quietly change the setting.
 mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
 
-mapfile -t V_ALL < <(first "$V_CUR" "$V_X" "$V_W" "$V_HOST")
+mapfile -t D_ALL < <(first "$D_CUR" "${D_OK[@]}")
 # MangoHud's preload shim hangs Chromium's zygote, so for NW.js it stays off.
 M_NA="Off (forced: hangs NW.js)"
 if [ -n "$R_APPDIR" ]; then M_ALL=( "$M_NA" )
@@ -99,34 +118,40 @@ N_OFF="Off"; N_ON="Internet only (no LAN, nothing on this PC)"
 [ "$NET_NOW" = 1 ] && N_CUR="$N_ON" || N_CUR="$N_OFF"
 mapfile -t N_ALL < <(first "$N_CUR" "$N_OFF" "$N_ON")
 
-G_OFF="Automatic (on for private Xwayland)"; G_ON="On (always)"
-[ "$GS_NOW" = 1 ] && G_CUR="$G_ON" || G_CUR="$G_OFF"
-mapfile -t G_ALL < <(first "$G_CUR" "$G_OFF" "$G_ON")
-
 S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
 SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
 
+FORM=( --add-combo="Display"          --combo-values="$(join_pipe "${D_ALL[@]}")"
+       --add-combo="MangoHud overlay" --combo-values="$(join_pipe "${M_ALL[@]}")" )
+FIELDS=( display mhud )
+ASK_PROTON=0
+case "$R_ENGINE" in proton|"") ASK_PROTON=1 ;; esac
+if [ "$ASK_PROTON" = 1 ]; then
+    FORM+=( --add-combo="Proton version" --combo-values="$(join_pipe "${P_ALL[@]}")" )
+    FIELDS+=( proton )
+fi
+FORM+=( --add-combo="Network"  --combo-values="$(join_pipe "${N_ALL[@]}")"
+        --add-combo="Save for" --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" )
+FIELDS+=( net scope )
 OUT="$(zenity --forms --title="Sandbox preferences" \
-    --text="$BASE" --separator=$'\t' \
-    --add-combo="Video backend"    --combo-values="$(join_pipe "${V_ALL[@]}")" \
-    --add-combo="MangoHud overlay" --combo-values="$(join_pipe "${M_ALL[@]}")" \
-    --add-combo="Gamescope"        --combo-values="$(join_pipe "${G_ALL[@]}")" \
-    --add-combo="Proton version"   --combo-values="$(join_pipe "${P_ALL[@]}")" \
-    --add-combo="Network"          --combo-values="$(join_pipe "${N_ALL[@]}")" \
-    --add-combo="Save for"         --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" \
-    2>/dev/null)" || exit 0                    # cancelled
+    --text="$BASE" --separator=$'\t' "${FORM[@]}" 2>/dev/null)" || exit 0   # cancelled
 
 # Split with awk, not read: tab counts as IFS whitespace, so read would fold
 # consecutive tabs together and shift every field left of an empty one.
-fld() { awk -F'\t' -v n="$1" 'NR==1 {print $n}' <<<"$OUT"; }
-F_VIDEO="$(fld 1)"; F_MHUD="$(fld 2)"; F_GS="$(fld 3)"
-F_PROTON="$(fld 4)"; F_NET="$(fld 5)"; F_SCOPE="$(fld 6)"
+fld() {                                        # $1 = field name
+    local i
+    for i in "${!FIELDS[@]}"; do
+        [ "${FIELDS[$i]}" = "$1" ] || continue
+        awk -F'\t' -v n="$((i + 1))" 'NR==1 {print $n}' <<<"$OUT"; return
+    done
+}
+F_DISPLAY="$(fld display)"; F_MHUD="$(fld mhud)"; F_PROTON="$(fld proton)"
+F_NET="$(fld net)"; F_SCOPE="$(fld scope)"
 
 # An untouched combo can come back empty on some zenity builds; keep the
 # current value rather than silently resetting it to the built-in default.
-[ -n "${F_VIDEO:-}"  ] || F_VIDEO="$V_CUR"
+[ -n "${F_DISPLAY:-}" ] || F_DISPLAY="$D_CUR"
 [ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
-[ -n "${F_GS:-}"     ] || F_GS="$G_CUR"
 [ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
 [ -n "${F_NET:-}"    ] || F_NET="$N_CUR"
 [ -n "${F_SCOPE:-}"  ] || F_SCOPE="$S_GAME"
@@ -148,28 +173,28 @@ else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BAS
 # inherited default into a game that then stops following it.
 kept() { file_get "$TARGET" "$1" || printf '%s\n' "$2"; }
 
+# gamescope=1 means always; X11 in gamescope is stored as 0, the launcher
+# putting gamescope around private Xwayland by itself -- so that a switch to
+# native Wayland later does not find it pinned on.
+case "$F_DISPLAY" in
+    "$D_W")  W=1 G=0 HX=0 ;;
+    "$D_WG") W=1 G=1 HX=0 ;;
+    "$D_H")  W=0 G=0 HX=1 ;;
+    *)       W=0 G=0 HX=0 ;;
+esac
+# Whether gamescope will actually run, which is when its options matter.
+USES_GS=0
+[ "$F_DISPLAY" = "$D_WG" ] || [ "$F_DISPLAY" = "$D_X" ] && USES_GS=1
 # The forced entry carries no choice, so keep whatever this file already said.
-if [ "$F_VIDEO" = "$V_W" ]; then W=1
-else W=0; fi
 if [ "$F_MHUD" = "$M_NA" ]; then M="$(kept mangohud 0)"
 elif [ "$F_MHUD" = "$M_ON" ]; then M=1
 else M=0; fi
-# gamescope=1 means always; Automatic is stored as 0 whatever the video
-# backend, and the launcher turns gamescope on for private Xwayland itself.
-# Saving 1 for private Xwayland instead would pin it on, and it would stay on
-# after a switch to native Wayland.
-[ "$F_GS" = "$G_ON" ] && G=1 || G=0
 [ "$F_NET" = "$N_ON" ] && NET=1 || NET=0
-[ "$F_VIDEO" = "$V_HOST" ] && HX=1 || HX=0
-[ "$HX" = 0 ] || G=0
-# Whether gamescope will actually run, which is when its options matter.
-USES_GS=$G
-[ "$F_VIDEO" = "$V_X" ] && USES_GS=1
 
 # ---- gamescope options -----------------------------------------------------
-# Only worth asking when gamescope will run -- On, or Automatic with private
-# Xwayland -- so it is a second dialog rather than four more fields nobody
-# without it would want. Resolution and
+# Only worth asking when gamescope will run -- either display in gamescope --
+# so it is a second dialog rather than four more fields nobody without it
+# would want. Resolution and
 # fullscreen are the two knobs; anything else in gamescope_args was put there
 # by hand and is parsed out, left alone, and put back.
 # A game's own file that says nothing gets the defaults' options, so those are
@@ -239,7 +264,9 @@ if [ "$USES_GS" = 1 ]; then
         GA_OUT="$(ga_join)"
     fi
 fi
-[ "$F_PROTON" = "$P_AUTO" ] && P=auto || P="$F_PROTON"
+if [ "$ASK_PROTON" = 0 ]; then P="$(kept proton auto)"
+elif [ "$F_PROTON" = "$P_AUTO" ]; then P=auto
+else P="$F_PROTON"; fi
 
 ENV_KEEP="$(kept env "")"        # no dialog field; carried through untouched
 
@@ -264,5 +291,5 @@ NOTE=""
     && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
 
 zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nVideo: $F_VIDEO\nMangoHud: $F_MHUD\nGamescope: $F_GS${GA_OUT:+ <tt>($GA_OUT)</tt>}\nProton: $F_PROTON\nNetwork: $F_NET\n\n<tt>$TARGET</tt>$NOTE" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}\nNetwork: $F_NET\n\n<tt>$TARGET</tt>$NOTE" \
     2>/dev/null

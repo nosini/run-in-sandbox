@@ -511,7 +511,7 @@ class SecurityTests(unittest.TestCase):
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join([
-            "Host X11 (allows access to other X apps)", "Off", "On (always)",
+            "Host X11 (other X apps can watch and control it)", "Off",
             "Newest installed (auto)", "Off", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
                                 env=self.env, capture_output=True, text=True, timeout=15)
@@ -565,7 +565,7 @@ class SecurityTests(unittest.TestCase):
         (config / "defaults").write_text("gamescope_args=-f -W 1920 -H 1080\n")
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
-        self.env["TEST_FORM"] = "\t".join(["Private Xwayland (gamescope)", "", "", "", "",
+        self.env["TEST_FORM"] = "\t".join(["X11, in gamescope (private Xwayland)", "", "", "",
                                            "This game only"])
         name = self.cli("--print-name", self.game).stdout.strip()
         own = config / "games" / name
@@ -944,31 +944,88 @@ print(json.dumps({{
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
 
-    def test_gamescope_automatic_stays_automatic(self):
-        # Automatic is gamescope=0 whatever the video backend -- the launcher
-        # turns it on for private Xwayland itself. Saving 1 there pinned it
-        # on, and it stayed on after a switch to native Wayland.
+    def preferences(self, form, game=None):
+        """Run the preferences dialog on `game` with a zenity that answers
+        every form with `form` and records what it was offered."""
         bindir = self.home / ".local" / "bin"         # where the dialog looks
-        bindir.mkdir(parents=True)
+        bindir.mkdir(parents=True, exist_ok=True)
         for script in ("sandbox-game", "sandbox-game-lib"):
-            (bindir / script).symlink_to(ROOT / script)
-        zenity = bindir / "zenity"
-        zenity.write_text('#!/bin/sh\ncase "$*" in *--forms*) printf "%s\\n" "$TEST_FORM" ;; esac\n')
-        zenity.chmod(0o755)
+            if not (bindir / script).exists():
+                (bindir / script).symlink_to(ROOT / script)
+        # The first form of a run is the main one; no answer is Cancel.
+        offered = self.base / "offered"
+        offered.unlink(missing_ok=True)
+        (bindir / "zenity").write_text(
+            f'#!/bin/sh\ncase "$*" in *--forms*)\n'
+            f'  [ -e "{offered}" ] || printf "%s\\n" "$@" > "{offered}"\n'
+            '  [ -n "$TEST_FORM" ] || exit 1\n'
+            '  printf "%s\\n" "$TEST_FORM" ;; esac\n')
+        (bindir / "zenity").chmod(0o755)
+        game = game or self.game
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
-        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
-        name = self.cli("--print-name", self.game).stdout.strip()
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
+        self.env["TEST_FORM"] = "\t".join(form)
+        subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
+                       capture_output=True, timeout=15, check=True)       # Cancel exits 0
+        lines = offered.read_text().splitlines()
+        combos = {lines[i][len("--add-combo="):]: lines[i + 1][len("--combo-values="):].split("|")
+                  for i in range(len(lines) - 1) if lines[i].startswith("--add-combo=")}
+        name = self.cli("--print-name", game).stdout.strip()
         settings = self.home / ".config" / "sandbox-game" / "games" / name
-        def save(video, gamescope):
-            self.env["TEST_FORM"] = "\t".join([video, "Off", gamescope,
-                                               "Newest installed (auto)", "Off", "This game only"])
-            subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
-                           capture_output=True, timeout=15, check=True)
-            return dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l)
-        automatic = "Automatic (on for private Xwayland)"
-        self.assertEqual(save("Private Xwayland (gamescope)", automatic)["gamescope"], "0")
-        self.assertEqual(save("Native Wayland", automatic)["gamescope"], "0")
-        self.assertEqual(save("Native Wayland", "On (always)")["gamescope"], "1")
+        saved = dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l) \
+            if settings.exists() else {}
+        return combos, saved
+
+    def test_display_choices_save_what_they_say(self):
+        # One Display choice, saved as the keys the launcher reads. X11 in
+        # gamescope is gamescope=0: the launcher puts gamescope around private
+        # Xwayland itself, and a later switch to Wayland does not find it
+        # pinned on.
+        def save(display):
+            return self.preferences([display, "Off", "Newest installed (auto)", "Off",
+                                     "This game only"])[1]
+        keys = lambda d: (d["wayland"], d["gamescope"], d["host_x11"])
+        self.assertEqual(keys(save("X11, in gamescope (private Xwayland)")), ("0", "0", "0"))
+        self.assertEqual(keys(save("Native Wayland")), ("1", "0", "0"))
+        self.assertEqual(keys(save("Native Wayland, in gamescope")), ("1", "1", "0"))
+        self.assertEqual(keys(save("Host X11 (other X apps can watch and control it)")),
+                         ("0", "0", "1"))
+
+    def test_preferences_offer_only_what_the_game_can_do(self):
+        all_four = ["Native Wayland", "Native Wayland, in gamescope",
+                    "X11, in gamescope (private Xwayland)",
+                    "Host X11 (other X apps can watch and control it)"]
+        # A Windows game: Wine's Wayland driver cannot run inside gamescope,
+        # so that is not offered -- and one saved with it opens as what it
+        # gets, X11 in gamescope.
+        proton = self.base / "games" / "Win"
+        proton.mkdir()
+        (proton / "game.exe").write_text("x")
+        name = self.cli("--print-name", proton).stdout.strip()
+        config = self.home / ".config" / "sandbox-game" / "games"
+        config.mkdir(parents=True)
+        (config / name).write_text("wayland=1\ngamescope=1\n")
+        combos, _ = self.preferences([], proton)                 # cancelled: nothing saved
+        self.assertEqual(combos["Display"][0], "X11, in gamescope (private Xwayland)")
+        self.assertEqual(sorted(combos["Display"]), sorted(set(all_four) - {all_four[1]}))
+        self.assertIn("Proton version", combos)
+        # A Ren'Py build without SDL's Wayland driver: X11 only.
+        renpy = self.base / "games" / "Old"
+        lib = renpy / "lib" / f"py3-linux-{os.uname().machine}"
+        lib.mkdir(parents=True)
+        (renpy / "renpy").mkdir()
+        (renpy / "Old.sh").write_text("#!/bin/sh\n")
+        (lib / "librenpython.so").write_bytes(b"\0SDL X11 video driver\0")
+        combos, _ = self.preferences([], renpy)
+        self.assertEqual(sorted(combos["Display"]), sorted(all_four[2:]))
+        self.assertNotIn("Proton version", combos)            # not a Proton game
+        # A native game that can do Wayland gets all four, and no Proton row.
+        native = self.base / "games" / "Native"
+        native.mkdir()
+        (native / "run.sh").write_text("#!/bin/sh\n")
+        combos, _ = self.preferences([], native)
+        self.assertEqual(sorted(combos["Display"]), sorted(all_four))
+        self.assertNotIn("Proton version", combos)
 
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""

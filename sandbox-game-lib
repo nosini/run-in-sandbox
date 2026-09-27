@@ -66,3 +66,56 @@ resolve_selection() {                          # $1 = selected path
         R_GAMEDIR="$(dirname "$sel")"
     fi
 }
+
+# RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
+# names the runtime it wants; the data files and encrypted archives catch dumps
+# that arrived without one. MV/MZ never match -- those are the NW.js case.
+is_rgss() {
+    [ -f "$1/Game.ini" ] &&
+        grep -qiE '^[[:space:]]*Library[[:space:]]*=[[:space:]]*RGSS' "$1/Game.ini" && return 0
+    [ -n "$(find "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
+            -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null)" ]
+}
+
+# What "Sandbox game" will run a selection with, in the order it goes by: an
+# NW.js app, a .sh launcher, an RGSS game under mkxp-z, a Windows .exe under
+# Proton. For the preferences, which offer only what that engine can do.
+# Sets R_ENGINE to nwjs, native, mkxp, proton, or empty when nothing is found.
+# shellcheck disable=SC2034  # an output, read by whoever sourced this
+game_engine() {                                # $1 = selected path, after resolve_selection
+    R_ENGINE=""
+    if [ -n "$R_APPDIR" ]; then
+        R_ENGINE=nwjs
+    elif [ -d "$1" ]; then
+        if [ -n "$(find "$R_GAMEDIR" -maxdepth 1 -type f -name '*.sh' -print -quit 2>/dev/null)" ]; then
+            R_ENGINE=native
+        elif is_rgss "$R_GAMEDIR"; then
+            R_ENGINE=mkxp
+        elif [ -n "$(find "$R_GAMEDIR" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]; then
+            R_ENGINE=proton
+        fi
+    else
+        case "${1,,}" in
+            *.exe) if is_rgss "$R_GAMEDIR"; then R_ENGINE=mkxp; else R_ENGINE=proton; fi ;;
+            *)     R_ENGINE=native ;;
+        esac
+    fi
+}
+
+# Ren'Py carries its own SDL, built into its lib/*linux-ARCH/ binaries, and
+# before some 8.x release built it without the Wayland driver: forced onto
+# Wayland, such a build dies at its GL test with "wayland not available".
+# True where the X11 driver is there and the Wayland one is not. Only when
+# both driver names can be looked for: a layout this does not know is false.
+renpy_without_wayland() {                      # $1 = game dir
+    [ -d "$1/renpy" ] || return 1
+    local libs=( "$1"/lib/*linux-"$(uname -m)" ) sos
+    [ -d "${libs[0]}" ] || return 1
+    # The shared objects only (librenpython.so, or a separate libSDL2): the
+    # rest need not be read on every launch.
+    # -H: the arch folder itself may be a symlink.
+    mapfile -t sos < <(find -H "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
+    [ "${#sos[@]}" -gt 0 ] || return 1
+    grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
+        && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
+}

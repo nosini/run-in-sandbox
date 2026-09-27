@@ -258,10 +258,17 @@ the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
 
-**Sandbox game preferences** — the video backend, MangoHud, gamescope, the
-Proton version and internet access, saved per game or as the library-wide default. Turning gamescope
-on opens a second dialog for resolution and fullscreen. This is why there is one
-launcher entry rather than one per flag combination.
+**Sandbox game preferences** — the display, MangoHud, the Proton version and
+internet access, saved per game or as the library-wide default. The display is
+one choice, each entry saying what happens: native Wayland; native Wayland in
+gamescope; X11 in gamescope (private Xwayland); or the host X server. Only
+what the game can do is offered — a Windows game does not get Wayland in
+gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
+SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
+opens as what it gets instead. The Proton version is asked for Windows games
+only. Choosing gamescope opens a second dialog for resolution and
+fullscreen. This is why there is one launcher entry rather than one per flag
+combination.
 
 **Stop sandboxed game** — right-click the game, as for launching it, to end
 its sandbox after a confirmation: `sandbox-game --stop` for a game hung in
@@ -738,8 +745,8 @@ when launching from the file manager.
 sandbox never provides one: it would open the keyring, the portals and gvfs to
 the game. NW.js 0.110 and 0.116 both run on Wayland without it, but one game
 (unrecorded) was once seen to segfault at startup on Wayland for want of a bus,
-while X11 was fine. If a game does that, set its video backend back to private
-Xwayland.
+while X11 was fine. If a game does that, set its display back to X11 in
+gamescope.
 
 **MangoHud is off for RPG Maker MV/MZ.** Its GL shim is `LD_PRELOAD`ed into
 every child, and Chromium spawns a zygote and its own renderer processes — the

@@ -52,16 +52,6 @@ SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
 
-# RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
-# names the runtime it wants; the data files and encrypted archives catch dumps
-# that arrived without one. MV/MZ never match -- those are the NW.js case above.
-is_rgss() {
-    [ -f "$1/Game.ini" ] &&
-        grep -qiE '^[[:space:]]*Library[[:space:]]*=[[:space:]]*RGSS' "$1/Game.ini" && return 0
-    [ -n "$(find "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
-            -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null)" ]
-}
-
 # Windows games ship a heap of .exe beside the real one; drop the usual
 # installers and helpers, but only while something else is left to run.
 EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet|redist|crashhandler|crashreport|crashsender|touchup|nwjc|notification_helper|python'

@@ -83,6 +83,15 @@
 #   sandbox-game --mkxp /mnt/General-HDD/Games/games/SomeVXAceGame
 set -euo pipefail
 
+# Shared with the Nautilus scripts, which have to agree with this on what a
+# game can do: the Ren'Py check, for one. Found beside this script, as the
+# other helpers are, else on PATH.
+SHARED_LIB="$(dirname "$(realpath "$0")")/sandbox-game-lib"
+[ -f "$SHARED_LIB" ] || SHARED_LIB="$(command -v sandbox-game-lib || true)"
+[ -n "$SHARED_LIB" ] || { echo "sandbox-game-lib not found beside sandbox-game or on PATH" >&2; exit 1; }
+# shellcheck source=sandbox-game-lib
+. "$SHARED_LIB"
+
 # Nicer names for directories whose basename is ugly. Key = on-disk basename.
 declare -A NAME_MAP=(
     # ["Doki Doki Literature Club"]="ddlc"
@@ -541,25 +550,11 @@ NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 # hand it out rather than have callers reimplement derive_name().
 [ "$PRINT_NAME" = 0 ] || { printf '%s\n' "$NAME"; exit 0; }
 
-# Ren'Py carries its own SDL, built into its lib/*linux-ARCH/ binaries, and
-# before some 8.x release built it without the Wayland driver: forced onto
-# Wayland, such a build dies at its GL test with "wayland not available".
-# Where the X11 driver is there and the Wayland one is not, --wayland gives
-# way to the default, gamescope's private Xwayland. Only when both driver
-# names can be looked for: a layout this does not know is left alone.
-renpy_without_wayland() {
-    [ -d "$GAMEDIR/renpy" ] || return 1
-    local libs=( "$GAMEDIR"/lib/*linux-"$(uname -m)" ) sos
-    [ -d "${libs[0]}" ] || return 1
-    # The shared objects only (librenpython.so, or a separate libSDL2): the
-    # rest need not be read on every launch.
-    # -H: the arch folder itself may be a symlink.
-    mapfile -t sos < <(find -H "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
-    [ "${#sos[@]}" -gt 0 ] || return 1
-    grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
-        && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
-}
-if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] && renpy_without_wayland; then
+# A Ren'Py build without SDL's Wayland driver (see renpy_without_wayland in
+# sandbox-game-lib) cannot run under --wayland: it gives way to the default,
+# gamescope's private Xwayland. The preferences do not offer Wayland for it.
+if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] \
+   && renpy_without_wayland "$GAMEDIR"; then
     echo "sandbox-game: note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
          "private Xwayland instead of --wayland" >&2
     WAYLAND=0
