@@ -548,6 +548,68 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("/game/bin/game.exe", launched)
         self.assertNotIn("/game/unins000.exe", launched)
 
+    def test_nwjs_file_name_case_follows_the_preference(self):
+        # An RPG Maker MV game: nwjs-casefold.js is bound in read-only and
+        # package.json names it, until the preferences say casefold=0 -- then
+        # it is neither bound nor left in package.json.
+        (self.game / "www").mkdir()
+        (self.game / "www" / "index.html").write_text("")
+        (self.game / "package.json").write_text('{"name": "", "main": "www/index.html"}')
+        nwjs = self.base / "nwjs"
+        nwjs.mkdir()
+        (nwjs / "nw").write_text("#!/bin/sh\n")
+        (nwjs / "nw").chmod(0o755)
+        self.env["NWJS_DIR"] = str(nwjs)
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        for helper in ("sandbox-game-lib", "nwjs-casefold.js"):
+            (helpers / helper).symlink_to(ROOT / helper)
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\0" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        self.env["PATH"] = "/usr/bin:/bin"
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+
+        def launch():
+            result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return recorded.read_text().split("\0")[:-1]
+
+        def fix_package(args, casefold):
+            # The package.json fix is handed to the command inside the
+            # sandbox, after "_", the name and the app path.
+            package = self.base / "package.json"
+            package.write_text((self.game / "package.json").read_text())
+            fix = args[args.index("_") + 3]
+            subprocess.run(["python3", "-c", fix, str(package), "game", casefold],
+                           check=True, capture_output=True)
+            return json.loads(package.read_text())
+
+        args = launch()
+        mount = ["--ro", str(helpers / "nwjs-casefold.js"), "/nwjs-casefold.js"]
+        self.assertIn(mount, [args[i:i + 3] for i in range(len(args))])
+        on = fix_package(args, "1")
+        self.assertEqual((on["name"], on["inject_js_start"]), ("game", "/nwjs-casefold.js"))
+        # Turned off after a launch that had it on: the entry comes out again.
+        (self.game / "package.json").write_text(json.dumps(on))
+        name = self.cli("--print-name", self.game).stdout.strip()
+        config = self.home / ".config" / "sandbox-game" / "games"
+        config.mkdir(parents=True)
+        (config / name).write_text("casefold=0\n")
+        args = launch()
+        self.assertNotIn("/nwjs-casefold.js", args)
+        self.assertNotIn("inject_js_start", fix_package(args, ""))
+        # A script the game injects itself is never replaced or removed.
+        (self.game / "package.json").write_text('{"name": "x", "inject_js_start": "own.js"}')
+        for casefold in ("1", ""):
+            self.assertEqual(fix_package(args, casefold)["inject_js_start"], "own.js")
+
     def test_a_game_can_turn_off_the_defaults_gamescope_options(self):
         # The defaults say fullscreen at 1920x1080. A game's own "no override,
         # not fullscreen" has to be written, as an empty value, or the
@@ -1029,6 +1091,21 @@ print(json.dumps({{
         combos, _ = self.preferences([], native)
         self.assertEqual(sorted(combos["Display"]), sorted(all_four))
         self.assertNotIn("Proton version", combos)
+        self.assertNotIn("File names", combos)                # not an NW.js game
+
+    def test_nwjs_games_can_turn_off_file_name_case_correction(self):
+        rpgm = self.base / "games" / "Rpgm"
+        (rpgm / "www").mkdir(parents=True)
+        (rpgm / "www" / "index.html").write_text("")
+        combos, _ = self.preferences([], rpgm)
+        self.assertEqual(combos["File names"][0], "Ignore case, like Windows")  # the default
+        _, saved = self.preferences(["Native Wayland", "", "Match exactly", "Off",
+                                     "This game only"], rpgm)
+        self.assertEqual(saved["casefold"], "0")
+        combos, saved = self.preferences(["Native Wayland", "", "", "Off",
+                                          "This game only"], rpgm)
+        self.assertEqual(combos["File names"][0], "Match exactly")
+        self.assertEqual(saved["casefold"], "0")                # untouched: kept
 
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""

@@ -18,6 +18,7 @@
 #   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
 #   install -Dm644 sandbox-game-lib ~/.local/lib/sandbox-game/sandbox-game-lib
 #   install -Dm755 sandbox-seccomp ~/.local/lib/sandbox-game/sandbox-seccomp
+#   install -Dm644 nwjs-casefold.js ~/.local/lib/sandbox-game/nwjs-casefold.js
 # The library holds the parts both scripts must agree on and is sourced from
 # beside sandbox-game; it stays out of the scripts dir, where Nautilus would
 # offer it as a menu entry.
@@ -118,6 +119,14 @@ if [ -n "$APPDIR" ]; then
         || die "NW.js runtime not found under ~/.config/nvm (or set NWJS_DIR=...)."
     NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
     RO=( --ro "$NW_DIR" /nwjs )
+    # Windows ignores case in file names, and so do the games made on it:
+    # asking for img/pictures/B.png when the file is b.png leaves an invisible
+    # character or a "Failed to load" on Linux. nwjs-casefold.js, run ahead of
+    # the game's scripts, points such a request at the file that is there. It
+    # is bound in read-only below, unless the preferences turn it off. Beside
+    # the library, where install.sh puts both; without it the game still runs,
+    # only with case mattering.
+    CASEFOLD="$(dirname "$LIB")/nwjs-casefold.js"
     # RPG Maker leaves "name" empty in package.json, and NW.js will not start
     # without one: the profile directory (localStorage, which is where some
     # games keep their saves) is named after it. Fill in NW_NAME, which is the
@@ -125,22 +134,42 @@ if [ -n "$APPDIR" ]; then
     # lands in the capture's rw/ and the install stays untouched. Only an
     # empty or missing top-level name is replaced; a file that does not parse
     # is left for NW.js to complain about.
-    read -r -d '' NW_FIX_NAME <<'EOF' || true
+    # "inject_js_start" is pointed at nwjs-casefold.js where it is bound in --
+    # NW.js takes an absolute path there -- and taken out again when it is
+    # not, so turning the correction off leaves nothing of it behind. A script
+    # the game injects itself is left alone either way.
+    read -r -d '' NW_FIX_PKG <<'EOF' || true
 import json, os, sys
-path, name = sys.argv[1:]
+path, name, casefold = sys.argv[1:]
+CASEFOLD = "/nwjs-casefold.js"
 try:
     with open(path, encoding="utf-8-sig") as f:
         pkg = json.load(f)
 except (OSError, ValueError):
     sys.exit()
-if isinstance(pkg, dict) and not str(pkg.get("name") or "").strip():
+if not isinstance(pkg, dict):
+    sys.exit()
+changed = False
+if not str(pkg.get("name") or "").strip():
     pkg["name"] = name
+    changed = True
+inject = pkg.get("inject_js_start")
+if casefold and not str(inject or "").strip():
+    pkg["inject_js_start"] = CASEFOLD
+    changed = True
+elif casefold and inject != CASEFOLD:
+    print("sandbox-game: the game injects %s, so file name case is not corrected"
+          % inject, file=sys.stderr)
+elif not casefold and inject == CASEFOLD:
+    del pkg["inject_js_start"]
+    changed = True
+if changed:
     # Replaced rather than rewritten: a read-only package.json is common.
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(pkg, f, indent=2, ensure_ascii=False)
     os.replace(path + ".tmp", path)
 EOF
-    # Inside the sandbox: name the app, rebuild the runtime dir with nw
+    # Inside the sandbox: fix up package.json, rebuild the runtime dir with nw
     # renamed to the game, then exec it against the app. $1=name $2=app-path
     # $3=the fix above $4=ozone platform, appended below once the display
     # preferences are known.
@@ -156,12 +185,13 @@ EOF
     CMD=( sh -c '
         set -e
         export PULSE_PROP_OVERRIDE="application.name=$1"
-        [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" || true
+        casefold=; [ ! -f /nwjs-casefold.js ] || casefold=1
+        [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" "$casefold" || true
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
         for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
         exec "$d/$1" "$2" --ozone-platform="$4" --no-sandbox
-    ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_NAME" )
+    ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
 else
     # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
     # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
@@ -214,6 +244,9 @@ WL=0
 [ "$WL" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
 [ "$(cfg_get net 0)" = 1 ] && FLAG+=( --net )
+if [ -n "$APPDIR" ] && [ "$(cfg_get casefold 1)" = 1 ] && [ -f "$CASEFOLD" ]; then
+    RO+=( --ro "$CASEFOLD" /nwjs-casefold.js )
+fi
 if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] || [ "$WL" = 0 ]; }; then
     # gamescope_args is hand-edited only; empty means gamescope's own defaults.
     GA="$(cfg_get gamescope_args "")"

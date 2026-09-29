@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh [--restrict-audio] [--uninstall]
 #   Install sandbox-game and sandbox-attach into ~/.local/bin, their helpers
-#   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib) into
+#   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib, nwjs-casefold.js) into
 #   ~/.local/lib/sandbox-game, and the Nautilus scripts, for the current user.
 #   No root needed; nothing outside ~/.local is touched.
 #
@@ -41,6 +41,7 @@ each() {
     "$@" 755 sandbox-seccomp          "$HELPERS"
     "$@" 755 sandbox-landlock         "$HELPERS"
     "$@" 644 sandbox-game-lib         "$HELPERS"
+    "$@" 644 nwjs-casefold.js         "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
     "$@" 755 "Stop sandboxed game"      "$SCRIPTS"

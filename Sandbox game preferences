@@ -20,6 +20,7 @@
 #   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
 #   host_x11=0|1                        # explicit host X server access
 #   net=0|1                             # internet access, never the LAN
+#   casefold=0|1                        # RPG Maker MV/MZ: file names ignore case
 #   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
 #   env=K=V K=V ...                      e.g. WAYLANDDRV_PRIMARY_MONITOR=HDMI-1
 # Resolution and fullscreen get a second dialog when gamescope will run; the rest
@@ -76,7 +77,7 @@ native_res() {
 
 WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
 PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
-NET_NOW="$(cfg_get net 0)"
+NET_NOW="$(cfg_get net 0)"; CF_NOW="$(cfg_get casefold 1)"
 
 M_OFF="Off"; M_ON="On"
 P_AUTO="Newest installed (auto)"
@@ -120,6 +121,12 @@ N_OFF="Off"; N_ON="Internet only (no LAN, nothing on this PC)"
 [ "$NET_NOW" = 1 ] && N_CUR="$N_ON" || N_CUR="$N_OFF"
 mapfile -t N_ALL < <(first "$N_CUR" "$N_OFF" "$N_ON")
 
+# Windows ignores case in file names, and RPG Maker games made there count on
+# it; the launcher corrects for that unless told not to. NW.js games only.
+C_ON="Ignore case, like Windows"; C_OFF="Match exactly"
+[ "$CF_NOW" = 0 ] && C_CUR="$C_OFF" || C_CUR="$C_ON"
+mapfile -t C_ALL < <(first "$C_CUR" "$C_ON" "$C_OFF")
+
 S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
 SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
 
@@ -131,6 +138,10 @@ case "$R_ENGINE" in proton|"") ASK_PROTON=1 ;; esac
 if [ "$ASK_PROTON" = 1 ]; then
     FORM+=( --add-combo="Proton version" --combo-values="$(join_pipe "${P_ALL[@]}")" )
     FIELDS+=( proton )
+fi
+if [ -n "$R_APPDIR" ]; then
+    FORM+=( --add-combo="File names" --combo-values="$(join_pipe "${C_ALL[@]}")" )
+    FIELDS+=( casefold )
 fi
 FORM+=( --add-combo="Network"  --combo-values="$(join_pipe "${N_ALL[@]}")"
         --add-combo="Save for" --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" )
@@ -148,7 +159,7 @@ fld() {                                        # $1 = field name
     done
 }
 F_DISPLAY="$(fld display)"; F_MHUD="$(fld mhud)"; F_PROTON="$(fld proton)"
-F_NET="$(fld net)"; F_SCOPE="$(fld scope)"
+F_NET="$(fld net)"; F_CF="$(fld casefold)"; F_SCOPE="$(fld scope)"
 
 # An untouched combo can come back empty on some zenity builds; keep the
 # current value rather than silently resetting it to the built-in default.
@@ -156,6 +167,7 @@ F_NET="$(fld net)"; F_SCOPE="$(fld scope)"
 [ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
 [ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
 [ -n "${F_NET:-}"    ] || F_NET="$N_CUR"
+[ -n "$R_APPDIR" ] && [ -z "${F_CF:-}" ] && F_CF="$C_CUR"
 [ -n "${F_SCOPE:-}"  ] || F_SCOPE="$S_GAME"
 
 # ---- save ------------------------------------------------------------------
@@ -270,6 +282,10 @@ if [ "$ASK_PROTON" = 0 ]; then P="$(kept proton auto)"
 elif [ "$F_PROTON" = "$P_AUTO" ]; then P=auto
 else P="$F_PROTON"; fi
 
+if [ -z "$R_APPDIR" ]; then CF="$(kept casefold 1)"
+elif [ "$F_CF" = "$C_OFF" ]; then CF=0
+else CF=1; fi
+
 ENV_KEEP="$(kept env "")"        # no dialog field; carried through untouched
 
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
@@ -279,6 +295,7 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
     echo "mangohud=$M"
     echo "gamescope=$G"
     echo "net=$NET"
+    echo "casefold=$CF"
     if [ "$TARGET" = "$CFGDIR/defaults" ]; then
         [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
     elif [ "$GA_OWN" = 1 ] || ! ga_same "$GA_OUT" "$GA_INHERITED"; then
@@ -293,5 +310,5 @@ NOTE=""
     && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
 
 zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}\nNetwork: $F_NET\n\n<tt>$TARGET</tt>$NOTE" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}\nNetwork: $F_NET${F_CF:+\nFile names: $F_CF}\n\n<tt>$TARGET</tt>$NOTE" \
     2>/dev/null

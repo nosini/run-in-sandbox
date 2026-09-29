@@ -72,7 +72,7 @@ What goes where:
 | File | Installed to |
 |---|---|
 | `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
-| `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` (mode 644) | `~/.local/lib/sandbox-game/` |
+| `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` and `nwjs-casefold.js` (mode 644) | `~/.local/lib/sandbox-game/` |
 | `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
 | `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
@@ -81,6 +81,7 @@ The helpers are nothing to run by hand, so they stay off `PATH`, in the place
 for a program's private files. `sandbox-game-lib` holds the parts the launcher,
 the preferences dialog and `sandbox-game` must agree on; it is kept out of the
 scripts directory, where Nautilus would list it as a menu entry of its own.
+`nwjs-casefold.js` goes into RPG Maker MV/MZ games (see below).
 Each of them is looked for beside the script using it first, so a checkout
 runs as it is, then there, then on `PATH`. An earlier install kept them in
 `~/.local/bin/`; `install.sh` clears those copies out.
@@ -167,6 +168,21 @@ as does `npm install -g nw`, which lands one at
 RPG Maker ships `package.json` with an empty `"name"`, which NW.js refuses to
 start with. The launcher fills it in with the game's folder name; the edited
 copy is a captured write in `rw/`, and a name that is already set is left alone.
+
+RPG Maker games are made on Windows, where file names ignore case, and plenty
+ask for `img/pictures/B.png` when the file is `b.png`. Wine lets that pass;
+NW.js on Linux does not, and the game shows an invisible character or stops on
+"Failed to load". So the launcher binds `nwjs-casefold.js` into the sandbox
+read-only and names it in `package.json` as `"inject_js_start"`, which has
+NW.js run it before any of the game's own scripts. It looks up each file the
+game asks for through an image, a sound, a video, a font, XHR or `fetch`, and
+when the path names nothing but does once case is ignored, sends the request
+to the file that is there. Paths that exist as written are passed on
+untouched. **File names** in the preferences turns it off per game
+(`casefold=0`), and the entry comes out of `package.json` again. A game that
+injects a script of its own keeps it, and goes without the correction; the log
+says so. Plugins that read files through Node's `fs` themselves are not
+covered.
 
 NW.js is Chromium, and tells the sound server it is "Chromium" like every
 Chromium browser, so an audio router (pulsemeeter, qpwgraph rules) would send
@@ -270,7 +286,7 @@ what the game can do is offered — a Windows game does not get Wayland in
 gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version is asked for Windows games
-only. Choosing gamescope opens a second dialog for resolution and
+only, and whether file names ignore case for RPG Maker MV/MZ only. Choosing gamescope opens a second dialog for resolution and
 fullscreen. This is why there is one launcher entry rather than one per flag
 combination.
 
@@ -720,6 +736,7 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 wayland=0|1
 mangohud=0|1
 net=0|1
+casefold=0|1
 gamescope=0|1
 host_x11=0|1
 gamescope_args=-f -W 2560 -H 1440
