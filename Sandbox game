@@ -171,8 +171,8 @@ if changed:
 EOF
     # Inside the sandbox: fix up package.json, rebuild the runtime dir with nw
     # renamed to the game, then exec it against the app. $1=name $2=app-path
-    # $3=the fix above $4=ozone platform, appended below once the display
-    # preferences are known.
+    # $3=the fix above $4=ozone platform, then any further NW.js options,
+    # appended below once the display preferences are known.
     # Chromium tells the sound server it is "Chromium", like every Chromium
     # browser, so a router such as pulsemeeter sends the game wherever the
     # browsers go. PULSE_PROP_OVERRIDE renames the client to the game; plain
@@ -190,7 +190,8 @@ EOF
         d=/tmp/nwrun; mkdir -p "$d"
         cp /nwjs/nw "$d/$1"
         for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
-        exec "$d/$1" "$2" --ozone-platform="$4" --no-sandbox
+        name=$1 app=$2 ozone=$4; shift 4
+        exec "$d/$name" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
     ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
 else
     # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
@@ -258,8 +259,19 @@ fi
 # There is no session bus in the sandbox. A Wayland crash for want of one was
 # seen once (2026-08, game unrecorded) but not with 0.110 or 0.116 since; if a
 # game does crash on Wayland, switching it back to Xwayland is the way out.
+# webgl=vulkan puts WebGL on ANGLE's Vulkan backend. Left to itself,
+# Chromium runs it on OpenGL ES under Wayland (desktop OpenGL under X11), and
+# on an RX 9070 with Mesa that drew an RPG Maker lighting plugin's darkness
+# solid black beyond a circle round the player; likely the driver computing
+# the shader's mediump in 16 bits, which only GLES honours. Vulkan draws it
+# right, on the GPU. A preference, not a default: whether it helps or harms
+# depends on the GPU and driver.
 if [ -n "$APPDIR" ]; then
     if [ "$WL" = 1 ]; then CMD+=( wayland ); else CMD+=( x11 ); fi
+    if [ "$(cfg_get webgl auto)" = vulkan ]; then
+        CMD+=( --use-angle=vulkan
+               "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" )
+    fi
 fi
 # env=K=V K=V ... -- a game launched from the file manager inherits its
 # environment, not a shell's, so anything the game needs has to be recorded.

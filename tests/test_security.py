@@ -548,10 +548,11 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("/game/bin/game.exe", launched)
         self.assertNotIn("/game/unins000.exe", launched)
 
-    def test_nwjs_file_name_case_follows_the_preference(self):
+    def test_nwjs_file_name_case_and_webgl_follow_the_preferences(self):
         # An RPG Maker MV game: nwjs-casefold.js is bound in read-only and
         # package.json names it, until the preferences say casefold=0 -- then
-        # it is neither bound nor left in package.json.
+        # it is neither bound nor left in package.json. WebGL goes on ANGLE's
+        # Vulkan backend only when webgl=vulkan asks for it.
         (self.game / "www").mkdir()
         (self.game / "www" / "index.html").write_text("")
         (self.game / "package.json").write_text('{"name": "", "main": "www/index.html"}')
@@ -594,6 +595,10 @@ class SecurityTests(unittest.TestCase):
         args = launch()
         mount = ["--ro", str(helpers / "nwjs-casefold.js"), "/nwjs-casefold.js"]
         self.assertIn(mount, [args[i:i + 3] for i in range(len(args))])
+        self.assertEqual(args[-1], "x11")                     # nothing added
+        (self.home / ".config" / "sandbox-game").mkdir(parents=True)
+        (self.home / ".config" / "sandbox-game" / "defaults").write_text("wayland=1\n")
+        self.assertEqual(launch()[-1], "wayland")             # not on Wayland either
         on = fix_package(args, "1")
         self.assertEqual((on["name"], on["inject_js_start"]), ("game", "/nwjs-casefold.js"))
         # Turned off after a launch that had it on: the entry comes out again.
@@ -601,9 +606,11 @@ class SecurityTests(unittest.TestCase):
         name = self.cli("--print-name", self.game).stdout.strip()
         config = self.home / ".config" / "sandbox-game" / "games"
         config.mkdir(parents=True)
-        (config / name).write_text("casefold=0\n")
+        (config / name).write_text("casefold=0\nwayland=1\nwebgl=vulkan\n")
         args = launch()
         self.assertNotIn("/nwjs-casefold.js", args)
+        self.assertEqual(args[-3:], ["wayland", "--use-angle=vulkan",
+                                     "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"])
         self.assertNotIn("inject_js_start", fix_package(args, ""))
         # A script the game injects itself is never replaced or removed.
         (self.game / "package.json").write_text('{"name": "x", "inject_js_start": "own.js"}')
@@ -1092,20 +1099,23 @@ print(json.dumps({{
         self.assertEqual(sorted(combos["Display"]), sorted(all_four))
         self.assertNotIn("Proton version", combos)
         self.assertNotIn("File names", combos)                # not an NW.js game
+        self.assertNotIn("WebGL", combos)
 
-    def test_nwjs_games_can_turn_off_file_name_case_correction(self):
+    def test_nwjs_games_choose_file_name_case_and_webgl(self):
         rpgm = self.base / "games" / "Rpgm"
         (rpgm / "www").mkdir(parents=True)
         (rpgm / "www" / "index.html").write_text("")
-        combos, _ = self.preferences([], rpgm)
-        self.assertEqual(combos["File names"][0], "Ignore case, like Windows")  # the default
-        _, saved = self.preferences(["Native Wayland", "", "Match exactly", "Off",
+        combos, _ = self.preferences([], rpgm)                  # the defaults
+        self.assertEqual(combos["File names"][0], "Ignore case, like Windows")
+        self.assertEqual(combos["WebGL"][0], "Chromium's default")
+        _, saved = self.preferences(["Native Wayland", "", "Match exactly", "Vulkan", "Off",
                                      "This game only"], rpgm)
-        self.assertEqual(saved["casefold"], "0")
-        combos, saved = self.preferences(["Native Wayland", "", "", "Off",
+        self.assertEqual((saved["casefold"], saved["webgl"]), ("0", "vulkan"))
+        combos, saved = self.preferences(["Native Wayland", "", "", "", "Off",
                                           "This game only"], rpgm)
-        self.assertEqual(combos["File names"][0], "Match exactly")
-        self.assertEqual(saved["casefold"], "0")                # untouched: kept
+        self.assertEqual((combos["File names"][0], combos["WebGL"][0]),
+                         ("Match exactly", "Vulkan"))
+        self.assertEqual((saved["casefold"], saved["webgl"]), ("0", "vulkan"))  # kept
 
     def recorded_args(self, *options):
         """Record the final bwrap invocation; no display/audio service is used."""

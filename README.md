@@ -190,6 +190,17 @@ the game wherever the browsers go. The launcher renames its sound client to
 the game's folder name (non-alphanumerics as `_`), the name its process runs
 under too.
 
+**WebGL** in the preferences (`webgl=vulkan`) starts NW.js with WebGL on
+ANGLE's Vulkan backend
+(`--use-angle=vulkan --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE`).
+Left to itself, Chromium runs WebGL on OpenGL ES under Wayland, not the
+desktop OpenGL it uses on X11. With Mesa on an RX 9070, that drew an RPG Maker
+lighting plugin's darkness solid black beyond a circle around the player, most
+likely because the driver computes the shader's `mediump` in 16 bits, which
+only OpenGL ES honours. Under Vulkan, as under X11, it draws correctly on the
+GPU. Whether it helps depends on the GPU and driver, so it is off unless
+chosen; it applies whichever display the game uses.
+
 #### Windows games — Proton
 
 Any Proton install, meaning any directory holding an executable `proton`
@@ -286,7 +297,8 @@ what the game can do is offered — a Windows game does not get Wayland in
 gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version is asked for Windows games
-only, and whether file names ignore case for RPG Maker MV/MZ only. Choosing gamescope opens a second dialog for resolution and
+only; whether file names ignore case, and what WebGL runs on, for RPG Maker
+MV/MZ only. Choosing gamescope opens a second dialog for resolution and
 fullscreen. This is why there is one launcher entry rather than one per flag
 combination.
 
@@ -737,6 +749,7 @@ wayland=0|1
 mangohud=0|1
 net=0|1
 casefold=0|1
+webgl=auto|vulkan
 gamescope=0|1
 host_x11=0|1
 gamescope_args=-f -W 2560 -H 1440
