@@ -188,7 +188,8 @@ NW.js is Chromium, and tells the sound server it is "Chromium" like every
 Chromium browser, so an audio router (pulsemeeter, qpwgraph rules) would send
 the game wherever the browsers go. The launcher renames its sound client to
 the game's folder name (non-alphanumerics as `_`), the name its process runs
-under too.
+under too. For WirePlumber to remember the game's device apart from the
+browsers', it also takes `--restrict-audio`: see [Sound](#sound).
 
 **WebGL** in the preferences (`webgl=vulkan`) starts NW.js with WebGL on
 ANGLE's Vulkan backend
@@ -614,6 +615,15 @@ playback streams stay visible by name, though not recordable. Nothing else is
 affected: the rules match the `sandbox-game` class alone, and what WirePlumber
 allows any other client — the stock `restricted` class included — is left as
 it was.
+
+The server also leaves the title (`media.name`) off every game stream.
+WirePlumber remembers which device each stream was moved to by the stream's
+title where it has no application name — and the nodes pipewire-pulse makes
+have none by the time it looks. NW.js titles its stream "Playback", as every
+Chromium browser does, so moving the game moved the browsers with it. Without a
+title, WirePlumber keys the game by its node name: for NW.js the game's folder
+name, so each game remembers its own device. Mixers show such a stream by its
+application name alone.
 
 What goes where: `~/.config/pipewire/sandbox-pulse.conf`,
 `~/.config/systemd/user/sandbox-pulse.service`,
