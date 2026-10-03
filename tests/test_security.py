@@ -777,7 +777,7 @@ class SecurityTests(unittest.TestCase):
         self.addCleanup(listener.close)
         port = listener.getsockname()[1]
         try:
-            socket.create_connection(("codeberg.org", 443), timeout=5).close()
+            socket.create_connection(("example.com", 443), timeout=5).close()
             online = True
         except OSError:
             online = False
@@ -792,7 +792,7 @@ def tcp(host, port):
 def https():
     import urllib.request
     try:
-        return urllib.request.urlopen("https://codeberg.org", timeout=10).status
+        return urllib.request.urlopen("https://example.com", timeout=10).status
     except OSError as e:
         return str(e)
 def refused(make):
@@ -810,7 +810,7 @@ print(json.dumps({{
     "resolv": open("/etc/resolv.conf").read(),
     "own": tcp({own[0]!r}, {port}),
     "gateway": tcp({gateway!r}, {port}),
-    "internet": tcp("codeberg.org", 443) if {online} else "skipped",
+    "internet": tcp("example.com", 443) if {online} else "skipped",
     "https": https() if {online} else "skipped",
     "unlock": subprocess.run([ip, "rule", "del", "priority", "100"],
                              capture_output=True).returncode,

@@ -40,7 +40,7 @@ via mkxp-z — no Wine), and Windows `.exe` games via Proton.
 ## Install
 
 ```sh
-curl -fsSL https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nosini/run-in-sandbox/main/install.sh | bash
 ```
 
 That downloads the current `main` and installs it for your user; no root, and
@@ -52,7 +52,7 @@ Piping a script from the internet into a shell runs whatever the server sends.
 To read it first:
 
 ```sh
-curl -fsSLO https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/nosini/run-in-sandbox/main/install.sh
 less install.sh && bash install.sh
 ```
 

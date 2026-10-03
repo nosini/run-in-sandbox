@@ -12,7 +12,7 @@
 #   and ~/.config/systemd/user, and a WirePlumber restart -- so it is asked for.
 #
 #   Run from a checkout, it installs that checkout. Run on its own -- as in
-#     curl -fsSL https://codeberg.org/nosini/run-in-sandbox/raw/branch/main/install.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/nosini/run-in-sandbox/main/install.sh | bash
 #   -- it downloads the branch named by $REF (default main) first.
 #
 #   Running it again updates in place. --uninstall removes the installed
@@ -21,7 +21,7 @@
 #   shared tools folder.
 set -euo pipefail
 
-REPO="https://codeberg.org/nosini/run-in-sandbox"
+REPO="https://github.com/nosini/run-in-sandbox"
 REF="${REF:-main}"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 BIN="$HOME/.local/bin"
