@@ -354,6 +354,48 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--reset-install NAME` | discard what the game changed in its install folder; see [Managing sandboxes](#managing-sandboxes) |
 | `--delete NAME` | delete a sandbox, saves and all |
 
+### Keeping games from starting outside the sandbox
+
+Nautilus puts **Run as Program** right above **Scripts** in the right-click
+menu, so one misclick on a game's `.sh` or binary starts it with no sandbox
+at all. Mounting the folder you unpack games into with `noexec` takes that
+away. Nothing in it can be started directly any more: not binaries, not
+`#!` scripts such as Ren'Py's `.sh` and the Python it bundles, not a binary
+handed to the dynamic loader, not shared libraries. Nautilus sees the files
+as not executable. Sandboxed games are unaffected, because the sandbox shows
+the game at `/game` through an overlay of its own, a new mount without
+`noexec`.
+
+A bind mount of the folder onto itself does it, with no repartitioning:
+
+```sh
+echo '/path/to/Games /path/to/Games none bind,nosuid,nodev,noexec,nofail 0 0' | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload
+sudo mount /path/to/Games
+findmnt -o TARGET,OPTIONS /path/to/Games
+```
+
+`findmnt` should list `noexec`. systemd mounts the bind after whatever drive
+the folder is on. `nofail` keeps a boot going when that drive is missing,
+which would otherwise drop into emergency mode. `nosuid,nodev` are there
+because some versions of `mount` clear the drive's own flags when they apply
+`noexec` to the bind.
+
+This guards against misclicks; it is not a boundary:
+
+- Interpreters handed a file still run it: `sh game.sh`, `python3 game.py`,
+  or a Wine on the host that `.exe` files are associated with.
+- Keep mkxp-z, Proton and Steam libraries out of that folder. mkxp-z is bound
+  into the sandbox as it is, not through the overlay, so it stays `noexec`
+  in there and RPG Maker XP/VX/VX Ace games stop starting.
+- It relies on bwrap's own `--overlay`. Where bwrap lacks it and the
+  launcher falls back to fuse-overlayfs, start one game to check that it
+  still runs.
+
+To run something from the folder outside the sandbox on purpose,
+`sudo umount /path/to/Games` lifts the bind until `sudo mount /path/to/Games`
+puts it back.
+
 ## Attaching to a running game
 
 Cheat Engine, `regedit` and `winetricks` are only useful if they can see the
