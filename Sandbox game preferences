@@ -20,6 +20,7 @@
 #   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
 #   host_x11=0|1                        # explicit host X server access
 #   net=0|1                             # internet access, never the LAN
+#   mod_loaders=0|1                     # Proton: load BepInEx and the like
 #   casefold=0|1                        # RPG Maker MV/MZ: file names ignore case
 #   webgl=auto|vulkan                   # RPG Maker MV/MZ: what WebGL runs on
 #   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
@@ -79,7 +80,7 @@ native_res() {
 WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
 PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
 NET_NOW="$(cfg_get net 0)"; CF_NOW="$(cfg_get casefold 1)"
-WEBGL_NOW="$(cfg_get webgl auto)"
+WEBGL_NOW="$(cfg_get webgl auto)"; MODS_NOW="$(cfg_get mod_loaders 0)"
 
 M_OFF="Off"; M_ON="On"
 P_AUTO="Newest installed (auto)"
@@ -135,6 +136,13 @@ G_AUTO="Chromium's default"; G_VK="Vulkan"
 [ "$WEBGL_NOW" = vulkan ] && G_CUR="$G_VK" || G_CUR="$G_AUTO"
 mapfile -t G_ALL < <(first "$G_CUR" "$G_AUTO" "$G_VK")
 
+# Mod loaders (BepInEx, MelonLoader, ...) hide in a winhttp.dll or the like
+# beside the .exe, which Wine passes over for its own unless told. Windows
+# games only.
+L_OFF="Off"; L_ON="Load them (BepInEx, MelonLoader, UE4SS, ASI loaders)"
+[ "$MODS_NOW" = 1 ] && L_CUR="$L_ON" || L_CUR="$L_OFF"
+mapfile -t L_ALL < <(first "$L_CUR" "$L_OFF" "$L_ON")
+
 S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
 SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
 
@@ -144,8 +152,9 @@ FIELDS=( display mhud )
 ASK_PROTON=0
 case "$R_ENGINE" in proton|"") ASK_PROTON=1 ;; esac
 if [ "$ASK_PROTON" = 1 ]; then
-    FORM+=( --add-combo="Proton version" --combo-values="$(join_pipe "${P_ALL[@]}")" )
-    FIELDS+=( proton )
+    FORM+=( --add-combo="Proton version" --combo-values="$(join_pipe "${P_ALL[@]}")"
+            --add-combo="Mod loaders"    --combo-values="$(join_pipe "${L_ALL[@]}")" )
+    FIELDS+=( proton mods )
 fi
 if [ -n "$R_APPDIR" ]; then
     FORM+=( --add-combo="File names" --combo-values="$(join_pipe "${C_ALL[@]}")"
@@ -169,6 +178,7 @@ fld() {                                        # $1 = field name
 }
 F_DISPLAY="$(fld display)"; F_MHUD="$(fld mhud)"; F_PROTON="$(fld proton)"
 F_NET="$(fld net)"; F_CF="$(fld casefold)"; F_WEBGL="$(fld webgl)"
+F_MODS="$(fld mods)"
 F_SCOPE="$(fld scope)"
 
 # An untouched combo can come back empty on some zenity builds; keep the
@@ -176,6 +186,7 @@ F_SCOPE="$(fld scope)"
 [ -n "${F_DISPLAY:-}" ] || F_DISPLAY="$D_CUR"
 [ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
 [ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
+[ "$ASK_PROTON" = 1 ] && [ -z "${F_MODS:-}" ] && F_MODS="$L_CUR"
 [ -n "${F_NET:-}"    ] || F_NET="$N_CUR"
 [ -n "$R_APPDIR" ] && [ -z "${F_CF:-}" ] && F_CF="$C_CUR"
 [ -n "$R_APPDIR" ] && [ -z "${F_WEBGL:-}" ] && F_WEBGL="$G_CUR"
@@ -293,6 +304,10 @@ if [ "$ASK_PROTON" = 0 ]; then P="$(kept proton auto)"
 elif [ "$F_PROTON" = "$P_AUTO" ]; then P=auto
 else P="$F_PROTON"; fi
 
+if [ "$ASK_PROTON" = 0 ]; then MODS="$(kept mod_loaders 0)"
+elif [ "$F_MODS" = "$L_ON" ]; then MODS=1
+else MODS=0; fi
+
 if [ -z "$R_APPDIR" ]; then CF="$(kept casefold 1)"
 elif [ "$F_CF" = "$C_OFF" ]; then CF=0
 else CF=1; fi
@@ -309,6 +324,7 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
     echo "mangohud=$M"
     echo "gamescope=$G"
     echo "net=$NET"
+    echo "mod_loaders=$MODS"
     echo "casefold=$CF"
     echo "webgl=$WEBGL"
     if [ "$TARGET" = "$CFGDIR/defaults" ]; then
@@ -325,5 +341,5 @@ NOTE=""
     && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
 
 zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}\nNetwork: $F_NET${F_CF:+\nFile names: $F_CF}${F_WEBGL:+\nWebGL: $F_WEBGL}\n\n<tt>$TARGET</tt>$NOTE" \
+    --text="Saved for <b>$SCOPE_TXT</b>:\n\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}${F_MODS:+\nMod loaders: $F_MODS}\nNetwork: $F_NET${F_CF:+\nFile names: $F_CF}${F_WEBGL:+\nWebGL: $F_WEBGL}\n\n<tt>$TARGET</tt>$NOTE" \
     2>/dev/null

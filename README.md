@@ -228,6 +228,38 @@ benefit of CPU-bound games. It is a young driver, one more within a game's
 reach, so no other engine gets it. `sandbox-game --check` says whether it is
 there and yours to open.
 
+##### Mods: BepInEx, MelonLoader and other DLL loaders
+
+Mod loaders for Windows games hook in through a DLL named after a Windows one,
+placed beside the `.exe`: BepInEx uses `winhttp.dll`, MelonLoader
+`version.dll`, UE4SS `dwmapi.dll`, ASI loaders `dinput8.dll` and others.
+Windows loads the copy in the game's folder first. Wine uses its own built-in
+copy unless told otherwise, so without that the mod loader never runs.
+
+Turn on **Mod loaders** in the preferences (`mod_loaders=1`, or
+`--mod-loaders` from the shell). Wine then takes the game's own `winhttp`,
+`version`, `winmm`, `dinput8`, `dsound` and `dwmapi` over its built-in ones,
+and still uses its own where the game has none. Games ship Microsoft's own
+copies of DLLs such as `xinput1_3.dll` and `d3dx9_*.dll`, and Wine's versions
+of those work better, so they stay off the list. For any other DLL, add an
+`env=WINEDLLOVERRIDES=name=n,b` line to the game's preferences file. Wine goes
+by the last entry for a DLL, and `env=` comes after this setting, so it wins.
+
+Install the mod loader into the game's folder as its instructions say. Some
+things to know:
+
+- Whatever the game or the mod loader writes in its folder lands in the
+  sandbox's `rw/` (see [What lands where](#what-lands-where)). Once a file
+  such as a BepInEx config has been written there, that copy hides the one in
+  the game's own folder, so edit it under `rw/`, or put new plugins there.
+  `--reset-install` throws these changes away, configs included.
+- BepInEx 6 for IL2CPP games downloads Unity's base libraries on its first
+  start, and then takes a while generating its own files. Give that one
+  start internet access, or download the zip yourself and put it in
+  `BepInEx/unity-libs/`. BepInEx 5, for Mono games, downloads nothing.
+- If nothing loads, look for `BepInEx/LogOutput.log` under `rw/`. If it is
+  missing, the mod loader's DLL never ran.
+
 #### RPG Maker XP/VX/VX Ace — mkxp-z
 
 [mkxp-z](https://github.com/mkxp-z/mkxp-z) reimplements the RGSS runtimes, so
@@ -292,15 +324,15 @@ the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
 
-**Sandbox game preferences** — the display, MangoHud, the Proton version and
-internet access, saved per game or as the library-wide default. The display is
+**Sandbox game preferences** — the display, MangoHud, the Proton version, mod
+loaders and internet access, saved per game or as the library-wide default. The display is
 one choice, each entry saying what happens: native Wayland; native Wayland in
 gamescope; X11 in gamescope (private Xwayland); or the host X server. Only
 what the game can do is offered — a Windows game does not get Wayland in
 gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
-opens as what it gets instead. The Proton version is asked for Windows games
-only; whether file names ignore case, and what WebGL runs on, for RPG Maker
+opens as what it gets instead. The Proton version and mod loaders are asked for
+Windows games only; whether file names ignore case, and what WebGL runs on, for RPG Maker
 MV/MZ only. Choosing gamescope opens a second dialog for resolution and
 fullscreen. This is why there is one launcher entry rather than one per flag
 combination.
@@ -314,7 +346,7 @@ fullscreen or one that will not quit, without a terminal.
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
-             [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
+             [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
 ```
@@ -344,6 +376,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
 | `--gamescope[=ARGS]` | run inside gamescope's nested compositor (default for X11 games); `ARGS` is word-split, so quote the lot |
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
+| `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
 | `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
 | `--ro SRC DST` | bind something else in read-only |
@@ -802,6 +835,7 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 wayland=0|1
 mangohud=0|1
 net=0|1
+mod_loaders=0|1
 casefold=0|1
 webgl=auto|vulkan
 gamescope=0|1

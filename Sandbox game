@@ -7,9 +7,10 @@
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
-# Wayland, MangoHud and the Proton version come from saved preferences, so there
-# is one launcher rather than a menu entry per combination. Set them with the
-# "Sandbox game preferences" script; per-game settings win over the defaults:
+# Wayland, MangoHud, the Proton version and mod loaders come from saved
+# preferences, so there is one launcher rather than a menu entry per
+# combination. Set them with the "Sandbox game preferences" script; per-game
+# settings win over the defaults:
 #   ~/.config/sandbox-game/games/<name>
 #   ~/.config/sandbox-game/defaults
 #
@@ -283,6 +284,7 @@ elif [ "$PROTON" = 1 ]; then
     # An exported PROTON_VER still wins, matching NWJS_DIR/MKXP_DIR/PROTON_DIR.
     PV="${PROTON_VER:-$(cfg_get proton auto)}"
     if [ "$PV" = auto ]; then FLAG+=( --proton ); else FLAG+=( "--proton=$PV" ); fi
+    [ "$(cfg_get mod_loaders 0)" = 1 ] && FLAG+=( --mod-loaders )
 fi
 
 mkdir -p "$HOME/game-sandboxes"

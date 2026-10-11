@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-#              [--proton[=VER]|--mkxp[=DIR]] GAMEDIR CMD...
+#              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
@@ -53,6 +53,9 @@
 #               overrides the search entirely. The prefix is built fresh under
 #               compat/, so your real Steam prefixes are never touched, and the
 #               Proton install itself is mounted read-only.
+#   --mod-loaders  with --proton: Wine takes the game's own winhttp.dll,
+#               version.dll and the like over its built-in ones, as Windows
+#               does, so BepInEx, MelonLoader, UE4SS and ASI loaders load.
 #   --mkxp      run an RPG Maker XP/VX/VX Ace game natively under mkxp-z, no
 #               Wine involved. CMD is optional and normally omitted: the
 #               runtime is the program. =DIR names the mkxp-z install, else
@@ -458,6 +461,8 @@ Display (default: gamescope's private Xwayland)
 Runtimes
   --proton[=VER]        CMD is a Windows .exe, run with Proton: the newest
                         found, or VER by name or path ($PROTON_DIR wins)
+  --mod-loaders         with --proton: load mod loaders the game ships
+                        (BepInEx, MelonLoader, UE4SS, ASI loaders)
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
 
 Access
@@ -505,7 +510,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -531,6 +536,7 @@ while [ "$#" -gt 0 ]; do
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
         --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
+        --mod-loaders) MODS=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
@@ -543,6 +549,8 @@ while [ "$#" -gt 0 ]; do
 done
 [ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
+[ "$MODS" = 0 ] || [ -n "$PROTON_SPEC" ] || {
+    echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
 GAMEDIR="$(realpath "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
@@ -651,6 +659,25 @@ if [ -n "$PROTON_SPEC" ]; then
         --setenv STEAM_COMPAT_CLIENT_INSTALL_PATH /steamclient
         --setenv STEAM_COMPAT_INSTALL_PATH       /game
     )
+    # Mod loaders get into a game through a DLL named after a system one,
+    # dropped beside the .exe: BepInEx's winhttp.dll, MelonLoader's
+    # version.dll, UE4SS's dwmapi.dll, an ASI loader's dinput8.dll. Windows
+    # looks in the program's folder first; Wine keeps to its built-in copy, so
+    # the loader never runs. n,b takes the game's copy where it has one and
+    # Wine's where not. Only names Microsoft does not let games redistribute:
+    # a game's own xinput1_3.dll or d3dx9_*.dll is Microsoft's, and preferring
+    # it would push aside what Wine does in its place. Wine gives the last
+    # entry for a DLL the say, so an --env WINEDLLOVERRIDES keeps it: these go
+    # in front of it.
+    if [ "$MODS" = 1 ]; then
+        MOD_DLLS="winhttp,version,winmm,dinput8,dsound,dwmapi=n,b"
+        PROTON_ARGS+=( --setenv WINEDLLOVERRIDES "$MOD_DLLS" )
+        for ((i = 0; i < ${#ENV_ARGS[@]}; i += 3)); do
+            if [ "${ENV_ARGS[i + 1]}" = WINEDLLOVERRIDES ]; then
+                ENV_ARGS[i + 2]="$MOD_DLLS;${ENV_ARGS[i + 2]}"
+            fi
+        done
+    fi
     # Games routinely load assets relative to the cwd, so land in the exe's dir.
     case "$1" in /*) CHDIR="$(dirname "$1")" ;; esac
     set -- /proton/proton run "$@"

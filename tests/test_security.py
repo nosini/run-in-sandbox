@@ -532,13 +532,13 @@ class SecurityTests(unittest.TestCase):
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join([
             "Host X11 (other X apps can watch and control it)", "Off",
-            "Newest installed (auto)", "Off", "This game only"])
+            "Newest installed (auto)", "Off", "Off", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
                                 env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         name = self.cli("--print-name", self.game).stdout.strip()
         settings = (self.home / ".config" / "sandbox-game" / "games" / name).read_text()
-        for entry in ("host_x11=1", "wayland=0", "gamescope=0", "net=0"):
+        for entry in ("host_x11=1", "wayland=0", "gamescope=0", "net=0", "mod_loaders=0"):
             self.assertIn(entry, settings.splitlines())
 
     def test_launcher_looks_past_junk_for_the_game(self):
@@ -567,6 +567,16 @@ class SecurityTests(unittest.TestCase):
         launched = recorded.read_text().splitlines()
         self.assertIn("/game/bin/game.exe", launched)
         self.assertNotIn("/game/unins000.exe", launched)
+        self.assertNotIn("--mod-loaders", launched)
+        # The mod loaders preference reaches a Proton game's command line.
+        name = self.cli("--print-name", self.game).stdout.strip()
+        config = self.home / ".config" / "sandbox-game" / "games"
+        config.mkdir(parents=True)
+        (config / name).write_text("mod_loaders=1\n")
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--mod-loaders", recorded.read_text().splitlines())
 
     def test_nwjs_file_name_case_and_webgl_follow_the_preferences(self):
         # An RPG Maker MV game: nwjs-casefold.js is bound in read-only and
@@ -658,7 +668,7 @@ class SecurityTests(unittest.TestCase):
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
         self.env["TEST_FORM"] = "\t".join(["X11, in gamescope (private Xwayland)", "", "", "",
-                                           "This game only"])
+                                           "", "This game only"])
         name = self.cli("--print-name", self.game).stdout.strip()
         own = config / "games" / name
 
@@ -722,6 +732,27 @@ class SecurityTests(unittest.TestCase):
         # Landlock must let Proton write there too.
         landlock = args[args.index("/run/sandbox-landlock", i):]
         self.assertEqual(landlock[landlock.index("/proton") - 1], "--rw")
+
+    def test_mod_loaders_prefer_the_games_dlls_unless_told_otherwise(self):
+        # BepInEx's winhttp.dll and the like only load when Wine takes the
+        # game's copy over its own. An explicit WINEDLLOVERRIDES comes after,
+        # since Wine gives the last entry for a DLL the say.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        mods = "winhttp,version,winmm,dinput8,dsound,dwmapi=n,b"
+        def overrides(*options):
+            args = self.recorded_args("--proton=" + str(proton), *options)
+            return [args[i + 2] for i, a in enumerate(args)
+                    if a == "--setenv" and args[i + 1] == "WINEDLLOVERRIDES"]
+        self.assertEqual(overrides(), [])
+        self.assertEqual(overrides("--mod-loaders"), [mods])
+        self.assertEqual(overrides("--mod-loaders", "--env", "WINEDLLOVERRIDES=winhttp=b"),
+                         [mods, mods + ";winhttp=b"])
+        result = self.cli("--headless", "--mod-loaders", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs --proton", result.stderr)
 
     def test_ntsync_only_for_proton(self):
         # A young driver: Wine's thread synchronisation needs it, nothing else.
@@ -1090,7 +1121,7 @@ print(json.dumps({{
         # Xwayland itself, and a later switch to Wayland does not find it
         # pinned on.
         def save(display):
-            return self.preferences([display, "Off", "Newest installed (auto)", "Off",
+            return self.preferences([display, "Off", "Newest installed (auto)", "Off", "Off",
                                      "This game only"])[1]
         keys = lambda d: (d["wayland"], d["gamescope"], d["host_x11"])
         self.assertEqual(keys(save("X11, in gamescope (private Xwayland)")), ("0", "0", "0"))
@@ -1117,6 +1148,7 @@ print(json.dumps({{
         self.assertEqual(combos["Display"][0], "X11, in gamescope (private Xwayland)")
         self.assertEqual(sorted(combos["Display"]), sorted(set(all_four) - {all_four[1]}))
         self.assertIn("Proton version", combos)
+        self.assertEqual(combos["Mod loaders"][0], "Off")
         # A Ren'Py build without SDL's Wayland driver: X11 only.
         renpy = self.base / "games" / "Old"
         lib = renpy / "lib" / f"py3-linux-{os.uname().machine}"
@@ -1127,6 +1159,7 @@ print(json.dumps({{
         combos, _ = self.preferences([], renpy)
         self.assertEqual(sorted(combos["Display"]), sorted(all_four[2:]))
         self.assertNotIn("Proton version", combos)            # not a Proton game
+        self.assertNotIn("Mod loaders", combos)
         # A native game that can do Wayland gets all four, and no Proton row.
         native = self.base / "games" / "Native"
         native.mkdir()
