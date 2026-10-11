@@ -216,8 +216,10 @@ and `PROTON_DIR=/path` overrides the search entirely. `sandbox-game
 Steam does not have to be running, or even installed, as long as a Proton
 directory exists somewhere on the list — unpacking a Proton-GE release into
 `~/.steam/root/compatibilitytools.d/` is enough. The prefix is always built
-fresh under the capture directory, so existing Steam prefixes are never touched,
-and the Proton install is mounted read-only.
+fresh under the capture directory, so existing Steam prefixes are never touched.
+The Proton install is never changed either: it is mounted with an overlay whose
+writes are thrown away when the game exits. Valve's Proton builds need that,
+since they lock a file in their own folder on every start.
 
 Proton games also get `/dev/ntsync` where the kernel has it (6.14 and newer):
 Windows' thread synchronisation done in the kernel instead of by wineserver or

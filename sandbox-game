@@ -643,8 +643,8 @@ if [ -n "$PROTON_SPEC" ]; then
     # setup_prefix(), so it has to exist -- but it is only mined for optional
     # legacycompat/steamclient*.dll, which a non-Steam game does not want.
     # An empty dir keeps the real Steam install out of the sandbox.
+    # /proton itself is mounted with the game's overlay below.
     PROTON_ARGS=(
-        --ro-bind "$PROTON" /proton
         --bind "$CAP/compat" /compat
         --bind "$CAP/steam"  /steamclient
         --setenv STEAM_COMPAT_DATA_PATH          /compat
@@ -972,20 +972,7 @@ if [ "$HEADLESS" = 0 ] && command -v gsettings >/dev/null \
 fi
 
 # ---- overlay for the game's own install dir --------------------------------
-# Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
-# back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
-OVERLAY_ARGS=(); CLEANUP=""; PASTA_PID=""; PLAY_START=""
-if bwrap --help 2>&1 | grep -q -- --overlay; then
-    OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
-else
-    command -v fuse-overlayfs >/dev/null || {
-        echo "bwrap lacks --overlay and fuse-overlayfs is not installed" >&2
-        echo "install fuse-overlayfs (openSUSE: zypper in fuse-overlayfs)" >&2; exit 1; }
-    fuse-overlayfs -o \
-        "lowerdir=$GAMEDIR,upperdir=$CAP/rw,workdir=$CAP/work" "$CAP/merged"
-    CLEANUP="$CAP/merged"
-    OVERLAY_ARGS=( --bind "$CAP/merged" /game )
-fi
+OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
 # Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
 # when the mount goes away. That is deliberate while mounted -- it holds
 # in-flight temporary files and nothing should look inside -- but afterwards it
@@ -997,10 +984,20 @@ unwork() {
     chmod u+rwx "$CAP/work/work" 2>/dev/null || return 0
     rm -rf "$CAP/work/work" 2>/dev/null || true
 }
+# fuse-overlayfs's throwaway layer for Proton, never while still mounted.
+rm_proton_layer() {
+    [ -n "$PROTON_LAYER" ] && [ -d "$PROTON_LAYER" ] || return 0
+    ! mountpoint -q "$PROTON_LAYER/merged" || return 0
+    chmod -R u+rwx "$PROTON_LAYER" 2>/dev/null || true
+    rm -rf "$PROTON_LAYER" 2>/dev/null || true
+}
 cleanup() {
-    [ -n "$CLEANUP" ] && { fusermount3 -u "$CLEANUP" 2>/dev/null \
-              || fusermount -u "$CLEANUP" 2>/dev/null || true; }
+    local m
+    for m in "${CLEANUP[@]}"; do
+        fusermount3 -u "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
+    done
     unwork
+    rm_proton_layer
     # --net: pasta outlives the game unless told otherwise; see "network".
     if [ -n "$PASTA_PID" ]; then
         local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"
@@ -1018,6 +1015,33 @@ cleanup() {
     return 0
 }
 trap cleanup EXIT
+
+# Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
+# back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
+# Proton gets one too, whose writes are thrown away: Valve's builds lock
+# dist.lock in their own folder on every start, and write their first-run
+# "steampipe fixups" there when Steam has not run them yet.
+if bwrap --help 2>&1 | grep -q -- --overlay; then
+    OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
+    [ -z "$PROTON" ] || OVERLAY_ARGS+=( --overlay-src "$PROTON" --tmp-overlay /proton )
+else
+    command -v fuse-overlayfs >/dev/null || {
+        echo "bwrap lacks --overlay and fuse-overlayfs is not installed" >&2
+        echo "install fuse-overlayfs (openSUSE: zypper in fuse-overlayfs)" >&2; exit 1; }
+    fuse-overlayfs -o \
+        "lowerdir=$GAMEDIR,upperdir=$CAP/rw,workdir=$CAP/work" "$CAP/merged"
+    CLEANUP+=( "$CAP/merged" )
+    OVERLAY_ARGS=( --bind "$CAP/merged" /game )
+    if [ -n "$PROTON" ]; then
+        PROTON_LAYER="$CAP/proton"
+        rm_proton_layer               # one a killed run left behind
+        mkdir -p "$CAP/proton/rw" "$CAP/proton/work" "$CAP/proton/merged"
+        fuse-overlayfs -o "lowerdir=$PROTON,upperdir=$CAP/proton/rw,workdir=$CAP/proton/work" \
+            "$CAP/proton/merged"
+        CLEANUP+=( "$CAP/proton/merged" )
+        OVERLAY_ARGS+=( --bind "$CAP/proton/merged" /proton )
+    fi
+fi
 
 # ---- shared tools ----------------------------------------------------------
 # One copy of Cheat Engine and the like for every game, rather than one per
@@ -1320,6 +1344,7 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
                                 done
                                 i=$((i + 2)) ;;
         --overlay)              LL_ARGS+=( --rw "${BWRAP[i+3]}" ); i=$((i + 4)) ;;
+        --tmp-overlay)          LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
         # Everything else that takes arguments, so none is read as an option.
         --setenv|--symlink)     i=$((i + 3)) ;;
         --seccomp|--perms|--info-fd|--block-fd|--chdir|--dir|--overlay-src|\

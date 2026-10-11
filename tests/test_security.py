@@ -147,6 +147,17 @@ class SecurityTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be the game's folder", result.stderr)
 
+    def test_proton_writes_go_nowhere(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "dist.lock").write_text("")
+        (proton / "proton").write_text("#!/bin/sh -e\nprintf locked > /proton/dist.lock\n"
+                                       "printf new > /proton/new\n")
+        (proton / "proton").chmod(0o755)
+        self.cli("--headless", "--proton=" + str(proton), self.game, "/game/game.exe")
+        self.assertEqual((proton / "dist.lock").read_text(), "")
+        self.assertEqual(sorted(p.name for p in proton.iterdir()), ["dist.lock", "proton"])
+
     def test_capture_folder_is_deletable_after_a_run(self):
         name = self.cli("--print-name", self.game).stdout.strip()
         self.run_guest("true")
@@ -695,6 +706,22 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("DISPLAY", args)
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertIn("STEAM_COMPAT_CONFIG", args)
+
+    def test_proton_is_an_overlay_the_game_can_write_to(self):
+        # Valve's Proton locks dist.lock in its own folder before it starts
+        # anything; the writes must stay out of the install itself.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--proton=" + str(proton))
+        i = args.index("--tmp-overlay")
+        self.assertEqual(args[i - 2:i + 2],
+                         ["--overlay-src", str(proton), "--tmp-overlay", "/proton"])
+        self.assertNotIn("--ro-bind", [args[j - 1] for j, a in enumerate(args) if a == "/proton"])
+        # Landlock must let Proton write there too.
+        landlock = args[args.index("/run/sandbox-landlock", i):]
+        self.assertEqual(landlock[landlock.index("/proton") - 1], "--rw")
 
     def test_ntsync_only_for_proton(self):
         # A young driver: Wine's thread synchronisation needs it, nothing else.
