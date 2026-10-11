@@ -138,6 +138,15 @@ class SecurityTests(unittest.TestCase):
             self.assertNotEqual(self.cli("--name", invalid, "--print-name",
                                          self.game, check=False).returncode, 0)
 
+    def test_game_folder_must_be_a_folder(self):
+        # A file there would reach bwrap as the overlay's lower layer, which
+        # fails with a bare "Invalid argument".
+        exe = self.game / "game.exe"
+        exe.touch()
+        result = self.cli("--headless", exe, "/game/game.exe", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be the game's folder", result.stderr)
+
     def test_capture_folder_is_deletable_after_a_run(self):
         name = self.cli("--print-name", self.game).stdout.strip()
         self.run_guest("true")

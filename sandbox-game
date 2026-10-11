@@ -544,7 +544,13 @@ done
 [ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
-GAMEDIR="$(realpath "$1")"; shift
+GAMEDIR="$(realpath "$1")"
+# bwrap's overlay only takes a folder, and its error for anything else ("Can't
+# make overlay mount ... Invalid argument") doesn't say what went wrong.
+[ -d "$GAMEDIR" ] || {
+    echo "GAMEDIR must be the game's folder, not a file in it: $1" >&2
+    echo "(the game's own path then goes after it, under /game)" >&2; exit 1; }
+shift
 # --mkxp supplies its own command: the runtime is the program.
 [ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }
