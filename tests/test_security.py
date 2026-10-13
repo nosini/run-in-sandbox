@@ -7,6 +7,7 @@ recorders for display policy checks, without opening a game window.
 import ctypes
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,6 +116,40 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                     self.assertEqual(discover(), str(generic))
                     env.pop(f"DOTNET_ROOT_{arch}")
                     self.assertEqual(discover(), str(generic))
+
+    def test_host_prohibitions_precede_lan_allowances_for_both_families(self):
+        helper = (ROOT / "sandbox-game").read_text().split("NET_HELPER <<'EOF'", 1)[1]
+        helper = helper.split("\n", 1)[1].split("\nEOF", 1)[0]
+        addresses = ["192.0.2.5", "198.51.100.5", "2001:db8:1::5", "2001:db8:2::5"]
+        links = [{"link_type": "ether", "addr_info": [
+                    {"local": a, "prefixlen": 24 if ":" not in a else 64}]} for a in addresses]
+        allowed = [["192.0.2.0/24", "", ""], ["198.51.100.0/24", "", ""],
+                   ["2001:db8::/32", "tcp", "443"]]
+        for whole_lan in ("0", "1"):
+            batches = {}
+            def run(args, **kwargs):
+                if args[1:3] == ["-j", "addr"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(links))
+                if "-batch" in args:
+                    batches[args[1]] = kwargs["input"].splitlines()
+                return subprocess.CompletedProcess(args, 0)
+            with self.subTest(whole_lan=whole_lan), \
+                    mock.patch.object(sys, "argv", ["helper", "123", "169.254.1.1", "pidfile",
+                                                    "pasta", whole_lan, json.dumps(allowed)]), \
+                    mock.patch("shutil.which", return_value="ip"), \
+                    mock.patch("os.open", return_value=31), \
+                    mock.patch("fcntl.ioctl", return_value=32), \
+                    mock.patch("subprocess.run", side_effect=run):
+                exec(compile(helper, "NET_HELPER", "exec"), {})
+                for address in addresses:
+                    rules = batches["-6" if ":" in address else "-4"]
+                    host = next(r for r in rules if f" to {address} prohibit" in r)
+                    allowance = next(r for r in rules if "priority 95" in r)
+                    self.assertLess(int(host.split()[3]), int(allowance.split()[3]))
+                    self.assertLess(rules.index(host), rules.index(allowance))
+                if whole_lan == "0":
+                    self.assertIn("rule add priority 100 to 198.51.100.0/24 prohibit", batches["-4"])
+                    self.assertIn("rule add priority 100 to 2001:db8:2::/64 prohibit", batches["-6"])
 
 
 class SecurityTests(unittest.TestCase):
@@ -947,6 +983,12 @@ class SecurityTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("--proton already", refused.stderr)
 
+    def test_lan_allowances_need_the_internet(self):
+        for option in (["--lan"], ["--allow-lan", "10.0.50.105"]):
+            result = self.cli("--headless", *option, self.game, "/bin/true", check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("need it", result.stderr)
+
     def test_check_reports_every_protection(self):
         result = self.cli("--check", check=False)
         lines = result.stdout.splitlines()
@@ -1096,6 +1138,61 @@ print(json.dumps({{
             self.assertEqual(seen["internet"], "open")
             # Verified, so the CA certificates made it in as well.
             self.assertEqual(seen["https"], 200)
+
+    def test_lan_allowances_open_only_what_they_name(self):
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        ip = shutil.which("ip") or "/usr/sbin/ip"
+        routes = json.loads(subprocess.run([ip, "-j", "-4", "route", "show", "default"],
+                                           capture_output=True, text=True).stdout or "[]")
+        gateway = next((r["gateway"] for r in routes if "gateway" in r), None)
+        addrs = json.loads(subprocess.run([ip, "-j", "addr", "show", "scope", "global"],
+                                          capture_output=True, text=True, check=True).stdout)
+        own = [a["local"] for link in addrs for a in link.get("addr_info", [])
+               if a.get("family") == "inet"]
+        if gateway is None or not own:
+            self.skipTest("no IPv4 default gateway and address to stand in for the LAN")
+        # A service on every host interface, including addresses that pasta
+        # does not copy into the sandbox on a multihomed host.
+        import socket
+        listener = socket.socket()
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+        for address in own:
+            socket.create_connection((address, port), timeout=3).close()
+            listener.accept()[0].close()
+        (self.game / "probe.py").write_text("""
+import errno, json, socket, sys
+def tcp(host, port):
+    try:
+        socket.create_connection((host, port), timeout=3).close()
+        return "open"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e))
+print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys.argv[2::2])]))
+""")
+        def probe(*options):
+            result = self.cli("--headless", "--net", *options, self.game, "python3", "/game/probe.py",
+                              gateway, 80, gateway, 81,
+                              *[value for address in own for value in (address, port)], check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        # EACCES is the rule refusing it; anything else got past the rules.
+        allowed, other_port, *this_pc = probe("--allow-lan", f"{gateway}:80/tcp")
+        self.assertNotEqual(allowed, "EACCES")
+        self.assertEqual(other_port, "EACCES")
+        self.assertNotIn("open", this_pc)
+        allowed, other_port, *this_pc = probe("--lan")
+        self.assertNotEqual(allowed, "EACCES")
+        self.assertNotEqual(other_port, "EACCES")
+        self.assertNotIn("open", this_pc, "--lan let the game reach this machine")
+        # Explicit addresses and a covering subnet must retain the host block.
+        networks = [str(ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}").network)
+                    for link in addrs for a in link.get("addr_info", []) if a.get("family") == "inet"]
+        for allowance in (", ".join(f"{address}:{port}" for address in own), ", ".join(networks)):
+            self.assertNotIn("open", probe("--allow-lan", allowance)[2:], allowance)
 
     def test_network_helper_is_named_after_the_game_and_ends_with_it(self):
         # Proxies that route by process (mihomo's PROCESS-NAME) go by the
@@ -1455,6 +1552,20 @@ print(json.dumps({{
             args = self.launch_with(recorded, game, prefs)
             self.assertFalse([a for a in args if a.startswith("--with-proton")], (prefs, args))
 
+    def test_launcher_passes_lan_preferences_only_with_the_internet(self):
+        recorded = self.stub_launcher()
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        args = self.launch_with(recorded, self.game, "net=1\nlan_allow=10.0.50.105:443, 192.168.1.0/24\n")
+        self.assertIn("--net", args)
+        self.assertIn("--allow-lan=10.0.50.105:443, 192.168.1.0/24", args)
+        self.assertNotIn("--lan", args)
+        # The whole LAN covers the list.
+        args = self.launch_with(recorded, self.game, "net=1\nlan=1\nlan_allow=10.0.50.105\n")
+        self.assertIn("--lan", args)
+        self.assertFalse([a for a in args if a.startswith("--allow-lan")])
+        args = self.launch_with(recorded, self.game, "net=0\nlan=1\nlan_allow=10.0.50.105\n")
+        self.assertFalse([a for a in args if a.startswith(("--net", "--lan", "--allow-lan"))], args)
+
     def test_failure_window_points_dotnet_programs_at_the_preference(self):
         self.stub_launcher('echo "You must install .NET to run this application." >&2; exit 131')
         game = self.dotnet_launcher()
@@ -1498,6 +1609,23 @@ print(json.dumps({{
         self.env["TEST_VALUES"] = json.dumps({"with_proton": ""})
         _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"], game)
         self.assertNotIn("with_proton", saved)          # none, as the defaults have none
+
+    def test_preferences_save_lan_allowances(self):
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        self.env["TEST_VALUES"] = json.dumps({"lan_allow": "10.0.50.105:443"})
+        _, saved = self.preferences(["Native Wayland", "Off", "On", "This game only"])
+        self.assertEqual((saved["net"], saved["lan"], saved["lan_allow"]), ("1", "0", "10.0.50.105:443"))
+        # Hidden without the internet, the list is kept as it was.
+        self.env["TEST_VALUES"] = json.dumps({"lan_allow": ""})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertEqual((saved["net"], saved["lan_allow"]), ("0", "10.0.50.105:443"))
+        # A list the window would have refused is not saved however it arrives.
+        self.env["TEST_VALUES"] = json.dumps({"lan_allow": "nas.local"})
+        with self.assertRaises(subprocess.CalledProcessError) as refused:
+            self.preferences(["Native Wayland", "Off", "On", "This game only"])
+        self.assertIn(b"nas.local", refused.exception.stderr)
+        _, saved = self.preferences([])                  # cancelled: still as before
+        self.assertEqual(saved["lan_allow"], "10.0.50.105:443")
 
     def test_runtime_choice_updates_preferences_and_can_be_cancelled(self):
         (self.game / "www").mkdir()

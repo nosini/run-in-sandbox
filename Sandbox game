@@ -267,7 +267,15 @@ WL=0
 [ "$HOST_X11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
 [ "$WL" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
-[ "$(cfg_get net 0)" = 1 ] && FLAG+=( --net )
+if [ "$(cfg_get net 0)" = 1 ]; then
+    FLAG+=( --net )
+    if [ "$(cfg_get lan 0)" = 1 ]; then
+        FLAG+=( --lan )
+    else
+        LAN_ALLOW="$(cfg_get lan_allow "")"
+        [ -z "$LAN_ALLOW" ] || FLAG+=( "--allow-lan=$LAN_ALLOW" )
+    fi
+fi
 # Native programs only. The .NET runtime is opt-in, and only for a program
 # recognised as needing it.
 DOTNET_APP=0

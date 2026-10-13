@@ -425,6 +425,7 @@ Windows games only; whether file names ignore case, and what WebGL runs on, for 
 MV/MZ only. The .NET runtime and Proton for a program that starts Wine itself
 are asked for native programs only; see [Native programs that need .NET, or run
 Wine themselves](#native-programs-that-need-net-or-run-wine-themselves).
+Turning on **Internet** shows the LAN controls; see [Network](#network).
 Choosing gamescope shows resolution and fullscreen controls inline.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
@@ -445,7 +446,7 @@ fullscreen or one that will not quit, without a terminal.
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
-             [--dotnet[=DIR]] [--with-proton[=VER]]
+             [--dotnet[=DIR]] [--with-proton[=VER]] [--net [--allow-lan LIST|--lan]]
              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
@@ -472,6 +473,8 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--net` | internet access, and only that; see [Network](#network) |
+| `--allow-lan LIST` | with `--net`: these LAN addresses or networks after all, optionally only one port or protocol; see [Network](#network) |
+| `--lan` | with `--net`: the whole LAN, but still not this machine |
 | `--dotnet[=DIR]` | the host's .NET runtime, read-only at `/dotnet` |
 | `--with-proton[=VER]` | a Proton install, read-only at `/proton`, for a native program that starts Wine itself |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
@@ -718,8 +721,9 @@ seeing the real machine-id, in case it keyed its saves to it; delete its
 
 ## Network
 
-Off by default. `--net`, or **Network** in the preferences dialog, gives a game
-the internet and nothing else:
+Off by default. `--net`, or **Internet** in the preferences dialog, gives a game
+the internet and nothing else, unless you [let it reach the
+LAN](#letting-a-game-reach-the-lan):
 
 - It keeps its own network namespace. `pasta` connects that to the internet
   from outside, through ordinary sockets of yours; no port on this machine is
@@ -760,6 +764,27 @@ What it does not do: stop the game talking to whatever it likes on the
 internet, or sending off what it can read — its own capture folder and the
 hardware details listed above, less the identifiers already hidden. Give it to
 games that need it, not by default.
+
+### Letting a game reach the LAN
+
+Some games need one machine on the LAN, such as a game server of your own. With
+the internet on, **LAN addresses allowed anyway** in the preferences, or
+`--allow-lan`, opens just those. Separate the entries with commas or spaces:
+
+```
+10.0.50.105:443            one address, one port (TCP and UDP)
+10.0.50.105:443/tcp        the same, TCP only
+192.168.1.0/24             a whole network, every port
+10.0.0.5:27015-27030/udp   a range of ports
+[fd00::5]:443              IPv6; brackets when a port follows
+```
+
+Everything else on the LAN stays refused, including other ports on the same
+machine. **The whole LAN too**, or `--lan`, lifts the refusal for all of it.
+Off by default, and like the list it only applies with the internet on.
+
+Neither reaches this machine itself, even by name. Its interface addresses
+stay blocked even when an allowed address or network includes them.
 
 ## Sound
 
@@ -950,6 +975,8 @@ env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
 dotnet=0|1
 with_proton=|auto|<install name>
+lan=0|1
+lan_allow=10.0.50.105:443, 192.168.1.0/24
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -974,6 +1001,7 @@ when launching from the file manager.
 
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
 `with_proton` applies only when the game runs natively; empty means none.
+`lan` and `lan_allow` apply only with `net=1`.
 
 ## Known rough edges
 

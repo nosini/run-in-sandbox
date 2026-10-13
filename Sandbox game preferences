@@ -45,7 +45,8 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" \
     casefold "$(cfg_get casefold 1)" webgl "$(cfg_get webgl auto)" \
     gamescope_args "$(cfg_get gamescope_args '')" \
-    dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" <<'PY'
+    dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" \
+    lan "$(cfg_get lan 0)" lan_allow "$(cfg_get lan_allow '')" <<'PY'
 import json, sys
 name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
@@ -68,7 +69,8 @@ import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
         "net", "proton", "mod_loaders", "casefold", "webgl",
-        "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton"}
+        "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
+        "lan", "lan_allow"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
@@ -82,6 +84,12 @@ PY
 )" || die "Invalid preferences response; no settings were saved."
 declare -A RESULT
 while IFS=$'\t' read -r key value; do RESULT["$key"]="$value"; done <<<"$PARSED"
+# The window checks these as they are typed; sandbox-game has the last word.
+CHECK=()
+[ -z "${RESULT[lan_allow]:-}" ] || CHECK+=( --net "--allow-lan=${RESULT[lan_allow]}" )
+if [ "${#CHECK[@]}" -gt 0 ] && ! ERR="$("$SANDBOX" "${CHECK[@]}" --print-name "$GAMEDIR" 2>&1 >/dev/null)"; then
+    die "Not saved:\n$ERR"
+fi
 if [ "${RESULT[scope]}" = clear ]; then
     python3 - "$CFGDIR/games/$NAME" <<'PY'
 from pathlib import Path
@@ -143,20 +151,22 @@ fi
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
     for key in wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton \
-               dotnet; do
+               dotnet lan; do
         case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
         printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
     done
     if [ "$TARGET" = "$CFGDIR/defaults" ]; then
         [ -z "$GA_OUT" ] || printf 'gamescope_args=%s\n' "$GA_OUT"
     elif [ "$GA_OWN" = 1 ]; then printf 'gamescope_args=%s\n' "$GA_OUT"; fi
-    # May be empty: written when there is one, or when the defaults have one
-    # that this game's empty value turns off.
-    value="$(chosen with_proton '')"
-    if [ -n "$value" ] || { [ "$TARGET" != "$CFGDIR/defaults" ] \
-            && [ -n "$(file_get "$CFGDIR/defaults" with_proton || true)" ]; }; then
-        printf 'with_proton=%s\n' "$value"
-    fi
+    # Values that may be empty: written when there is one, or when the
+    # defaults have one that this game's empty value turns off.
+    for key in with_proton lan_allow; do
+        value="$(chosen "$key" '')"
+        if [ -n "$value" ] || { [ "$TARGET" != "$CFGDIR/defaults" ] \
+                && [ -n "$(file_get "$CFGDIR/defaults" "$key" || true)" ]; }; then
+            printf '%s=%s\n' "$key" "$value"
+        fi
+    done
     ENV_KEEP="$(kept env '')"
     [ -z "$ENV_KEEP" ] || printf 'env=%s\n' "$ENV_KEEP"
 } > "$TARGET.tmp" || die "Cannot write $TARGET"

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Host-side GTK dialogs. Requests and preference responses use plain JSON."""
 import argparse
+import ipaddress
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -82,15 +84,42 @@ def gamescope_parts(text):
     return (f"{width}x{height}" if width and height else ""), fullscreen, rest
 
 
+# The syntax sandbox-game's --allow-lan accepts, checked as the
+# preferences are saved; sandbox-game checks it again (PREF_CHECK) at launch.
+LAN_ENTRY = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+(?:/\d+)?)\]|(?P<v4>[0-9.]+(?:/\d+)?)"
+                       r"|(?P<bare6>[0-9a-f]*:[0-9a-f:.]*(?:/\d+)?))"
+                       r"(?::(?P<port>\d+(?:-\d+)?))?(?:/(?P<proto>tcp|udp))?", re.I)
+
+
+def lan_error(text):
+    """Why a LAN allowance list is not valid, or None."""
+    for word in re.split(r"[\s,]+", text):
+        if not word:
+            continue
+        match = LAN_ENTRY.fullmatch(word)
+        try:
+            net = ipaddress.ip_network(match["v6"] or match["v4"] or match["bare6"], strict=False)
+        except (TypeError, ValueError):
+            return f"Not an address or network: {word}"
+        if net.is_loopback or net.is_multicast or net.network_address.is_unspecified:
+            return f"Not a LAN address: {word}"
+        if match["port"]:
+            low, _, high = match["port"].partition("-")
+            if not 0 < int(low) <= int(high or low) <= 65535:
+                return f"No such port: {word}"
+    return None
+
+
 class Preferences:
     """Preferences that remain unsaved until the window's Save button is used."""
 
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders", "dotnet"):
+        for key in ("net", "mangohud", "mod_loaders", "dotnet", "lan"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
-        self.values["with_proton"] = self.values.get("with_proton", "")
+        for key in ("with_proton", "lan_allow"):
+            self.values[key] = self.values.get(key, "")
         self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
         self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
         self.runtime = self.values.get("launch_with", "auto")
@@ -138,6 +167,22 @@ class Preferences:
         return self.native and bool(self.request.get("can_proton"))
 
     @property
+    def lan_controls(self):
+        return self.values.get("net") == "1"
+
+    @property
+    def lan_allow_controls(self):
+        return self.lan_controls and self.values.get("lan") != "1"
+
+    def error(self):
+        """Why the visible settings cannot be saved, or None."""
+        if self.scope == "clear":
+            return None
+        if self.lan_allow_controls and lan_error(self.values["lan_allow"]):
+            return lan_error(self.values["lan_allow"])
+        return None
+
+    @property
     def uses_gamescope(self):
         return self.display in ("x11", "wayland-gamescope")
 
@@ -168,6 +213,12 @@ class Preferences:
             result["dotnet"] = self.values["dotnet"]
         if self.with_proton_controls:
             result["with_proton"] = self.values["with_proton"]
+        # Controls shown only under another one are returned only when they
+        # show; hidden, the saved values stay as they were.
+        if self.lan_controls:
+            result["lan"] = self.values["lan"]
+        if self.lan_allow_controls:
+            result["lan_allow"] = ", ".join(w for w in re.split(r"[\s,]+", self.values["lan_allow"]) if w)
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -285,6 +336,19 @@ class Dialog:
         self.row(key, label, widget)
         widget.connect("notify::active", callback)
 
+    def entry(self, key, label, value, placeholder):
+        widget = self.Gtk.Entry(text=value, placeholder_text=placeholder)
+        widget.set_size_request(260, -1)
+        self.row(key, label, widget)
+        widget.connect("changed", lambda widget: self.set_value(key, widget.get_text()))
+
+    def toggle(self, key):
+        """A switch whose value decides which other controls show."""
+        def changed(widget, *_):
+            self.set_value(key, "1" if widget.get_active() else "0")
+            self.refresh_visibility()
+        return changed
+
     def build_preferences(self, request):
         Gtk = self.Gtk
         self.state = Preferences(request)
@@ -322,8 +386,12 @@ class Dialog:
             choices.append((native_proton, native_proton))
         self.dropdown("with_proton", "Proton for a program that starts Wine itself", choices, native_proton,
                       lambda *_: self.set_value("with_proton", self.selected("with_proton")))
-        self.switch("net", "Internet only (no LAN, nothing on this PC)", self.state.values.get("net") == "1",
-                    lambda widget, *_: self.set_value("net", "1" if widget.get_active() else "0"))
+        self.switch("net", "Internet (no LAN, nothing on this PC)", self.state.values.get("net") == "1",
+                    self.toggle("net"))
+        self.switch("lan", "The whole LAN too (still nothing on this PC)", self.state.values["lan"] == "1",
+                    self.toggle("lan"))
+        self.entry("lan_allow", "LAN addresses allowed anyway", self.state.values["lan_allow"],
+                   "10.0.50.105:443, 192.168.1.0/24")
         resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
                                          "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
         self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
@@ -389,10 +457,17 @@ class Dialog:
             self.rows[key].set_visible(self.state.uses_gamescope)
         self.rows["dotnet"].set_visible(self.state.dotnet_controls)
         self.rows["with_proton"].set_visible(self.state.with_proton_controls)
+        self.rows["lan"].set_visible(self.state.lan_controls)
+        self.rows["lan_allow"].set_visible(self.state.lan_allow_controls)
         self.note.set_label("MangoHud is unavailable with NW.js." if self.state.engine == "nwjs" else "")
         self.note.set_visible(self.state.engine == "nwjs")
 
     def save_preferences(self, *_):
+        error = self.state.error()
+        if error:
+            self.error_note.set_label(error)
+            self.error_note.set_visible(True)
+            return
         try:
             self.appearance.save(self.selected("appearance"))
         except OSError as error:

@@ -44,6 +44,25 @@ class PreferencePolicyTests(unittest.TestCase):
         state.scope = "clear"
         self.assertEqual(state.result(), {"scope": "clear"})
 
+    def test_lan_controls_show_only_with_the_internet(self):
+        state = Preferences({"engine": "native", "values": {
+            "net": "0", "lan": "1", "lan_allow": "10.0.50.105:443"}})
+        self.assertFalse(state.lan_controls)
+        # Hidden, they are left for the saved file to keep.
+        self.assertNotIn("lan", state.result())
+        self.assertNotIn("lan_allow", state.result())
+        state.values["net"] = "1"
+        self.assertTrue(state.lan_controls)
+        self.assertFalse(state.lan_allow_controls)    # the whole LAN covers it
+        self.assertEqual(state.result()["lan"], "1")
+        self.assertNotIn("lan_allow", state.result())
+        state.values["lan"] = "0"
+        state.values["lan_allow"] = " 10.0.50.105:443  192.168.1.0/24,,[fd00::1]:80/udp "
+        self.assertEqual(state.result()["lan_allow"], "10.0.50.105:443, 192.168.1.0/24, [fd00::1]:80/udp")
+        self.assertIsNone(state.error())
+        state.values["lan_allow"] = "10.0.50.105:443, 127.0.0.1"
+        self.assertIn("127.0.0.1", state.error())
+
     def test_dotnet_only_for_native_programs_needing_it(self):
         state = Preferences({"engine": "native", "dotnet": True, "values": {"dotnet": "1"}})
         self.assertEqual(state.result()["dotnet"], "1")
@@ -59,6 +78,18 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertNotIn("with_proton", state.result())
         plain = Preferences({"engine": "native", "values": {"with_proton": "auto"}})
         self.assertNotIn("with_proton", plain.result())
+
+    def test_dialog_and_launcher_accept_the_same_lan_lists(self):
+        samples = ["10.0.50.105:443", "10.0.50.105", "192.168.1.0/24, 10.0.0.1:80/tcp",
+                   "[fd00::1]:443", "fd00::/64", "10.0.0.1:8000-8100/udp", "10.0.0.1/udp",
+                   "127.0.0.1", "0.0.0.0/0", "::/0", "10.0.0.1:0", "10.0.0.1:70000",
+                   "10.0.0.1:90-80", "nas.local", "10.0.0.1:443/sctp", "[10.0.0.1]:80", "224.0.0.1"]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                launcher = subprocess.run([str(ROOT / "sandbox-game"), "--net", "--allow-lan", sample,
+                                           "--print-name", "/"], capture_output=True, text=True)
+                self.assertEqual(MODULE["lan_error"](sample) is None, launcher.returncode == 0,
+                                 launcher.stderr)
 
 
 class GtkDialogTests(unittest.TestCase):
@@ -158,6 +189,25 @@ class GtkDialogTests(unittest.TestCase):
         self.assertEqual(self.responses[1][1]["with_proton"], "GE-Test")
         self.assertFalse(self.create("preferences", {"engine": "nwjs", "can_proton": True})
                          .rows["with_proton"].get_visible())
+
+    def test_lan_controls_appear_with_the_internet_and_bad_entries_block_saving(self):
+        dialog = self.create("preferences", {"engine": "native"})
+        self.assertFalse(dialog.rows["lan"].get_visible())
+        self.assertFalse(dialog.rows["lan_allow"].get_visible())
+        dialog.widgets["net"].set_active(True)
+        self.assertTrue(dialog.rows["lan"].get_visible())
+        self.assertTrue(dialog.rows["lan_allow"].get_visible())
+        dialog.widgets["lan"].set_active(True)
+        self.assertFalse(dialog.rows["lan_allow"].get_visible())
+        dialog.widgets["lan"].set_active(False)
+        dialog.widgets["lan_allow"].set_text("10.0.50.105:443, nas.local")
+        dialog.save_preferences()
+        self.assertEqual(self.responses, [])
+        self.assertIn("nas.local", dialog.error_note.get_label())
+        dialog.widgets["lan_allow"].set_text("10.0.50.105:443")
+        dialog.save_preferences()
+        saved = self.responses[0][1]
+        self.assertEqual((saved["net"], saved["lan"], saved["lan_allow"]), ("1", "0", "10.0.50.105:443"))
 
     def test_cancel_after_editing_returns_no_preferences(self):
         dialog = self.create("preferences", {"engine": "pgmmv", "can_proton": True})

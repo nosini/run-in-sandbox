@@ -79,6 +79,11 @@
 #               Linux launcher, say): the Proton install, read-only at /proton,
 #               for it to find there. =VER as for --proton. The program is
 #               still what runs; point it at /proton/files/bin/wine.
+#   --allow-lan LIST  with --net: these LAN addresses or networks after all,
+#               separated by commas or spaces. ADDR[/PREFIX][:PORT[-PORT]][/tcp|/udp],
+#               IPv6 in brackets when a port follows. A port without a
+#               protocol means TCP and UDP. Repeatable.
+#   --lan       with --net: the whole LAN too. Still not this machine.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -489,6 +494,9 @@ Runtimes
 Access
   --net                 the internet, and only that: no LAN, nothing on this
                         machine, nothing incoming (needs pasta)
+  --allow-lan LIST      with --net: these LAN addresses after all, e.g.
+                        10.0.50.105:443,192.168.1.0/24 ([v6]:port, :80/tcp)
+  --lan                 with --net: the whole LAN, still not this machine
   --ro SRC DST          bind SRC in read-only at DST
 
 Other
@@ -533,7 +541,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
-DOTNET_SPEC=""; WITH_PROTON_SPEC=""
+DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -569,6 +577,9 @@ while [ "$#" -gt 0 ]; do
         --with-proton) WITH_PROTON_SPEC="auto"; shift ;;
         --with-proton=*) WITH_PROTON_SPEC="${1#--with-proton=}"
                      WITH_PROTON_SPEC="${WITH_PROTON_SPEC:-auto}"; shift ;;
+        --allow-lan) LAN_ALLOW+=( "${2?--allow-lan needs a list of addresses}" ); shift 2 ;;
+        --allow-lan=*) LAN_ALLOW+=( "${1#--allow-lan=}" ); shift ;;
+        --lan)       LAN_ALL=1; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
@@ -585,6 +596,42 @@ done
     echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
 [ -z "$WITH_PROTON_SPEC" ] || [ -z "$PROTON_SPEC" ] || {
     echo "--with-proton is for native programs; --proton already brings Proton along" >&2; exit 1; }
+[ "$NET" = 1 ] || { [ "${#LAN_ALLOW[@]}" = 0 ] && [ "$LAN_ALL" = 0 ]; } || {
+    echo "--allow-lan and --lan widen --net: they need it" >&2; exit 1; }
+
+# The LAN allowances, checked before anything starts and
+# handed on in a form nothing has to parse again. The preferences window
+# (sandbox-game-dialog) checks the same syntax as it is typed.
+read -r -d '' PREF_CHECK <<'PY' || true
+import ipaddress, json, re, sys
+LAN_ENTRY = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+(?:/\d+)?)\]|(?P<v4>[0-9.]+(?:/\d+)?)"
+                       r"|(?P<bare6>[0-9a-f]*:[0-9a-f:.]*(?:/\d+)?))"
+                       r"(?::(?P<port>\d+(?:-\d+)?))?(?:/(?P<proto>tcp|udp))?", re.I)
+kind, texts = sys.argv[1], sys.argv[2:]
+try:
+    if kind == "lan":
+        rules = []
+        for word in re.split(r"[\s,]+", " ".join(texts)):
+            if not word:
+                continue
+            m = LAN_ENTRY.fullmatch(word)
+            try:
+                net = ipaddress.ip_network(m["v6"] or m["v4"] or m["bare6"], strict=False)
+            except (TypeError, ValueError):
+                raise ValueError(f"not an address or network: {word}") from None
+            if net.is_loopback or net.is_multicast or net.network_address.is_unspecified:
+                raise ValueError(f"not a LAN address: {word}")
+            if m["port"]:
+                low, _, high = m["port"].partition("-")
+                if not 0 < int(low) <= int(high or low) <= 65535:
+                    raise ValueError(f"no such port: {word}")
+            rules.append([str(net), (m["proto"] or "").lower(), m["port"] or ""])
+        json.dump(rules, sys.stdout)
+except ValueError as error:
+    sys.exit(f"--allow-lan: {error}")
+PY
+LAN_RULES="[]"
+[ "${#LAN_ALLOW[@]}" = 0 ] || LAN_RULES="$(python3 -c "$PREF_CHECK" lan "${LAN_ALLOW[@]}")" || exit 1
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
 GAMEDIR="$(realpath "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
@@ -1279,7 +1326,8 @@ done
 # pasta connects that to the internet from outside, through ordinary sockets
 # of ours: nothing is forwarded in, and nothing on this machine is reachable
 # through it. Routing rules then refuse the LAN and every network this machine
-# has an address in. The game cannot undo them: that takes CAP_NET_ADMIN over
+# has an address in -- bar what --allow-lan names, or all but this machine's
+# own addresses with --lan. The game cannot undo them: that takes CAP_NET_ADMIN over
 # a namespace owned by the outer user namespace, and the game only ever runs
 # in the nested one --disable-userns creates.
 #
@@ -1337,7 +1385,7 @@ read -r -d '' NET_HELPER <<'EOF' || true
 import ctypes, fcntl, ipaddress, json, os, shutil, subprocess, sys
 NS_GET_USERNS = 0xB701
 CLONE_NEWUSER, CLONE_NEWNET = 0x10000000, 0x40000000
-pid, dns, pidfile, pasta = sys.argv[1:]
+pid, dns, pidfile, pasta, whole_lan, allowed = sys.argv[1:]
 ip = shutil.which("ip") or next(p for p in ("/usr/sbin/ip", "/sbin/ip")
                                 if os.access(p, os.X_OK))
 # Private, shared and link-local space; every address this machine has; and
@@ -1347,9 +1395,13 @@ ip = shutil.which("ip") or next(p for p in ("/usr/sbin/ip", "/sbin/ip")
 # one is the internet, and a fake-IP proxy hands out its range as stand-ins for
 # ordinary sites -- in fc00::/7 itself, for mihomo, which is why that range is
 # not refused wholesale the way IPv4's private space is.
-block = {4: ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16",
-             "172.16.0.0/12", "192.168.0.0/16"],
-         6: ["fe80::/10"]}
+# --lan keeps only this machine's own addresses refused.
+lan = whole_lan == "1"
+block = {4: ["0.0.0.0/8"] + ([] if lan else [
+             "10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12",
+             "192.168.0.0/16"]),
+         6: [] if lan else ["fe80::/10"]}
+host_addresses = {4: [], 6: []}
 has_v6 = False
 out = subprocess.run([ip, "-j", "addr", "show", "scope", "global"],
                      capture_output=True, text=True, check=True).stdout
@@ -1358,8 +1410,8 @@ for link in json.loads(out):
         if not a.get("prefixlen"):
             continue
         own = ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}")
-        block[own.version].append(str(own.ip))
-        if link.get("link_type") == "ether":
+        host_addresses[own.version].append(str(own.ip))
+        if link.get("link_type") == "ether" and not lan:
             block[own.version].append(str(own.network))
         has_v6 = has_v6 or own.version == 6
 
@@ -1392,7 +1444,23 @@ for ver, nets in block.items():
     # Rules, not routes: they are consulted before any route, so the on-link
     # route pasta copies from the host cannot outrank them.
     rules = [f"rule add priority 90 to {dns} lookup main"] if ver == 4 else []
+    # Host addresses stay refused even when an allowance includes them. Pasta
+    # copies only its selected interface address, so other host addresses
+    # could otherwise reach host services through its sockets.
+    rules += [f"rule add priority 94 to {a} prohibit"
+              for a in dict.fromkeys(host_addresses[ver])]
+    # --allow-lan, ahead of the network refusals: the address, or network, and
+    # with a port only that port, over TCP and UDP unless one was named.
+    for net, proto, ports in json.loads(allowed):
+        if ipaddress.ip_network(net).version != ver:
+            continue
+        where = f"rule add priority 95 to {net}"
+        for p in [proto] if proto else ["tcp", "udp"] if ports else [""]:
+            rules.append(where + (f" ipproto {p}" if p else "")
+                         + (f" dport {ports}" if ports else "") + " lookup main")
     rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
+    if not rules:
+        continue
     subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
                    text=True, check=True, pass_fds=(user_fd, net_fd),
                    preexec_fn=enter((user_fd, CLONE_NEWUSER), (net_fd, CLONE_NEWNET)))
@@ -1558,7 +1626,8 @@ else
     rm -rf "$FIFOS"
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
-    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN"; then
+    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
+                                    "$LAN_ALL" "$LAN_RULES"; then
         printf x >&13
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
