@@ -102,7 +102,7 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "XDG_DATA_HOME",
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "SANDBOX_DIALOG", "XDG_DATA_HOME",
                     "SANDBOX_GPU_CARD"):
             self.env.pop(key, None)
         # A tools folder of the test's own, never the real one.
@@ -522,15 +522,8 @@ class SecurityTests(unittest.TestCase):
         bindir.mkdir(parents=True)
         for script in ("sandbox-game", "sandbox-game-lib"):
             (bindir / script).symlink_to(ROOT / script)
-        zenity = bindir / "zenity"
-        zenity.write_text(
-            '#!/bin/sh\ncase "$*" in\n'
-            '  *--forms*) printf "%s\\n" "$TEST_FORM" ;;\n'
-            'esac\n')
-        zenity.chmod(0o755)
-        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
-        self.env["TEST_FORM"] = "\t".join([
+        self.prepare_dialog([
             "Host X11 (other X apps can watch and control it)", "Off",
             "Newest installed (auto)", "Off", "Off", "This game only"])
         result = subprocess.run([str(ROOT / "Sandbox game preferences")],
@@ -656,19 +649,13 @@ class SecurityTests(unittest.TestCase):
         bindir.mkdir(parents=True)
         for script in ("sandbox-game", "sandbox-game-lib"):
             (bindir / script).symlink_to(ROOT / script)
-        zenity = bindir / "zenity"
-        zenity.write_text('#!/bin/sh\ncase "$*" in\n'
-                          '  *Gamescope\\ options*) printf "%s\\n" "$TEST_GS_FORM" ;;\n'
-                          '  *--forms*) printf "%s\\n" "$TEST_FORM" ;;\n'
-                          'esac\n')
-        zenity.chmod(0o755)
         config = self.home / ".config" / "sandbox-game"
         config.mkdir(parents=True)
         (config / "defaults").write_text("gamescope_args=-f -W 1920 -H 1080\n")
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
-        self.env["TEST_FORM"] = "\t".join(["X11, in gamescope (private Xwayland)", "", "", "",
-                                           "", "This game only"])
+        self.prepare_dialog(["X11, in gamescope (private Xwayland)", "", "", "",
+                             "", "This game only"])
         name = self.cli("--print-name", self.game).stdout.strip()
         own = config / "games" / name
 
@@ -1176,34 +1163,68 @@ print(json.dumps({{
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
 
+    def prepare_dialog(self, form, launch_with=""):
+        self.env["SANDBOX_DIALOG"] = str(ROOT / "tests" / "dialog_recorder.py")
+        self.env["DIALOG_RECORD"] = str(self.base / "offered.json")
+        self.env["TEST_FORM"] = json.dumps(form)
+        self.env["TEST_LAUNCH_WITH"] = launch_with
+
+    def test_stop_script_requires_a_confirmed_gui_response(self):
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        stopped = self.base / "stopped"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{stopped}"\n')
+        stub.chmod(0o755)
+        self.prepare_dialog([])
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        for response in ("1", "2"):
+            self.env["DIALOG_EXIT"] = response
+            subprocess.run([str(ROOT / "Stop sandboxed game")], env=self.env,
+                           capture_output=True, timeout=15)
+            self.assertFalse(stopped.exists())
+        self.env["DIALOG_EXIT"] = "0"
+        result = subprocess.run([str(ROOT / "Stop sandboxed game")], env=self.env,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stopped.read_text().splitlines(), ["--stop", "game"])
+
     def preferences(self, form, game=None, gamedir=None, launch_with=""):
-        """Run the preferences dialog on `game` with a zenity that answers
-        every form with `form` and records what it was offered."""
-        bindir = self.home / ".local" / "bin"         # where the dialog looks
+        """Simulate edits in the single preferences window; empty form cancels."""
+        bindir = self.home / ".local" / "bin"
         bindir.mkdir(parents=True, exist_ok=True)
         for script in ("sandbox-game", "sandbox-game-lib"):
             if not (bindir / script).exists():
                 (bindir / script).symlink_to(ROOT / script)
-        # The runtime chooser precedes the main form for Windows builds.
-        offered = self.base / "offered"
-        offered.unlink(missing_ok=True)
-        (bindir / "zenity").write_text(
-            '#!/bin/sh\ncase "$*" in *Choose\\ game\\ launcher*)\n'
-            '  printf "%s\\n" "$TEST_LAUNCH_WITH" ;; *--forms*)\n'
-            f'  [ -e "{offered}" ] || printf "%s\\n" "$@" > "{offered}"\n'
-            '  [ -n "$TEST_FORM" ] || exit 1\n'
-            '  printf "%s\\n" "$TEST_FORM" ;; esac\n')
-        (bindir / "zenity").chmod(0o755)
+        self.prepare_dialog(form, launch_with)
         game = game or self.game
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
-        self.env["TEST_FORM"] = "\t".join(form)
-        self.env["TEST_LAUNCH_WITH"] = launch_with
         subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
-                       capture_output=True, timeout=15, check=True)       # Cancel exits 0
-        lines = offered.read_text().splitlines()
-        combos = {lines[i][len("--add-combo="):]: lines[i + 1][len("--combo-values="):].split("|")
-                  for i in range(len(lines) - 1) if lines[i].startswith("--add-combo=")}
+                       capture_output=True, timeout=15, check=True)
+        import runpy
+        module = runpy.run_path(str(ROOT / "sandbox-game-dialog"))
+        state = module["Preferences"](json.loads(Path(self.env["DIALOG_RECORD"]).read_text()))
+        if launch_with:
+            state.set_runtime("proton" if launch_with == "Proton (Windows .exe)" else "auto")
+        def current_first(current, choices):
+            return [current] + [c for c in choices if c != current]
+        combos = {"Display": current_first(module["DISPLAY_CHOICES"][state.display],
+                                          [module["DISPLAY_CHOICES"][d] for d in state.displays]),
+                  "MangoHud overlay": ["Off (forced: hangs NW.js)"] if state.engine == "nwjs" else ["Off", "On"]}
+        if state.proton_controls:
+            combos["Proton version"] = [state.values.get("proton", "auto")]
+            combos["Mod loaders"] = ["Off"]
+        if state.engine == "nwjs":
+            combos["File names"] = current_first("Match exactly" if state.values["casefold"] == "0" else
+                                                 "Ignore case, like Windows", ["Ignore case, like Windows", "Match exactly"])
+            combos["WebGL"] = current_first("Vulkan" if state.values["webgl"] == "vulkan" else
+                                            "Chromium's default", ["Chromium's default", "Vulkan"])
         name = self.cli("--print-name", gamedir or game).stdout.strip()
         settings = self.home / ".config" / "sandbox-game" / "games" / name
         saved = dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l) \
@@ -1259,11 +1280,9 @@ print(json.dumps({{
         # Never pass a Linux launcher to Proton when no Windows build exists.
         (config / "games" / "native").write_text("launch_with=proton\n")
         exe.unlink()
+        self.env["SANDBOX_DIALOG"] = str(ROOT / "tests" / "dialog_recorder.py")
         error = self.base / "error-dialog"
-        (bindir / "zenity").write_text(
-            f'#!/bin/sh\nprintf "%s\\n" "$@" > "{error}"\n')
-        (bindir / "zenity").chmod(0o755)
-        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+        self.env["DIALOG_RECORD"] = str(error)
         result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
                                 capture_output=True, text=True, timeout=15)
         self.assertNotEqual(result.returncode, 0)

@@ -41,6 +41,7 @@ each() {
     "$@" 755 sandbox-seccomp          "$HELPERS"
     "$@" 755 sandbox-landlock         "$HELPERS"
     "$@" 644 sandbox-game-lib         "$HELPERS"
+    "$@" 755 sandbox-game-dialog      "$HELPERS"
     "$@" 644 nwjs-casefold.js         "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
@@ -184,8 +185,8 @@ command -v systemd-run >/dev/null \
     || warn "systemd-run not found -- games will run without memory and task limits"
 command -v pasta >/dev/null \
     || warn "pasta not found -- games can only be offered internet access with it (package passt)"
-command -v zenity >/dev/null \
-    || warn "zenity not found -- the Nautilus scripts need it for their dialogs"
+"$HELPERS/sandbox-game-dialog" check >/dev/null 2>&1 \
+    || warn "GTK 4 / Python PyGObject not found -- the Nautilus dialogs need them"
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *) warn "$BIN is not on PATH -- the Nautilus scripts find it anyway, but add it to use the commands from a shell" ;;

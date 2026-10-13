@@ -1,45 +1,17 @@
 #!/usr/bin/env bash
-# Nautilus script: right-click a game and choose how the sandbox should launch
-# it. "Sandbox game" then reads these back, so there is one launcher entry
-# rather than one per flag combination.
-#
-# Settings are per game and fall back to a shared set, so one fussy title can
-# pin its own Proton without dragging the rest of the library with it:
-#   ~/.config/sandbox-game/games/<name>   <- "This game only"
-#   ~/.config/sandbox-game/defaults       <- "All games"
-# The key is whatever sandbox-game files the sandbox under, so preferences and
-# captured writes stay in step even when two games share a folder name.
-#
-# Install beside the launcher:
-#   D=~/.local/share/nautilus/scripts
-#   install -Dm755 "Sandbox game" "$D/Sandbox game"
-#   install -Dm755 "Sandbox game preferences" "$D/Sandbox game preferences"
-#   install -Dm644 sandbox-game-lib ~/.local/lib/sandbox-game/sandbox-game-lib
-#
-# The files are plain key=value and meant to be hand-editable:
-#   wayland=0|1   mangohud=0|1   gamescope=0|1   proton=auto|<install name>
-#   host_x11=0|1                        # explicit host X server access
-#   net=0|1                             # internet access, never the LAN
-#   mod_loaders=0|1                     # Proton: load BepInEx and the like
-#   launch_with=auto|proton             # auto-detect or use the Windows .exe
-#   casefold=0|1                        # RPG Maker MV/MZ: file names ignore case
-#   webgl=auto|vulkan                   # RPG Maker MV/MZ: what WebGL runs on
-#   gamescope_args=<gamescope options>   e.g. -f -W 2560 -H 1440
-#   env=K=V K=V ...                      e.g. WAYLANDDRV_PRIMARY_MONITOR=HDMI-1
-# Resolution and fullscreen get a second dialog when gamescope will run; the rest
-# of gamescope_args, and all of env, are set by hand and carried through saves
-# untouched. env explicitly adds values to the clean sandbox environment.
-# Values cannot contain spaces, the list being split on them.
+# Nautilus preferences: one GTK window, shared detection and key=value config.
+# Runtime, display, gamescope and engine-specific controls update in place.
 set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
-die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
-            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+die() {
+    printf '%b\n' "$1" >&2
+    if declare -F dialog >/dev/null; then dialog error --text="$1" 2>/dev/null && exit 1; fi
+    notify-send "sandbox-game" "$1" 2>/dev/null || true
+    exit 1
+}
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
-command -v zenity >/dev/null || die "zenity is needed for the preferences dialog."
-
-# Beside sandbox-game when that is a checkout, else where install.sh puts it.
 LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
 [ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
@@ -49,316 +21,114 @@ SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
 SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
-# Same mapping the launcher uses, so a game gets one key however it was picked
-# -- an NW.js "www" folder belongs to the game above it.
 resolve_selection "$SEL"
 GAMEDIR="$R_GAMEDIR"
 BASE="$(basename "$GAMEDIR")"
-NAME="$("$SANDBOX" --print-name "$GAMEDIR")" \
-    || die "sandbox-game could not derive a name for:\n$GAMEDIR"
-# ---- build the menus -------------------------------------------------------
-# zenity combos have no "select this one" switch: they open on their first
-# entry. So each list is rotated to put the current setting at the front.
-first() {                                      # $1 = current, rest = all values
-    local cur="$1" v; shift
-    printf '%s\n' "$cur"
-    for v in "$@"; do [ "$v" = "$cur" ] || printf '%s\n' "$v"; done
-}
-join_pipe() { local IFS='|'; printf '%s' "$*"; }
+NAME="$("$SANDBOX" --print-name "$GAMEDIR")" || die "Cannot derive a name for:\n$GAMEDIR"
+game_engine "$SEL" auto
+CAN_PROTON=0; RENPY_X11=0
+if has_windows_exe "$GAMEDIR" || [ "$(cfg_get launch_with auto)" = proton ]; then CAN_PROTON=1; fi
+if [ "$R_ENGINE" = native ] && renpy_without_wayland "$GAMEDIR"; then RENPY_X11=1; fi
+RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
+[ -n "$RES" ] || RES="$(wlr-randr 2>/dev/null | awk '/current/ {print $1; exit}')"
+[[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=""
+PROTONS="$("$SANDBOX" --list-proton 2>/dev/null)"
+OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
 
-# Choose the runtime first so the main form offers the matching display and
-# Proton controls immediately. Cancel leaves all saved preferences alone.
-RUN_AUTO="Automatic"; RUN_PROTON="Proton (Windows .exe)"
-RUN_NOW="$(cfg_get launch_with auto)"
-[ "$RUN_NOW" = proton ] && RUN_CUR="$RUN_PROTON" || RUN_CUR="$RUN_AUTO"
-ASK_RUNTIME=0
-if has_windows_exe "$GAMEDIR" || [ "$RUN_NOW" = proton ]; then
-    ASK_RUNTIME=1
-    mapfile -t RUN_ALL < <(first "$RUN_CUR" "$RUN_AUTO" "$RUN_PROTON")
-    RUN_OUT="$(zenity --forms --title="Choose game launcher" --text="$BASE" \
-        --add-combo="Launch with" --combo-values="$(join_pipe "${RUN_ALL[@]}")" \
-        2>/dev/null)" || exit 0
-    [ -n "$RUN_OUT" ] || RUN_OUT="$RUN_CUR"
-    [ "$RUN_OUT" = "$RUN_PROTON" ] && RUN_NOW=proton || RUN_NOW=auto
-fi
-# Evaluate the prospective choice without saving it before the main form.
-game_engine "$SEL" "$RUN_NOW"
-
-# For offering "the size of your screen" in the gamescope menu. xrandr answers
-# through Xwayland on compositors that do not speak wlr-output-management.
-native_res() {
-    local r
-    r="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
-    [ -n "$r" ] || r="$(wlr-randr 2>/dev/null | awk '/current/ {print $1; exit}')"
-    [[ "$r" =~ ^[0-9]+x[0-9]+$ ]] && printf '%s\n' "$r"
-}
-
-WAYLAND_NOW="$(cfg_get wayland 0)"; MHUD_NOW="$(cfg_get mangohud 0)"
-PROTON_NOW="$(cfg_get proton auto)"; GS_NOW="$(cfg_get gamescope 0)"
-NET_NOW="$(cfg_get net 0)"; CF_NOW="$(cfg_get casefold 1)"
-WEBGL_NOW="$(cfg_get webgl auto)"; MODS_NOW="$(cfg_get mod_loaders 0)"
-
-M_OFF="Off"; M_ON="On"
-P_AUTO="Newest installed (auto)"
-
-# Display: where the game draws, and whether gamescope is in between, as one
-# choice -- each entry says what happens, and only what this game can do is
-# offered. Saved as wayland=, gamescope= and host_x11= as ever.
-D_W="Native Wayland"; D_WG="Native Wayland, in gamescope"
-D_X="X11, in gamescope (private Xwayland)"
-D_H="Host X11 (other X apps can watch and control it)"
-if [ "$R_ENGINE" = native ] && renpy_without_wayland "$GAMEDIR"; then
-    D_OK=( "$D_X" "$D_H" )          # its SDL has no Wayland driver
-elif [ "$R_ENGINE" = proton ]; then
-    # Wine's Wayland driver needs wl_subcompositor and wp_viewporter, which
-    # gamescope's Wayland server lacks; the launcher uses its Xwayland there.
-    D_OK=( "$D_W" "$D_X" "$D_H" )
+# JSON is data, never shell code. Folder names and values need no escaping by
+# hand, and all controls keep their values while switching between runtimes.
+REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" \
+    launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
+    host_x11 "$(cfg_get host_x11 0)" gamescope "$(cfg_get gamescope 0)" \
+    mangohud "$(cfg_get mangohud 0)" net "$(cfg_get net 0)" \
+    proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" \
+    casefold "$(cfg_get casefold 1)" webgl "$(cfg_get webgl auto)" \
+    gamescope_args "$(cfg_get gamescope_args '')" <<'PY'
+import json, sys
+name, engine, proton, renpy, resolution, installs, own = sys.argv[1:8]
+json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
+               can_proton=proton == "1", renpy_x11=renpy == "1",
+               resolution=resolution, protons=installs.splitlines(),
+               game_settings=own == "1", values=dict(zip(sys.argv[8::2], sys.argv[9::2]))), sys.stdout)
+PY
+)" || die "Cannot prepare preferences."
+if OUT="$(dialog preferences <<<"$REQUEST")"; then :
 else
-    D_OK=( "$D_W" "$D_WG" "$D_X" "$D_H" )
-fi
-if [ "$(cfg_get host_x11 0)" = 1 ]; then D_CUR="$D_H"
-elif [ "$WAYLAND_NOW" = 1 ] && [ "$GS_NOW" = 1 ]; then D_CUR="$D_WG"
-elif [ "$WAYLAND_NOW" = 1 ]; then D_CUR="$D_W"
-else D_CUR="$D_X"; fi
-# A setting this game cannot have opens as what it gets instead.
-[[ "|$(join_pipe "${D_OK[@]}")|" == *"|$D_CUR|"* ]] || D_CUR="$D_X"
-[ "$MHUD_NOW"    = 1 ] && M_CUR="$M_ON" || M_CUR="$M_OFF"
-[ "$PROTON_NOW" = auto ] && P_CUR="$P_AUTO" || P_CUR="$PROTON_NOW"
-
-mapfile -t PROTONS < <("$SANDBOX" --list-proton 2>/dev/null)
-# A version pinned earlier and since uninstalled must still be offered, or the
-# combo would silently reopen on something else and quietly change the setting.
-mapfile -t P_ALL < <(first "$P_CUR" "$P_AUTO" "${PROTONS[@]}")
-
-mapfile -t D_ALL < <(first "$D_CUR" "${D_OK[@]}")
-# MangoHud's preload shim hangs Chromium's zygote, so for NW.js it stays off.
-M_NA="Off (forced: hangs NW.js)"
-if [ "$R_ENGINE" = nwjs ]; then M_ALL=( "$M_NA" )
-else mapfile -t M_ALL < <(first "$M_CUR" "$M_OFF" "$M_ON"); fi
-
-N_OFF="Off"; N_ON="Internet only (no LAN, nothing on this PC)"
-[ "$NET_NOW" = 1 ] && N_CUR="$N_ON" || N_CUR="$N_OFF"
-mapfile -t N_ALL < <(first "$N_CUR" "$N_OFF" "$N_ON")
-
-# Windows ignores case in file names, and RPG Maker games made there count on
-# it; the launcher corrects for that unless told not to. NW.js games only.
-C_ON="Ignore case, like Windows"; C_OFF="Match exactly"
-[ "$CF_NOW" = 0 ] && C_CUR="$C_OFF" || C_CUR="$C_ON"
-mapfile -t C_ALL < <(first "$C_CUR" "$C_ON" "$C_OFF")
-# What Chromium runs WebGL on. Its own choice is OpenGL ES under Wayland, which
-# some drivers get wrong -- lighting drawn black on an RX 9070 -- and Vulkan
-# is the way round that. NW.js games only.
-G_AUTO="Chromium's default"; G_VK="Vulkan"
-[ "$WEBGL_NOW" = vulkan ] && G_CUR="$G_VK" || G_CUR="$G_AUTO"
-mapfile -t G_ALL < <(first "$G_CUR" "$G_AUTO" "$G_VK")
-
-# Mod loaders (BepInEx, MelonLoader, ...) hide in a winhttp.dll or the like
-# beside the .exe, which Wine passes over for its own unless told. Windows
-# games only.
-L_OFF="Off"; L_ON="Load them (BepInEx, MelonLoader, UE4SS, ASI loaders)"
-[ "$MODS_NOW" = 1 ] && L_CUR="$L_ON" || L_CUR="$L_OFF"
-mapfile -t L_ALL < <(first "$L_CUR" "$L_OFF" "$L_ON")
-
-S_GAME="This game only"; S_ALL="All games (defaults)"; S_CLEAR="Clear this game's settings"
-SCOPE_ALL=( "$S_GAME" "$S_ALL" "$S_CLEAR" )
-
-FORM=( --add-combo="Display"          --combo-values="$(join_pipe "${D_ALL[@]}")"
-       --add-combo="MangoHud overlay" --combo-values="$(join_pipe "${M_ALL[@]}")" )
-FIELDS=( display mhud )
-ASK_PROTON=0
-case "$R_ENGINE" in proton|"") ASK_PROTON=1 ;; esac
-if [ "$ASK_PROTON" = 1 ]; then
-    FORM+=( --add-combo="Proton version" --combo-values="$(join_pipe "${P_ALL[@]}")"
-            --add-combo="Mod loaders"    --combo-values="$(join_pipe "${L_ALL[@]}")" )
-    FIELDS+=( proton mods )
-fi
-if [ "$R_ENGINE" = nwjs ]; then
-    FORM+=( --add-combo="File names" --combo-values="$(join_pipe "${C_ALL[@]}")"
-            --add-combo="WebGL"      --combo-values="$(join_pipe "${G_ALL[@]}")" )
-    FIELDS+=( casefold webgl )
-fi
-FORM+=( --add-combo="Network"  --combo-values="$(join_pipe "${N_ALL[@]}")"
-        --add-combo="Save for" --combo-values="$(join_pipe "${SCOPE_ALL[@]}")" )
-FIELDS+=( net scope )
-OUT="$(zenity --forms --title="Sandbox preferences" \
-    --text="$BASE" --separator=$'\t' "${FORM[@]}" 2>/dev/null)" || exit 0   # cancelled
-
-# Split with awk, not read: tab counts as IFS whitespace, so read would fold
-# consecutive tabs together and shift every field left of an empty one.
-fld() {                                        # $1 = field name
-    local i
-    for i in "${!FIELDS[@]}"; do
-        [ "${FIELDS[$i]}" = "$1" ] || continue
-        awk -F'\t' -v n="$((i + 1))" 'NR==1 {print $n}' <<<"$OUT"; return
-    done
-}
-F_DISPLAY="$(fld display)"; F_MHUD="$(fld mhud)"; F_PROTON="$(fld proton)"
-F_NET="$(fld net)"; F_CF="$(fld casefold)"; F_WEBGL="$(fld webgl)"
-F_MODS="$(fld mods)"
-F_SCOPE="$(fld scope)"
-
-# An untouched combo can come back empty on some zenity builds; keep the
-# current value rather than silently resetting it to the built-in default.
-[ -n "${F_DISPLAY:-}" ] || F_DISPLAY="$D_CUR"
-[ -n "${F_MHUD:-}"   ] || F_MHUD="$M_CUR"
-[ -n "${F_PROTON:-}" ] || F_PROTON="$P_CUR"
-[ "$ASK_PROTON" = 1 ] && [ -z "${F_MODS:-}" ] && F_MODS="$L_CUR"
-[ -n "${F_NET:-}"    ] || F_NET="$N_CUR"
-[ "$R_ENGINE" = nwjs ] && [ -z "${F_CF:-}" ] && F_CF="$C_CUR"
-[ "$R_ENGINE" = nwjs ] && [ -z "${F_WEBGL:-}" ] && F_WEBGL="$G_CUR"
-[ -n "${F_SCOPE:-}"  ] || F_SCOPE="$S_GAME"
-
-# ---- save ------------------------------------------------------------------
-if [ "$F_SCOPE" = "$S_CLEAR" ]; then
-    rm -f "$CFGDIR/games/$NAME"
-    zenity --info --no-wrap --title="Sandbox preferences" \
-        --text="Cleared settings for <b>$BASE</b>.\nIt will use the defaults from now on." 2>/dev/null
-    exit 0
+    rc=$?
+    [ "$rc" != 1 ] || exit 0   # closing or cancelling saves nothing
+    die "Cannot open preferences. Install GTK 4 and the Python PyGObject bindings."
 fi
 
-if [ "$F_SCOPE" = "$S_ALL" ]; then TARGET="$CFGDIR/defaults"; SCOPE_TXT="all games"
-else                               TARGET="$CFGDIR/games/$NAME"; SCOPE_TXT="$BASE"; fi
-
-# Values the dialog did not ask about have to come out of the file being
-# written, never out of cfg_get: its answer is the two scopes merged, and
-# writing that back would copy a game's setting into the defaults, or pin an
-# inherited default into a game that then stops following it.
+# Only fields belonging to the selected engine are returned. Hidden fields
+# come from the file being written, so they never copy across config scopes.
+PARSED="$(python3 - "$OUT" <<'PY'
+import json, sys
+values = json.loads(sys.argv[1])
+keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
+        "net", "proton", "mod_loaders", "casefold", "webgl", "gamescope_args"}
+assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
+assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
+           for k, v in values.items())
+for key, value in values.items():
+    print(key + "\t" + value)
+PY
+)" || die "Invalid preferences response; no settings were saved."
+declare -A RESULT
+while IFS=$'\t' read -r key value; do RESULT["$key"]="$value"; done <<<"$PARSED"
+if [ "${RESULT[scope]}" = clear ]; then
+    python3 - "$CFGDIR/games/$NAME" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).unlink(missing_ok=True)
+PY
+    exit
+fi
+[ "${RESULT[scope]}" = all ] && TARGET="$CFGDIR/defaults" || TARGET="$CFGDIR/games/$NAME"
 kept() { file_get "$TARGET" "$1" || printf '%s\n' "$2"; }
+chosen() {
+    if [ "${RESULT[$1]+set}" ]; then printf '%s\n' "${RESULT[$1]}"
+    else kept "$1" "$2"; fi
+}
 
-# gamescope=1 means always; X11 in gamescope is stored as 0, the launcher
-# putting gamescope around private Xwayland by itself -- so that a switch to
-# native Wayland later does not find it pinned on.
-case "$F_DISPLAY" in
-    "$D_W")  W=1 G=0 HX=0 ;;
-    "$D_WG") W=1 G=1 HX=0 ;;
-    "$D_H")  W=0 G=0 HX=1 ;;
-    *)       W=0 G=0 HX=0 ;;
-esac
-# Whether gamescope will actually run, which is when its options matter.
-USES_GS=0
-[ "$F_DISPLAY" = "$D_WG" ] || [ "$F_DISPLAY" = "$D_X" ] && USES_GS=1
-# The forced entry carries no choice, so keep whatever this file already said.
-if [ "$F_MHUD" = "$M_NA" ]; then M="$(kept mangohud 0)"
-elif [ "$F_MHUD" = "$M_ON" ]; then M=1
-else M=0; fi
-[ "$F_NET" = "$N_ON" ] && NET=1 || NET=0
-
-# ---- gamescope options -----------------------------------------------------
-# Only worth asking when gamescope will run -- either display in gamescope --
-# so it is a second dialog rather than four more fields nobody without it
-# would want. Resolution and
-# fullscreen are the two knobs; anything else in gamescope_args was put there
-# by hand and is parsed out, left alone, and put back.
-# A game's own file that says nothing gets the defaults' options, so those are
-# what the dialog starts from; the file only gets a line of its own once the
-# answer differs from them -- an empty one included, which is how a game turns
-# off the defaults' fullscreen or resolution.
-# Options into the two the dialog asks about and the rest, and back in one
-# order -- which is also how two answers are compared, whatever order a hand
-# edit left them in.
-ga_parse() {                                   # $1 = options -> GA_W GA_H GA_F GA_REST
-    local in i=0
-    GA_W=""; GA_H=""; GA_F=0; GA_REST=()
-    read -r -a in <<<"$1"
-    while [ "$i" -lt "${#in[@]}" ]; do
-        case "${in[$i]}" in
-            -W|--output-width)  GA_W="${in[$((i+1))]:-}"; i=$((i+2)) ;;
-            -H|--output-height) GA_H="${in[$((i+1))]:-}"; i=$((i+2)) ;;
-            -f|--fullscreen)    GA_F=1; i=$((i+1)) ;;
-            *)                  GA_REST+=( "${in[$i]}" ); i=$((i+1)) ;;
+# Compare gamescope's resolution/fullscreen options in a stable order, so an
+# unchanged inherited value stays inherited. Other options are preserved.
+ga_normalise() {
+    local words width="" height="" full=0 rest=() i=0
+    read -r -a words <<<"$1"
+    while [ "$i" -lt "${#words[@]}" ]; do
+        case "${words[$i]}" in
+            -W|--output-width) width="${words[$((i+1))]:-}"; i=$((i+2)) ;;
+            -H|--output-height) height="${words[$((i+1))]:-}"; i=$((i+2)) ;;
+            -f|--fullscreen) full=1; i=$((i+1)) ;;
+            *) rest+=( "${words[$i]}" ); i=$((i+1)) ;;
         esac
     done
-}
-ga_join() {
     local out=()
-    [ -n "$GA_W" ] && [ -n "$GA_H" ] && out+=( -W "$GA_W" -H "$GA_H" )
-    [ "$GA_F" = 1 ] && out+=( -f )
-    out+=( "${GA_REST[@]}" )
+    [ -z "$width" ] || [ -z "$height" ] || out+=( -W "$width" -H "$height" )
+    [ "$full" != 1 ] || out+=( -f )
+    out+=( "${rest[@]}" )
     printf '%s\n' "${out[*]}"
 }
-ga_same() { [ "$(ga_parse "$1"; ga_join)" = "$(ga_parse "$2"; ga_join)" ]; }
-
-GA_INHERITED=""
-[ "$TARGET" = "$CFGDIR/defaults" ] \
-    || GA_INHERITED="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
-if GA_OUT="$(file_get "$TARGET" gamescope_args)"; then GA_OWN=1
-else GA_OUT="$GA_INHERITED"; GA_OWN=0; fi
-if [ "$USES_GS" = 1 ]; then
-    ga_parse "$GA_OUT"
-
-    R_NONE="Game default (no override)"
-    R_CUR="$R_NONE"
-    [ -n "$GA_W" ] && [ -n "$GA_H" ] && R_CUR="${GA_W}x${GA_H}"
-    RES=( "$R_NONE" )
-    NATIVE="$(native_res)"
-    [ -n "$NATIVE" ] && RES+=( "$NATIVE" )
-    RES+=( 3840x2160 2560x1440 1920x1080 1600x900 1280x720 )
-    mapfile -t RES_ALL < <(first "$R_CUR" "${RES[@]}" | awk '!seen[$0]++')
-    [ "$GA_F" = 1 ] && FS_CUR="Yes" || FS_CUR="No"
-    mapfile -t FS_ALL < <(first "$FS_CUR" "Yes" "No")
-
-    GOUT="$(zenity --forms --title="Gamescope options" \
-        --text="$BASE" --separator=$'\t' \
-        --add-combo="Resolution" --combo-values="$(join_pipe "${RES_ALL[@]}")" \
-        --add-combo="Fullscreen" --combo-values="$(join_pipe "${FS_ALL[@]}")" \
-        2>/dev/null)"
-    # Backing out of this one keeps the options as they were rather than
-    # throwing away the main dialog's answers too.
-    if [ -n "$GOUT" ]; then
-        F_RES="$(awk -F'\t' 'NR==1 {print $1}' <<<"$GOUT")"
-        F_FS="$( awk -F'\t' 'NR==1 {print $2}' <<<"$GOUT")"
-        [ -n "$F_RES" ] || F_RES="$R_CUR"
-        [ -n "$F_FS"  ] || F_FS="$FS_CUR"
-        GA_W=""; GA_H=""
-        [ "$F_RES" != "$R_NONE" ] && [[ "$F_RES" =~ ^([0-9]+)x([0-9]+)$ ]] \
-            && GA_W="${BASH_REMATCH[1]}" GA_H="${BASH_REMATCH[2]}"
-        [ "$F_FS" = Yes ] && GA_F=1 || GA_F=0
-        GA_OUT="$(ga_join)"
+GA_OWN=0
+if GA_OUT="$(file_get "$TARGET" gamescope_args)"; then GA_OWN=1; fi
+if [ "${RESULT[gamescope_args]+set}" ]; then
+    GA_OUT="${RESULT[gamescope_args]}"
+    if [ "$TARGET" != "$CFGDIR/defaults" ]; then
+        GA_DEFAULT="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
+        [ "$(ga_normalise "$GA_OUT")" = "$(ga_normalise "$GA_DEFAULT")" ] || GA_OWN=1
     fi
 fi
-if [ "$ASK_PROTON" = 0 ]; then P="$(kept proton auto)"
-elif [ "$F_PROTON" = "$P_AUTO" ]; then P=auto
-else P="$F_PROTON"; fi
-
-if [ "$ASK_PROTON" = 0 ]; then MODS="$(kept mod_loaders 0)"
-elif [ "$F_MODS" = "$L_ON" ]; then MODS=1
-else MODS=0; fi
-
-if [ "$R_ENGINE" != nwjs ]; then CF="$(kept casefold 1)"
-elif [ "$F_CF" = "$C_OFF" ]; then CF=0
-else CF=1; fi
-if [ "$R_ENGINE" != nwjs ]; then WEBGL="$(kept webgl auto)"
-elif [ "$F_WEBGL" = "$G_VK" ]; then WEBGL=vulkan
-else WEBGL=auto; fi
-
-ENV_KEEP="$(kept env "")"        # no dialog field; carried through untouched
-[ "$ASK_RUNTIME" = 1 ] || RUN_NOW="$(kept launch_with auto)"
-[ "$RUN_NOW" = proton ] && RUN_LABEL="$RUN_PROTON" || RUN_LABEL="$RUN_AUTO"
 
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
-    echo "wayland=$W"
-    echo "host_x11=$HX"
-    echo "mangohud=$M"
-    echo "gamescope=$G"
-    echo "net=$NET"
-    echo "launch_with=$RUN_NOW"
-    echo "mod_loaders=$MODS"
-    echo "casefold=$CF"
-    echo "webgl=$WEBGL"
+    for key in wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton; do
+        case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
+        printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
+    done
     if [ "$TARGET" = "$CFGDIR/defaults" ]; then
-        [ -n "$GA_OUT" ] && echo "gamescope_args=$GA_OUT"
-    elif [ "$GA_OWN" = 1 ] || ! ga_same "$GA_OUT" "$GA_INHERITED"; then
-        echo "gamescope_args=$GA_OUT"
-    fi
-    [ -n "$ENV_KEEP" ] && echo "env=$ENV_KEEP"
-    echo "proton=$P"
-} > "$TARGET" || die "Cannot write $TARGET"
-
-NOTE=""
-[ "$F_SCOPE" = "$S_ALL" ] && [ -f "$CFGDIR/games/$NAME" ] \
-    && NOTE="\n\n<i>$BASE has its own settings, which still win over these.</i>"
-
-zenity --info --no-wrap --title="Sandbox preferences" \
-    --text="Saved for <b>$SCOPE_TXT</b>:\n\nLaunch with: $RUN_LABEL\nDisplay: $F_DISPLAY${GA_OUT:+ <tt>($GA_OUT)</tt>}\nMangoHud: $F_MHUD${F_PROTON:+\nProton: $F_PROTON}${F_MODS:+\nMod loaders: $F_MODS}\nNetwork: $F_NET${F_CF:+\nFile names: $F_CF}${F_WEBGL:+\nWebGL: $F_WEBGL}\n\n<tt>$TARGET</tt>$NOTE" \
-    2>/dev/null
+        [ -z "$GA_OUT" ] || printf 'gamescope_args=%s\n' "$GA_OUT"
+    elif [ "$GA_OWN" = 1 ]; then printf 'gamescope_args=%s\n' "$GA_OUT"; fi
+    ENV_KEEP="$(kept env '')"
+    [ -z "$ENV_KEEP" ] || printf 'env=%s\n' "$ENV_KEEP"
+} > "$TARGET.tmp" || die "Cannot write $TARGET"
+mv -- "$TARGET.tmp" "$TARGET" || die "Cannot save $TARGET"

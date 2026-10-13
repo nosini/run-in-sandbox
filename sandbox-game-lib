@@ -10,6 +10,15 @@
 
 CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
 
+# All file-manager dialogs use one host-side GTK helper. An explicit override
+# also lets tests record requests without needing a desktop session.
+dialog() {
+    local helper="${SANDBOX_DIALOG:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")/sandbox-game-dialog}"
+    [ -x "$helper" ] || helper="$HOME/.local/lib/sandbox-game/sandbox-game-dialog"
+    [ -x "$helper" ] || { echo "sandbox-game-dialog not found; run install.sh" >&2; return 2; }
+    "$helper" "$@"
+}
+
 # One key out of one file. Anything writing a settings file wants this rather
 # than cfg_get: cfg_get answers with the merged view, and writing that back into
 # a single file copies values across scopes in whichever direction the save

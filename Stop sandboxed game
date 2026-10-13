@@ -12,10 +12,13 @@ set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
-msg() { command -v zenity >/dev/null && zenity --info  --no-wrap --text="$1" 2>/dev/null \
-            || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
-die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
-            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+msg() { dialog info --text="$1" 2>/dev/null || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+die() {
+    printf '%b\n' "$1" >&2
+    if declare -F dialog >/dev/null; then dialog error --text="$1" 2>/dev/null && exit 1; fi
+    notify-send "sandbox-game" "$1" 2>/dev/null || true
+    exit 1
+}
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
 # Beside sandbox-game when that is a checkout, else where install.sh puts it.
@@ -33,9 +36,11 @@ resolve_selection "$SEL"
 NAME="$("$SANDBOX" --print-name "$R_GAMEDIR")" \
     || die "sandbox-game could not derive a name for:\n$R_GAMEDIR"
 
-if command -v zenity >/dev/null; then
-    zenity --question --no-wrap --title="Stop sandboxed game" \
-        --text="Stop $NAME?\n\nAnything not saved is lost." 2>/dev/null || exit 0
+if dialog question --title="Stop sandboxed game" --text="Stop $NAME?\n\nAnything not saved is lost."; then :
+else
+    rc=$?
+    [ "$rc" != 1 ] || exit 0
+    die "Cannot show the stop confirmation. Install GTK 4 and the Python PyGObject bindings."
 fi
 if ! OUT="$("$SANDBOX" --stop "$NAME" 2>&1)"; then
     case "$OUT" in

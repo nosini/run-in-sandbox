@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Host-side GTK dialogs. Requests and preference responses use plain JSON."""
+import argparse
+import json
+import sys
+
+DISPLAY_CHOICES = {
+    "wayland": "Native Wayland",
+    "wayland-gamescope": "Native Wayland, in gamescope",
+    "x11": "X11, in gamescope (private Xwayland)",
+    "host-x11": "Host X11 (other X apps can watch and control it)",
+}
+
+
+def gamescope_parts(text):
+    """Extract the two GUI options, keeping other command-line words intact."""
+    words = text.split()
+    width = height = ""
+    fullscreen = False
+    rest = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in ("-W", "--output-width", "-H", "--output-height"):
+            value = words[i + 1] if i + 1 < len(words) else ""
+            if word in ("-W", "--output-width"):
+                width = value
+            else:
+                height = value
+            i += 2
+        else:
+            if word in ("-f", "--fullscreen"):
+                fullscreen = True
+            else:
+                rest.append(word)
+            i += 1
+    return (f"{width}x{height}" if width and height else ""), fullscreen, rest
+
+
+def gamescope_args(resolution, fullscreen, rest):
+    words = []
+    if resolution:
+        width, height = resolution.split("x", 1)
+        words += ["-W", width, "-H", height]
+    if fullscreen:
+        words.append("-f")
+    return " ".join(words + rest)
+
+
+class Preferences:
+    """Preferences that remain unsaved until the window's Save button is used."""
+
+    def __init__(self, request):
+        self.request = request
+        self.values = dict(request.get("values", {}))
+        for key in ("net", "mangohud", "mod_loaders"):
+            self.values[key] = "1" if self.values.get(key) == "1" else "0"
+        self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
+        self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
+        self.runtime = self.values.get("launch_with", "auto")
+        if self.runtime != "proton":
+            self.runtime = "auto"
+        self.scope = "game"
+        if self.values.get("host_x11") == "1":
+            self.display = "host-x11"
+        elif self.values.get("wayland") == "1":
+            self.display = "wayland-gamescope" if self.values.get("gamescope") == "1" else "wayland"
+        else:
+            self.display = "x11"
+        self.resolution, self.fullscreen, self.extra_gamescope = gamescope_parts(
+            self.values.get("gamescope_args", ""))
+        self.set_runtime(self.runtime)
+
+    @property
+    def engine(self):
+        return "proton" if self.runtime == "proton" else self.request.get("engine", "")
+
+    @property
+    def displays(self):
+        if self.engine == "proton":
+            return ["wayland", "x11", "host-x11"]
+        if self.engine == "native" and self.request.get("renpy_x11"):
+            return ["x11", "host-x11"]
+        return list(DISPLAY_CHOICES)
+
+    @property
+    def proton_controls(self):
+        return self.engine in ("proton", "")
+
+    @property
+    def uses_gamescope(self):
+        return self.display in ("x11", "wayland-gamescope")
+
+    def set_runtime(self, runtime):
+        self.runtime = runtime
+        if self.display not in self.displays:
+            self.display = "x11"
+
+    def result(self):
+        if self.scope == "clear":
+            return {"scope": "clear"}
+        result = {"scope": self.scope,
+                  "wayland": "1" if self.display.startswith("wayland") else "0",
+                  "gamescope": "1" if self.display == "wayland-gamescope" else "0",
+                  "host_x11": "1" if self.display == "host-x11" else "0",
+                  "net": self.values.get("net", "0")}
+        if self.request.get("can_proton"):
+            result["launch_with"] = self.runtime
+        if self.engine != "nwjs":
+            result["mangohud"] = self.values.get("mangohud", "0")
+        if self.proton_controls:
+            for key, fallback in (("proton", "auto"), ("mod_loaders", "0")):
+                result[key] = self.values.get(key, fallback)
+        if self.engine == "nwjs":
+            result["casefold"] = self.values.get("casefold", "1")
+            result["webgl"] = self.values.get("webgl", "auto")
+        if self.uses_gamescope:
+            result["gamescope_args"] = gamescope_args(
+                self.resolution, self.fullscreen, self.extra_gamescope)
+        return result
+
+
+class Dialog:
+    def __init__(self, Gtk, app, mode, request, finish):
+        self.Gtk = Gtk
+        self.finish = finish
+        self.window = Gtk.ApplicationWindow(application=app, title=request.get("title", "Sandbox game"))
+        self.window.set_default_size(760, 580 if mode == "preferences" else 220)
+        self.window.connect("close-request", self.cancel)
+        from gi.repository import Gdk
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda controller, key, *rest: self.cancel() if key == Gdk.KEY_Escape else False)
+        self.window.add_controller(keys)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(outer, "set_margin_" + side)(20)
+        self.window.set_child(outer)
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.set_child(self.body)
+        outer.append(scroll)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, halign=Gtk.Align.END)
+        outer.append(buttons)
+        self.buttons = buttons
+        self.rows = {}
+        self.widgets = {}
+        self.choices = {}
+        if mode == "preferences":
+            self.build_preferences(request)
+            self.button("Cancel", self.cancel)
+            save = self.button("Save", self.save_preferences, "suggested-action")
+            self.window.set_default_widget(save)
+            self.window.set_focus(self.widgets.get("launch_with", self.widgets["display"]))
+        elif mode == "pick":
+            self.build_picker(request)
+            self.button("Cancel", self.cancel)
+            self.pick_button = self.button("Launch", self.save_pick, "suggested-action")
+            self.pick_button.set_sensitive(bool(request.get("items")))
+            self.window.set_default_widget(self.pick_button)
+            self.window.set_focus(self.listbox)
+        else:
+            text = request.get("text", "")
+            if mode == "log":
+                self.window.set_default_size(960, 600)
+                view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
+                                    wrap_mode=Gtk.WrapMode.WORD_CHAR)
+                view.get_buffer().set_text(text)
+                self.body.append(view)
+            else:
+                self.body.append(Gtk.Label(label=text, wrap=True, xalign=0, selectable=True))
+            if mode == "question":
+                cancel = self.button("Cancel", self.cancel)
+                self.window.set_default_widget(cancel)
+                self.window.set_focus(cancel)
+                self.button(request.get("accept", "Stop"), lambda *_: self.finish(0, None), "destructive-action")
+            else:
+                close = self.button("Close", lambda *_: self.finish(0, None))
+                self.window.set_default_widget(close)
+                self.window.set_focus(close)
+
+    def button(self, label, callback, style=None):
+        button = self.Gtk.Button(label=label)
+        if style:
+            button.add_css_class(style)
+        button.connect("clicked", callback)
+        self.buttons.append(button)
+        return button
+
+    def cancel(self, *_):
+        self.finish(1, None)
+        return True
+
+    def row(self, key, label, widget):
+        Gtk = self.Gtk
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        title = Gtk.Label(label=label, xalign=0, hexpand=True, wrap=True)
+        box.append(title)
+        box.append(widget)
+        widget.set_tooltip_text(label)
+        self.body.append(box)
+        self.rows[key], self.widgets[key] = box, widget
+
+    def dropdown(self, key, label, options, current, callback):
+        widget = self.Gtk.DropDown()
+        widget.set_size_request(260, -1)
+        self.row(key, label, widget)
+        self.set_options(key, options, current)
+        widget.connect("notify::selected", callback)
+
+    def set_options(self, key, options, current):
+        self.choices[key] = options
+        self.widgets[key].set_model(self.Gtk.StringList.new([label for _, label in options]))
+        keys = [value for value, _ in options]
+        self.widgets[key].set_selected(keys.index(current) if current in keys else 0)
+
+    def selected(self, key):
+        index = self.widgets[key].get_selected()
+        options = self.choices[key]
+        return options[index][0] if index < len(options) else options[0][0]
+
+    def switch(self, key, label, value, callback):
+        widget = self.Gtk.Switch(active=value, valign=self.Gtk.Align.CENTER)
+        self.row(key, label, widget)
+        widget.connect("notify::active", callback)
+
+    def build_preferences(self, request):
+        Gtk = self.Gtk
+        self.state = Preferences(request)
+        self.updating = False
+        heading = Gtk.Label(label=request.get("game", ""), xalign=0, wrap=True, selectable=True)
+        heading.add_css_class("title-2")
+        self.body.append(heading)
+        if request.get("can_proton"):
+            self.dropdown("launch_with", "Launch with", [("auto", "Automatic"), ("proton", "Proton (Windows .exe)")],
+                          self.state.runtime, self.runtime_changed)
+        self.dropdown("display", "Display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays],
+                      self.state.display, self.display_changed)
+        self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
+                    lambda widget, *_: self.set_value("mangohud", "1" if widget.get_active() else "0"))
+        protons = list(dict.fromkeys(["auto", *request.get("protons", [])]))
+        pinned = self.state.values.get("proton", "auto")
+        if pinned not in protons:
+            protons.append(pinned)
+        self.dropdown("proton", "Proton version", [(p, "Newest installed (auto)" if p == "auto" else p) for p in protons],
+                      pinned, lambda *_: self.set_value("proton", self.selected("proton")))
+        self.switch("mod_loaders", "Mod loaders (BepInEx, MelonLoader, …)", self.state.values.get("mod_loaders") == "1",
+                    lambda widget, *_: self.set_value("mod_loaders", "1" if widget.get_active() else "0"))
+        self.dropdown("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")],
+                      self.state.values.get("casefold", "1"), lambda *_: self.set_value("casefold", self.selected("casefold")))
+        self.dropdown("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")],
+                      self.state.values.get("webgl", "auto"), lambda *_: self.set_value("webgl", self.selected("webgl")))
+        self.switch("net", "Internet only (no LAN, nothing on this PC)", self.state.values.get("net") == "1",
+                    lambda widget, *_: self.set_value("net", "1" if widget.get_active() else "0"))
+        resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
+                                         "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
+        self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
+                      self.state.resolution, self.resolution_changed)
+        self.switch("fullscreen", "Gamescope fullscreen", self.state.fullscreen,
+                    lambda widget, *_: setattr(self.state, "fullscreen", widget.get_active()))
+        self.dropdown("scope", "Save for", [("game", "This game only"), ("all", "All games (defaults)"),
+                                            ("clear", "Clear this game's settings")], "game", self.scope_changed)
+        self.note = Gtk.Label(xalign=0, wrap=True)
+        self.note.add_css_class("dim-label")
+        self.body.append(self.note)
+        self.scope_note = Gtk.Label(xalign=0, wrap=True)
+        self.scope_note.add_css_class("dim-label")
+        self.scope_note.set_visible(False)
+        self.body.append(self.scope_note)
+        self.refresh()
+
+    def set_value(self, key, value):
+        if not self.updating:
+            self.state.values[key] = value
+
+    def runtime_changed(self, *_):
+        self.state.set_runtime(self.selected("launch_with"))
+        self.refresh()
+
+    def display_changed(self, *_):
+        if not self.updating:
+            self.state.display = self.selected("display")
+            self.refresh_visibility()
+
+    def resolution_changed(self, *_):
+        self.state.resolution = self.selected("resolution")
+
+    def scope_changed(self, *_):
+        self.state.scope = self.selected("scope")
+        for key, row in self.rows.items():
+            if key != "scope":
+                row.set_sensitive(self.state.scope != "clear")
+        self.scope_note.set_label(
+            "This game's settings will be removed when you save." if self.state.scope == "clear" else
+            "This game's own settings still take precedence over defaults."
+            if self.state.scope == "all" and self.state.request.get("game_settings") else "")
+        self.scope_note.set_visible(bool(self.scope_note.get_label()))
+
+    def refresh(self):
+        self.updating = True
+        self.set_options("display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays], self.state.display)
+        self.widgets["mangohud"].set_sensitive(self.state.engine != "nwjs")
+        self.widgets["mangohud"].set_active(self.state.engine != "nwjs" and self.state.values.get("mangohud") == "1")
+        self.updating = False
+        self.refresh_visibility()
+
+    def refresh_visibility(self):
+        self.rows["proton"].set_visible(self.state.proton_controls)
+        self.rows["mod_loaders"].set_visible(self.state.proton_controls)
+        for key in ("casefold", "webgl"):
+            self.rows[key].set_visible(self.state.engine == "nwjs")
+        for key in ("resolution", "fullscreen"):
+            self.rows[key].set_visible(self.state.uses_gamescope)
+        self.note.set_label("MangoHud is unavailable with NW.js." if self.state.engine == "nwjs" else "")
+        self.note.set_visible(self.state.engine == "nwjs")
+
+    def save_preferences(self, *_):
+        self.finish(0, self.state.result())
+
+    def build_picker(self, request):
+        Gtk = self.Gtk
+        self.items = request.get("items", [])
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        for item in self.items:
+            label = Gtk.Label(label=item, xalign=0, selectable=False, wrap=True)
+            label.set_margin_top(10)
+            label.set_margin_bottom(10)
+            self.listbox.append(label)
+        self.body.append(self.listbox)
+        if self.items:
+            self.listbox.select_row(self.listbox.get_row_at_index(0))
+        self.listbox.connect("row-activated", self.save_pick)
+
+    def save_pick(self, *_):
+        row = self.listbox.get_selected_row()
+        if row is not None:
+            self.finish(0, self.items[row.get_index()])
+
+
+def gtk_modules():
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gio, Gtk
+    return Gio, Gtk
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=["check", "preferences", "pick", "info", "error", "question", "log"])
+    parser.add_argument("--title", default="Sandbox game")
+    parser.add_argument("--text", default="")
+    args = parser.parse_args()
+    try:
+        Gio, Gtk = gtk_modules()
+    except (ImportError, ValueError) as error:
+        print(f"sandbox-game: GTK 4 and PyGObject are needed for dialogs: {error}", file=sys.stderr)
+        return 2
+    if args.mode == "check":
+        return 0
+    request = {"title": args.title, "text": args.text.replace("\\n", "\n")}
+    if args.mode in ("preferences", "pick"):
+        request.update(json.load(sys.stdin))
+    elif args.mode == "log":
+        request["text"] = sys.stdin.read()
+    result = 1
+    app = Gtk.Application(application_id="eu.nosini.SandboxGame.Dialog", flags=Gio.ApplicationFlags.NON_UNIQUE)
+
+    def finish(code, response):
+        nonlocal result
+        result = code
+        if response is not None:
+            print(json.dumps(response) if isinstance(response, dict) else response, flush=True)
+        app.quit()
+
+    def activate(application):
+        dialog = Dialog(Gtk, application, args.mode, request, finish)
+        # Keep signal callbacks and their state alive until the window closes.
+        application.dialog = dialog
+        dialog.window.present()
+
+    app.connect("activate", activate)
+    app.run([])
+    return result
+
+
+if __name__ == "__main__":
+    sys.exit(main())

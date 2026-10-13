@@ -33,17 +33,20 @@
 # release directory there whole (the binary needs its stdlib/ beside it) or set
 # MKXP_DIR=/path. Its config lands in ~/game-sandboxes/<name>/mkxp.json and is
 # yours to edit -- that is where a soundfont, RTP paths or fontSub would go.
-# Errors show in a zenity dialog, warnings as a notification once the game is
+# Errors show in a GTK dialog, warnings as a notification once the game is
 # up; full output logs to
 #   ~/game-sandboxes/<name>-lastrun.log
 set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
-msg() { command -v zenity >/dev/null && zenity --info  --no-wrap --text="$1" 2>/dev/null \
-            || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
-die() { command -v zenity >/dev/null && zenity --error --no-wrap --text="$1" 2>/dev/null \
-            || notify-send "sandbox-game" "$1" 2>/dev/null; exit 1; }
+msg() { notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+die() {
+    printf '%b\n' "$1" >&2
+    if declare -F dialog >/dev/null; then dialog error --text="$1" 2>/dev/null && exit 1; fi
+    notify-send "sandbox-game" "$1" 2>/dev/null || true
+    exit 1
+}
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
 # Beside sandbox-game when that is a checkout, else where install.sh puts it.
@@ -87,9 +90,8 @@ find_exes() {                                  # $1 = dir -> best guess first
 pick() {                                       # $1 = dir to strip, $@ = paths
     local dir="$1" rel; shift
     [ "$#" -eq 1 ] && { printf '%s\n' "$1"; return; }
-    rel="$(printf '%s\n' "${@#"$dir"/}" \
-        | zenity --list --title="Pick launcher" --column="Launcher" \
-                 --width=700 --height=400 2>/dev/null)"
+    rel="$(python3 -c 'import json,sys; json.dump({"items": sys.argv[1:]}, sys.stdout)' \
+        "${@#"$dir"/}" | dialog pick --title="Pick launcher")"
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
@@ -335,8 +337,7 @@ GAME=$!
     w="$(awk '/^sandbox-(game|landlock): (warning|note): / { p = 1; sub(/^sandbox-[a-z]+: /, ""); print; next }
               p && /^ / { sub(/^ +/, "  "); print; next } { p = 0 }' "$LOG")"
     [ -n "$w" ] || exit 0
-    notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null \
-        || zenity --notification --text="sandbox-game: ${BASE}\n$w" 2>/dev/null || true
+    notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null || true
 ) </dev/null >/dev/null 2>&1 &
 NOTE=$!
 if wait "$GAME"; then
@@ -345,11 +346,8 @@ if wait "$GAME"; then
 else
     rc=$?
     kill "$NOTE" 2>/dev/null
-    if command -v zenity >/dev/null; then
-        { echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
-          | zenity --text-info --title="sandbox-game failed (${BASE})" \
-                   --width=1000 --height=650 2>/dev/null
-    else
+    if ! { echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
+        | dialog log --title="sandbox-game failed (${BASE})"; then
         notify-send "sandbox-game failed (${BASE})" "exit $rc — see $LOG" 2>/dev/null
     fi
     exit "$rc"

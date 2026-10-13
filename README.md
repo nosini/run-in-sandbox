@@ -74,6 +74,7 @@ What goes where:
 |---|---|
 | `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
 | `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` and `nwjs-casefold.js` (mode 644) | `~/.local/lib/sandbox-game/` |
+| `sandbox-game-dialog` | `~/.local/lib/sandbox-game/` |
 | `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
 | `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
@@ -119,13 +120,18 @@ unprivileged user namespaces cover what setuid was for. If yours disables them
 | Binary | Usual package | Why |
 |---|---|---|
 | `nautilus` | `nautilus` | the scripts are Nautilus scripts |
-| `zenity` | `zenity` | launcher picker, error window, the whole preferences dialog |
-| `notify-send` | `libnotify` / `libnotify-bin` / `libnotify-tools` | fallback when zenity is missing |
+| GTK 4 and Python PyGObject | see below | preferences, launcher picker, error windows and confirmations |
+| `notify-send` | `libnotify` / `libnotify-bin` / `libnotify-tools` | launch and warning notifications; fallback for error messages |
 
-The preferences dialog refuses to start without zenity. The launcher degrades to
-`notify-send` and, failing that, to silence.
+The dialogs use GTK 4 through the system Python bindings. On Debian/Ubuntu,
+install `python3-gi` and `gir1.2-gtk-4.0`; on Fedora, `python3-gobject` and
+`gtk4`; on openSUSE, `python3-gobject`, `python3-gobject-Gdk`,
+`typelib-1_0-Gtk-4_0` and `libgtk-4-1`. See
+[PyGObject's installation guide](https://pygobject.gnome.org/getting_started.html)
+for other distributions. Without them, preferences and launcher pickers cannot
+open, and the stop script leaves the game running when it cannot ask for confirmation.
 
-Only the two scripts are Nautilus-specific, and only for how they learn what was
+Only the file-manager scripts are Nautilus-specific, and only for how they learn what was
 selected — `sandbox-game` itself has no GUI dependency at all. Another file
 manager with a scripts or custom-actions feature can call them the same way if
 it sets `NAUTILUS_SCRIPT_SELECTED_FILE_PATHS`; otherwise they fall back to the
@@ -356,15 +362,16 @@ the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
 
-**Sandbox game preferences** — when a Windows `.exe` is present, choose
-**Launch with → Automatic** or **Proton (Windows .exe)** first. Proton skips
+**Sandbox game preferences** — a single window for the launcher, display,
+MangoHud, network, gamescope resolution and fullscreen, and engine settings.
+When a Windows `.exe` is present, **Launch with** offers **Automatic** and
+**Proton (Windows .exe)**. Proton skips
 NW.js, mkxp-z, PGMMV and native `.sh` launchers and runs the Windows executable.
 This choice is saved per game or as the library-wide default; choose Automatic
 for an individual game to override a default that forces Proton. The Windows
 executable still gets a picker when several candidates remain.
 
-The next dialog sets the display, MangoHud, the Proton version, mod
-loaders and internet access, saved in the same scope. The display is
+Changing the launcher updates the controls in that same window. The display is
 one choice, each entry saying what happens: native Wayland; native Wayland in
 gamescope; X11 in gamescope (private Xwayland); or the host X server. Only
 what the game can do is offered — a Windows game does not get Wayland in
@@ -372,9 +379,9 @@ gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version and mod loaders are asked for
 Windows games only; whether file names ignore case, and what WebGL runs on, for RPG Maker
-MV/MZ only. Choosing gamescope opens a second dialog for resolution and
-fullscreen. This is why there is one launcher entry rather than one per flag
-combination.
+MV/MZ only. Choosing gamescope shows resolution and fullscreen controls inline.
+Save applies all changes together; Cancel or closing the window leaves the
+settings untouched.
 
 **Stop sandboxed game** — right-click the game, as for launching it, to end
 its sandbox after a confirmation: `sandbox-game --stop` for a game hung in
