@@ -52,6 +52,14 @@ class PreferencePolicyTests(unittest.TestCase):
         plain = Preferences({"engine": "native", "values": {"dotnet": "1"}})
         self.assertNotIn("dotnet", plain.result())
 
+    def test_native_proton_only_for_native_programs_beside_windows_ones(self):
+        state = Preferences({"engine": "native", "can_proton": True, "values": {"with_proton": "GE-Test"}})
+        self.assertEqual(state.result()["with_proton"], "GE-Test")
+        state.set_runtime("proton")
+        self.assertNotIn("with_proton", state.result())
+        plain = Preferences({"engine": "native", "values": {"with_proton": "auto"}})
+        self.assertNotIn("with_proton", plain.result())
+
 
 class GtkDialogTests(unittest.TestCase):
     ids = itertools.count()
@@ -137,6 +145,19 @@ class GtkDialogTests(unittest.TestCase):
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["dotnet"], "1")
         self.assertFalse(self.create("preferences", {"engine": "native"}).rows["dotnet"].get_visible())
+
+    def test_native_proton_choice_starts_at_none(self):
+        dialog = self.create("preferences", {"engine": "native", "can_proton": True, "protons": ["GE-Test"]})
+        self.assertTrue(dialog.rows["with_proton"].get_visible())
+        self.assertEqual(dialog.choices["with_proton"][:3],
+                         [("", "None"), ("auto", "Newest installed (auto)"), ("GE-Test", "GE-Test")])
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["with_proton"], "")
+        dialog.widgets["with_proton"].set_selected(2)
+        dialog.save_preferences()
+        self.assertEqual(self.responses[1][1]["with_proton"], "GE-Test")
+        self.assertFalse(self.create("preferences", {"engine": "nwjs", "can_proton": True})
+                         .rows["with_proton"].get_visible())
 
     def test_cancel_after_editing_returns_no_preferences(self):
         dialog = self.create("preferences", {"engine": "pgmmv", "can_proton": True})

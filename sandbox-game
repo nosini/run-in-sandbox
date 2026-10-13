@@ -75,6 +75,10 @@
 #               install .NET to run this application". =DIR names the
 #               install; else $DOTNET_ROOT, /etc/dotnet/install_location,
 #               ~/.dotnet, the usual system folders and the dotnet on PATH.
+#   --with-proton  for a native program that starts Wine itself (a game's own
+#               Linux launcher, say): the Proton install, read-only at /proton,
+#               for it to find there. =VER as for --proton. The program is
+#               still what runs; point it at /proton/files/bin/wine.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -479,6 +483,8 @@ Runtimes
   --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
   --dotnet[=DIR]        the host's .NET runtime, for a .NET program that does
                         not bundle it
+  --with-proton[=VER]   Proton at /proton, read-only, for a native program
+                        that starts Wine itself
 
 Access
   --net                 the internet, and only that: no LAN, nothing on this
@@ -527,7 +533,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
-DOTNET_SPEC=""
+DOTNET_SPEC=""; WITH_PROTON_SPEC=""
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -560,6 +566,9 @@ while [ "$#" -gt 0 ]; do
         --pgmmv=*)   PGMMV_SPEC="${1#--pgmmv=}"; PGMMV_SPEC="${PGMMV_SPEC:-auto}"; shift ;;
         --dotnet)    DOTNET_SPEC="auto"; shift ;;
         --dotnet=*)  DOTNET_SPEC="${1#--dotnet=}"; DOTNET_SPEC="${DOTNET_SPEC:-auto}"; shift ;;
+        --with-proton) WITH_PROTON_SPEC="auto"; shift ;;
+        --with-proton=*) WITH_PROTON_SPEC="${1#--with-proton=}"
+                     WITH_PROTON_SPEC="${WITH_PROTON_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
@@ -574,6 +583,8 @@ done
     echo "--pgmmv, --proton and --mkxp are mutually exclusive" >&2; exit 1; }
 [ "$MODS" = 0 ] || [ -n "$PROTON_SPEC" ] || {
     echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
+[ -z "$WITH_PROTON_SPEC" ] || [ -z "$PROTON_SPEC" ] || {
+    echo "--with-proton is for native programs; --proton already brings Proton along" >&2; exit 1; }
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
 GAMEDIR="$(realpath "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
@@ -660,15 +671,21 @@ find_proton() {                       # $1 = auto | name substring | path
     printf '%s\n' "$best"
 }
 
+# The install --proton or --with-proton asked for, or say where none was found.
+need_proton() {                       # $1 = auto | name substring | path
+    local p="${PROTON_DIR:-$(find_proton "$1")}"
+    [ -n "$p" ] && [ -x "$p/proton" ] && { printf '%s\n' "$p"; return; }
+    [ "$1" = auto ] && echo "no Proton install found" >&2 \
+                    || echo "no Proton install matching '$1'" >&2
+    echo "looked for a dir containing an executable 'proton' under:" >&2
+    proton_roots | while IFS= read -r r; do echo "  $r" >&2; done
+    echo "override with PROTON_DIR=/path/to/proton-install" >&2
+    return 1
+}
+
 PROTON=""; PROTON_ARGS=()
 if [ -n "$PROTON_SPEC" ]; then
-    PROTON="${PROTON_DIR:-$(find_proton "$PROTON_SPEC")}"
-    [ -n "$PROTON" ] && [ -x "$PROTON/proton" ] || {
-        [ "$PROTON_SPEC" = auto ] && echo "no Proton install found" >&2 \
-                                  || echo "no Proton install matching '$PROTON_SPEC'" >&2
-        echo "looked for a dir containing an executable 'proton' under:" >&2
-        proton_roots | while IFS= read -r r; do echo "  $r" >&2; done
-        echo "override with PROTON_DIR=/path/to/proton-install" >&2; exit 1; }
+    PROTON="$(need_proton "$PROTON_SPEC")" || exit 1
     mkdir -p "$CAP/compat" "$CAP/steam"
     # STEAM_COMPAT_CLIENT_INSTALL_PATH is read unconditionally by proton's
     # setup_prefix(), so it has to exist -- but it is only mined for optional
@@ -893,6 +910,24 @@ if [ -n "$DOTNET_SPEC" ]; then
     SANDBOX_PATH="$SANDBOX_PATH:/dotnet"
 fi
 
+# ---- Proton for a native program -------------------------------------------
+# Some native programs run Wine themselves -- a private server's own Linux
+# launcher that installs and starts the Windows game. They get the Proton
+# install read-only, without its proton script being involved: the program
+# is what runs, with whatever WINEPREFIX it picks, all of which lands in the
+# overlay or the capture's home like the rest of its writes.
+WITH_PROTON=""; WITH_PROTON_ARGS=()
+if [ -n "$WITH_PROTON_SPEC" ]; then
+    WITH_PROTON="$(need_proton "$WITH_PROTON_SPEC")" || exit 1
+    WITH_PROTON_ARGS=( --ro-bind "$WITH_PROTON" /proton )
+    # Said in the log only: it is where the program has to be pointed.
+    for w in files/bin/wine dist/bin/wine; do
+        [ ! -x "$WITH_PROTON/$w" ] || {
+            echo "sandbox-game: $(basename "$WITH_PROTON") is at /proton; its Wine is /proton/$w" >&2
+            break; }
+    done
+fi
+
 # Wine's Wayland driver will not start on gamescope's own Wayland server: it
 # requires wl_subcompositor and wp_viewporter (winewayland.drv, wayland.c),
 # which gamescope does not offer. With Proton's Wayland setting that driver
@@ -1058,8 +1093,9 @@ fi
 # -- for Wine, instead of wineserver or fsync doing it in user space. Wine and
 # Proton builds that know it use it when they can open it, and CPU-bound games
 # gain from that. It is a young driver, and one more within a game's reach,
-# so no other engine gets it. -try: kernels without it leave it out.
-[ -z "$PROTON" ] || DEVICE_ARGS+=( --dev-bind-try /dev/ntsync /dev/ntsync )
+# so no other engine gets it -- bar a native program running Proton's Wine
+# itself. -try: kernels without it leave it out.
+[ -z "$PROTON$WITH_PROTON" ] || DEVICE_ARGS+=( --dev-bind-try /dev/ntsync /dev/ntsync )
 if [ "$WAYLAND" = 1 ]; then
     if [ -n "$PROTON" ]; then
         VIDEO_ENV+=( --setenv STEAM_COMPAT_CONFIG wayland )
@@ -1433,6 +1469,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${MKXP_ARGS[@]}"
     "${PGMMV_ARGS[@]}"
     "${DOTNET_ARGS[@]}"
+    "${WITH_PROTON_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
     "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above

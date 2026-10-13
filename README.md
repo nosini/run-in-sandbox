@@ -343,12 +343,13 @@ Saves in the player's home go under `~/game-sandboxes/<name>/home/`; saves and
 movies need system VLC; games that require Windows DLL plugins may not work
 with the Linux player. Use `--proton` explicitly to run their Windows player.
 
-#### Native .NET programs
+#### Native programs that need .NET, or run Wine themselves
 
-Some games come with a Linux launcher of their own, written in .NET. A private
-server's launcher is a typical example. The **.NET runtime** preference covers
-what such a launcher needs from outside the sandbox. It applies only when the
-game runs natively, through a `.sh` or the launcher itself.
+Some games come with a Linux launcher of their own, written in .NET, that
+downloads the Windows game and starts it with Wine. A private server's launcher
+is a typical example. Two preferences cover what such a launcher needs from
+outside the sandbox. Both apply only when the game runs natively, through a
+`.sh` or the launcher itself.
 
 **.NET runtime.** A .NET program published without the runtime bundled stops
 at once with *You must install .NET to run this application*, even when .NET is
@@ -363,6 +364,12 @@ in `$DOTNET_ROOT_X64` or `$DOTNET_ROOT_ARM64` before `$DOTNET_ROOT`, then
 and beside the `dotnet` on `PATH`. `--dotnet=DIR` names it outright. If a
 launch fails with that message, the failure window says which of these to
 change.
+
+**Proton for a program that starts Wine itself.** This mounts a Proton install
+read-only at `/proton`, without running the game through it: the program
+starts Wine when and how it likes. Point the program at
+`/proton/files/bin/wine` (the launch log names the path). The Wine prefix it
+makes and everything it downloads land in the overlay like any other write.
 
 A launcher that lives in a subfolder of the game, next to the folder it
 installs the game into, needs a sandbox for the whole thing. Put a small script
@@ -415,8 +422,9 @@ gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version and mod loaders are asked for
 Windows games only; whether file names ignore case, and what WebGL runs on, for RPG Maker
-MV/MZ only. The .NET runtime is asked for native .NET programs only; see
-[Native .NET programs](#native-net-programs).
+MV/MZ only. The .NET runtime and Proton for a program that starts Wine itself
+are asked for native programs only; see [Native programs that need .NET, or run
+Wine themselves](#native-programs-that-need-net-or-run-wine-themselves).
 Choosing gamescope shows resolution and fullscreen controls inline.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
@@ -437,7 +445,7 @@ fullscreen or one that will not quit, without a terminal.
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
-             [--dotnet[=DIR]]
+             [--dotnet[=DIR]] [--with-proton[=VER]]
              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
@@ -465,6 +473,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--net` | internet access, and only that; see [Network](#network) |
 | `--dotnet[=DIR]` | the host's .NET runtime, read-only at `/dotnet` |
+| `--with-proton[=VER]` | a Proton install, read-only at `/proton`, for a native program that starts Wine itself |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
@@ -940,6 +949,7 @@ gamescope_args=-f -W 2560 -H 1440
 env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
 dotnet=0|1
+with_proton=|auto|<install name>
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -963,6 +973,7 @@ them.
 when launching from the file manager.
 
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
+`with_proton` applies only when the game runs natively; empty means none.
 
 ## Known rough edges
 

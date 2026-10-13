@@ -929,6 +929,24 @@ class SecurityTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no .NET runtime at", result.stderr)
 
+    def test_native_programs_can_be_given_proton(self):
+        proton = self.base / "GE-Test"
+        (proton / "files" / "bin").mkdir(parents=True)
+        for f in (proton / "proton", proton / "files" / "bin" / "wine"):
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        self.env["PROTON_DIR"] = str(proton)
+        script = ('test -x /proton/files/bin/wine && echo found; '
+                  '{ touch /proton/x; } 2>/dev/null && echo writable || true; pwd')
+        result = self.run_guest(script, "--with-proton")
+        self.assertEqual(result.stdout.splitlines(), ["found", "/game"])
+        self.assertIn("its Wine is /proton/files/bin/wine", result.stderr)
+        self.assertNotIn("found", self.run_guest(script).stdout)
+        self.assertIn("/dev/ntsync", self.recorded_args("--with-proton"))
+        refused = self.cli("--headless", "--with-proton", "--proton", self.game, "game.exe", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--proton already", refused.stderr)
+
     def test_check_reports_every_protection(self):
         result = self.cli("--check", check=False)
         lines = result.stdout.splitlines()
@@ -1428,6 +1446,15 @@ print(json.dumps({{
             '{"runtimeOptions": {"framework": {"name": "Microsoft.NETCore.App"}}}')
         self.assertNotIn("--dotnet", self.launch_with(recorded, game, "dotnet=1\nlaunch_with=proton\n"))
 
+    def test_launcher_gives_proton_to_native_programs_only(self):
+        recorded = self.stub_launcher()
+        game = self.dotnet_launcher()
+        self.assertIn("--with-proton=GE-Test", self.launch_with(recorded, game, "with_proton=GE-Test\n"))
+        self.assertIn("--with-proton", self.launch_with(recorded, game, "with_proton=auto\n"))
+        for prefs in ("with_proton=\n", "", "with_proton=auto\nlaunch_with=proton\n"):
+            args = self.launch_with(recorded, game, prefs)
+            self.assertFalse([a for a in args if a.startswith("--with-proton")], (prefs, args))
+
     def test_failure_window_points_dotnet_programs_at_the_preference(self):
         self.stub_launcher('echo "You must install .NET to run this application." >&2; exit 131')
         game = self.dotnet_launcher()
@@ -1462,6 +1489,15 @@ print(json.dumps({{
         (self.game / "run.sh").write_text("#!/bin/sh\n")
         self.preferences([], self.game)
         self.assertFalse(json.loads(Path(self.env["DIALOG_RECORD"]).read_text())["dotnet"])
+
+    def test_preferences_save_proton_for_native_programs(self):
+        game = self.dotnet_launcher()
+        self.env["TEST_VALUES"] = json.dumps({"with_proton": "auto"})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"], game)
+        self.assertEqual(saved["with_proton"], "auto")
+        self.env["TEST_VALUES"] = json.dumps({"with_proton": ""})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"], game)
+        self.assertNotIn("with_proton", saved)          # none, as the defaults have none
 
     def test_runtime_choice_updates_preferences_and_can_be_cancelled(self):
         (self.game / "www").mkdir()

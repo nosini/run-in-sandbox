@@ -274,6 +274,9 @@ DOTNET_APP=0
 if [ -z "$APPDIR" ] && [ "$PROTON" = 0 ] && [ "$MKXP" = 0 ] && [ "$PGMMV" = 0 ]; then
     is_dotnet "$GAMEDIR" && DOTNET_APP=1
     [ "$DOTNET_APP" = 1 ] && [ "$(cfg_get dotnet 0)" = 1 ] && FLAG+=( --dotnet )
+    # Proton, for one that starts Wine itself.
+    WP="$(cfg_get with_proton "")"
+    if [ "$WP" = auto ]; then FLAG+=( --with-proton ); elif [ -n "$WP" ]; then FLAG+=( "--with-proton=$WP" ); fi
 fi
 if [ -n "$APPDIR" ] && [ "$(cfg_get casefold 1)" = 1 ] && [ -f "$CASEFOLD" ]; then
     RO+=( --ro "$CASEFOLD" /nwjs-casefold.js )
