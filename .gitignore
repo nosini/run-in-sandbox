@@ -3,5 +3,8 @@
 # convenience should not end up in history.
 mkxp-z/
 
+# Locally built Pixel Game Maker MV player bundle.
+pgmmv-player-decrypt/
+
 # Byte-code left behind by running the test suite.
 __pycache__/

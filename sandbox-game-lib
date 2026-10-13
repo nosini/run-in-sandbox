@@ -65,6 +65,22 @@ resolve_selection() {                          # $1 = selected path
     else
         R_GAMEDIR="$(dirname "$sel")"
     fi
+    # PGMMV's project lives in data/, sometimes below Resources/. Selecting
+    # that folder or project.json should use the same sandbox as player.exe.
+    local part base
+    for part in data resources; do
+        base="${R_GAMEDIR##*/}"
+        if [ "${base,,}" = "$part" ] && is_pgmmv "$(dirname "$R_GAMEDIR")"; then
+            R_GAMEDIR="$(dirname "$R_GAMEDIR")"
+        fi
+    done
+}
+
+# Both exported (including encrypted) games and editor projects have this
+# file. Match case as the Linux player does, without parsing encrypted JSON.
+is_pgmmv() {
+    find "$1" -maxdepth 3 -type f -iname project.json -printf '%P\n' 2>/dev/null \
+        | grep -iEx 'data/project[.]json|resources/data/project[.]json' >/dev/null
 }
 
 # RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
@@ -78,9 +94,9 @@ is_rgss() {
 }
 
 # What "Sandbox game" will run a selection with, in the order it goes by: an
-# NW.js app, a .sh launcher, an RGSS game under mkxp-z, a Windows .exe under
+# NW.js app, a .sh launcher, a PGMMV or RGSS game, a Windows .exe under
 # Proton. For the preferences, which offer only what that engine can do.
-# Sets R_ENGINE to nwjs, native, mkxp, proton, or empty when nothing is found.
+# Sets R_ENGINE to nwjs, native, pgmmv, mkxp, proton, or empty when nothing is found.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
 game_engine() {                                # $1 = selected path, after resolve_selection
     R_ENGINE=""
@@ -89,6 +105,8 @@ game_engine() {                                # $1 = selected path, after resol
     elif [ -d "$1" ]; then
         if [ -n "$(find "$R_GAMEDIR" -maxdepth 1 -type f -name '*.sh' -print -quit 2>/dev/null)" ]; then
             R_ENGINE=native
+        elif is_pgmmv "$R_GAMEDIR"; then
+            R_ENGINE=pgmmv
         elif is_rgss "$R_GAMEDIR"; then
             R_ENGINE=mkxp
         elif [ -n "$(find "$R_GAMEDIR" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]; then
@@ -96,7 +114,9 @@ game_engine() {                                # $1 = selected path, after resol
         fi
     else
         case "${1,,}" in
-            *.exe) if is_rgss "$R_GAMEDIR"; then R_ENGINE=mkxp; else R_ENGINE=proton; fi ;;
+            *.exe) if is_pgmmv "$R_GAMEDIR"; then R_ENGINE=pgmmv
+                   elif is_rgss "$R_GAMEDIR"; then R_ENGINE=mkxp; else R_ENGINE=proton; fi ;;
+            *.json) if is_pgmmv "$R_GAMEDIR"; then R_ENGINE=pgmmv; else R_ENGINE=native; fi ;;
             *)     R_ENGINE=native ;;
         esac
     fi

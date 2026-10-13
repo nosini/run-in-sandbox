@@ -5,6 +5,7 @@
 #   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
 #   * Ren'Py / native    -> right-click the game folder or its .sh launcher
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
+#   * Pixel Game Maker MV -> native Linux player (folder or player.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
 #
 # Wayland, MangoHud, the Proton version and mod loaders come from saved
@@ -92,7 +93,7 @@ pick() {                                       # $1 = dir to strip, $@ = paths
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
 
-RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; ALLOW_MANGOHUD=1
+RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; PGMMV=0; ALLOW_MANGOHUD=1
 
 # ---- figure out what was selected -----------------------------------------
 # Shared with the preferences dialog, so both agree on which game this is.
@@ -195,35 +196,38 @@ EOF
         exec "$d/$name" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
     ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
 else
-    # ----- native (.sh), else RGSS via mkxp-z, else Windows (.exe) via Proton --
+    # ----- native (.sh), else PGMMV/RGSS, else Windows (.exe) via Proton ------
     # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
     # in the same folder, and running the Linux build beats emulating the other.
-    # RGSS comes next, so an RPG Maker VX Ace game runs natively under mkxp-z
-    # rather than dragging its Game.exe through Wine.
+    # Recognised PGMMV/RGSS games use their native replacement players.
     LAUNCHER=""; GAMEDIR="$R_GAMEDIR"
     if [ -d "$SEL" ]; then
         mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
         if [ "${#shs[@]}" -gt 0 ]; then
             LAUNCHER="$(pick "$GAMEDIR" "${shs[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
+        elif is_pgmmv "$GAMEDIR"; then
+            PGMMV=1
         elif is_rgss "$GAMEDIR"; then
             MKXP=1
         else
             mapfile -t exes < <(find_exes "$GAMEDIR")
             [ "${#exes[@]}" -gt 0 ] \
-                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, an RGSS game, a .sh launcher and a .exe."
+                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a PGMMV or RGSS game, a .sh launcher and a .exe."
             LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
             PROTON=1
         fi
     else
         LAUNCHER="$SEL"
-        # Game.exe inside an RGSS folder is still an mkxp-z game.
+        # Selecting a Windows player still uses a recognised native runtime.
         case "${SEL,,}" in
-            *.exe) if is_rgss "$GAMEDIR"; then MKXP=1; else PROTON=1; fi ;;
+            *.exe) if is_pgmmv "$GAMEDIR"; then PGMMV=1
+                   elif is_rgss "$GAMEDIR"; then MKXP=1; else PROTON=1; fi ;;
+            *.json) is_pgmmv "$GAMEDIR" && PGMMV=1 ;;
         esac
     fi
-    if [ "$MKXP" = 1 ]; then
+    if [ "$MKXP" = 1 ] || [ "$PGMMV" = 1 ]; then
         CMD=()            # the runtime is the program, so there is no launcher
     else
         REL="${LAUNCHER#"$GAMEDIR"/}"
@@ -278,7 +282,9 @@ fi
 # environment, not a shell's, so anything the game needs has to be recorded.
 read -r -a CFG_ENV <<<"$(cfg_get env "")"
 for e in ${CFG_ENV[@]+"${CFG_ENV[@]}"}; do FLAG+=( "--env=$e" ); done
-if [ "$MKXP" = 1 ]; then
+if [ "$PGMMV" = 1 ]; then
+    FLAG+=( "--pgmmv${PGMMV_DIR:+=$PGMMV_DIR}" )
+elif [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 elif [ "$PROTON" = 1 ]; then
     # An exported PROTON_VER still wins, matching NWJS_DIR/MKXP_DIR/PROTON_DIR.

@@ -102,7 +102,7 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "XDG_DATA_HOME",
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "XDG_DATA_HOME",
                     "SANDBOX_GPU_CARD"):
             self.env.pop(key, None)
         # A tools folder of the test's own, never the real one.
@@ -689,6 +689,99 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(save("Game default (no override)\tNo"), ["gamescope_args="])
         self.assertEqual(effective(), "")
 
+    def test_pgmmv_launcher_and_preferences_agree(self):
+        # Encrypted project data is recognised without parsing it. Selecting
+        # the Windows player or the project must keep the same sandbox key.
+        project = self.game / "Resources" / "Data" / "Project.json"
+        project.parent.mkdir(parents=True)
+        project.write_bytes(b"enc\0not-json")
+        exe = self.game / "player.exe"
+        exe.touch()
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        self.env["PATH"] = "/usr/bin:/bin"
+        self.env["PGMMV_DIR"] = str(self.base / "player bundle")
+        for selection in (self.game, exe, project, project.parent, project.parent.parent):
+            with self.subTest(selection=selection):
+                self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(selection)
+                result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = recorded.read_text().splitlines()
+                self.assertEqual(args[-1], str(self.game))
+                self.assertIn("--pgmmv=" + self.env["PGMMV_DIR"], args)
+                self.assertNotIn("--proton", args)
+                combos, _ = self.preferences([], selection, gamedir=self.game)
+                self.assertNotIn("Proton version", combos)
+                self.assertNotIn("Mod loaders", combos)
+        # A shipped Linux launcher remains the first choice for the folder.
+        (self.game / "native.sh").write_text("#!/bin/sh\n")
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded.read_text().splitlines()[-1], "/game/native.sh")
+
+    def test_pgmmv_bundle_and_display(self):
+        bundle = self.home / ".local" / "opt" / "pgmmv-player-decrypt-1"
+        (bundle / "bin").mkdir(parents=True)
+        player = bundle / "bin" / "pgmmv-player"
+        player.write_text("#!/bin/sh\n")
+        player.chmod(0o755)
+        for display, session in (([], "x11"), (["--wayland"], "wayland"),
+                                 (["--headless"], "x11")):
+            with self.subTest(display=display):
+                args = self.recorded_args("--pgmmv", *display)
+                self.assertIn(["--ro-bind", str(bundle), "/pgmmv"],
+                              [args[i:i + 3] for i in range(len(args))])
+                self.assertIn(["--setenv", "XDG_SESSION_TYPE", session],
+                              [args[i:i + 3] for i in range(len(args))])
+                self.assertIn(["--ro", "/pgmmv"],
+                              [args[i:i + 2] for i in range(len(args))])
+                self.assertEqual(args[-3:], ["/pgmmv/bin/pgmmv-player",
+                                             "--game-dir=/game", "/bin/true"])
+        # The command is optional, and an explicit environment path wins.
+        self.env["PGMMV_DIR"] = str(bundle)
+        result = self.cli("--headless", "--pgmmv=/missing", self.game)
+        self.assertEqual(json.loads(result.stdout)[-2:],
+                         ["/pgmmv/bin/pgmmv-player", "--game-dir=/game"])
+        self.env.pop("PGMMV_DIR")
+        result = self.cli("--headless", "--pgmmv=/missing", self.game, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PGMMV_DIR", result.stderr)
+        for other in ("--proton", "--mkxp"):
+            result = self.cli("--pgmmv", other, self.game, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("mutually exclusive", result.stderr)
+
+    def test_pgmmv_writes_stay_in_the_sandbox(self):
+        bundle = self.base / "player bundle"
+        (bundle / "bin").mkdir(parents=True)
+        player = bundle / "bin" / "pgmmv-player"
+        player.write_text('#!/bin/sh -e\n'
+                          'test "$1" = --game-dir=/game\n'
+                          'test "$(pwd)" = /game\n'
+                          'test ! -w /pgmmv/bin/pgmmv-player\n'
+                          'printf log > action_log.txt\n'
+                          'mkdir -p "$XDG_DATA_HOME/pgmmv-player/game/save"\n'
+                          'printf save > "$XDG_DATA_HOME/pgmmv-player/game/save/slot1"\n')
+        player.chmod(0o755)
+        self.cli("--headless", "--pgmmv=" + str(bundle), self.game)
+        self.assertFalse((self.game / "action_log.txt").exists())
+        capture = self.home / "game-sandboxes" / "game"
+        self.assertEqual((capture / "rw" / "action_log.txt").read_text(), "log")
+        self.assertEqual((capture / "home" / ".local" / "share" / "pgmmv-player" /
+                          "game" / "save" / "slot1").read_text(), "save")
+
     def test_mkxp_config_keeps_the_runtimes_settings(self):
         # However the runtime's mkxp.json is laid out -- here on one line,
         # after a comment with a brace in it -- its settings carry over into
@@ -1083,7 +1176,7 @@ print(json.dumps({{
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
 
-    def preferences(self, form, game=None):
+    def preferences(self, form, game=None, gamedir=None):
         """Run the preferences dialog on `game` with a zenity that answers
         every form with `form` and records what it was offered."""
         bindir = self.home / ".local" / "bin"         # where the dialog looks
@@ -1109,7 +1202,7 @@ print(json.dumps({{
         lines = offered.read_text().splitlines()
         combos = {lines[i][len("--add-combo="):]: lines[i + 1][len("--combo-values="):].split("|")
                   for i in range(len(lines) - 1) if lines[i].startswith("--add-combo=")}
-        name = self.cli("--print-name", game).stdout.strip()
+        name = self.cli("--print-name", gamedir or game).stdout.strip()
         settings = self.home / ".config" / "sandbox-game" / "games" / name
         saved = dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l) \
             if settings.exists() else {}

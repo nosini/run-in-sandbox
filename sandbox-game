@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-#              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]] GAMEDIR CMD...
+#              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
@@ -63,6 +63,12 @@
 #               mkxp-z resolves everything relative to its own binary, never
 #               the cwd, so the game is handed over as "gameFolder": "/game"
 #               in a generated config bound over the runtime's own mkxp.json.
+#   --pgmmv    run a Pixel Game Maker MV / Action Game Maker MV game with the
+#               native Linux player. CMD is optional: extra player arguments.
+#               =DIR names the whole bundle with bin/, lib/ and share/;
+#               $PGMMV_DIR wins. Otherwise pgmmv-player* under ~/.local/share,
+#               ~/.local/opt and /opt are searched, then this checkout's
+#               pgmmv-player-decrypt/. The bundle is read-only at /pgmmv.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -464,6 +470,7 @@ Runtimes
   --mod-loaders         with --proton: load mod loaders the game ships
                         (BepInEx, MelonLoader, UE4SS, ASI loaders)
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
+  --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
 
 Access
   --net                 the internet, and only that: no LAN, nothing on this
@@ -493,8 +500,9 @@ Examples
   sandbox-game --proton ~/Games/SomeWindowsGame /game/game.exe
   sandbox-game --net --proton=GE-Proton10 ~/Games/Online /game/bin/client.exe
   sandbox-game --mkxp ~/Games/SomeVXAceGame
+  sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 
-Read on the host: PROTON_DIR, MKXP_DIR, NWJS_DIR, SANDBOX_TOOLS_DIR,
+Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, SANDBOX_TOOLS_DIR,
 SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, MANGOHUD=1. Sound is playback only once
 `install.sh --restrict-audio` has set that up. More in the README.
 EOF
@@ -509,7 +517,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
-WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; MHUD=0; PRINT_NAME=0
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
@@ -539,6 +547,8 @@ while [ "$#" -gt 0 ]; do
         --mod-loaders) MODS=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
+        --pgmmv)     PGMMV_SPEC="auto"; shift ;;
+        --pgmmv=*)   PGMMV_SPEC="${1#--pgmmv=}"; PGMMV_SPEC="${PGMMV_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
@@ -549,6 +559,8 @@ while [ "$#" -gt 0 ]; do
 done
 [ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
+[ -z "$PGMMV_SPEC" ] || { [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ]; } || {
+    echo "--pgmmv, --proton and --mkxp are mutually exclusive" >&2; exit 1; }
 [ "$MODS" = 0 ] || [ -n "$PROTON_SPEC" ] || {
     echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
@@ -559,8 +571,8 @@ GAMEDIR="$(realpath "$1")"
     echo "GAMEDIR must be the game's folder, not a file in it: $1" >&2
     echo "(the game's own path then goes after it, under /game)" >&2; exit 1; }
 shift
-# --mkxp supplies its own command: the runtime is the program.
-[ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
+# Native replacement players supply their own command.
+[ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ -n "$PGMMV_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }
 NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 [[ "$NAME" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$NAME" != . ] && [ "$NAME" != .. ] || {
@@ -574,7 +586,7 @@ NAME="${NAME:-$(derive_name "$GAMEDIR")}"
 # A Ren'Py build without SDL's Wayland driver (see renpy_without_wayland in
 # sandbox-game-lib) cannot run under --wayland: it gives way to the default,
 # gamescope's private Xwayland. The preferences do not offer Wayland for it.
-if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] \
+if [ "$WAYLAND" = 1 ] && [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ] && [ -z "$PGMMV_SPEC" ] \
    && renpy_without_wayland "$GAMEDIR"; then
     echo "sandbox-game: note: this Ren'Py build's SDL has no Wayland driver; using gamescope's" \
          "private Xwayland instead of --wayland" >&2
@@ -786,6 +798,43 @@ PY
         --ro-bind "$CAP/mkxp.json" /mkxp/mkxp.json
     )
     set -- "/mkxp/$MKXP_BIN" "$@"
+fi
+
+# ---- Pixel Game Maker MV ---------------------------------------------------
+# Keep bin/, lib/ and share/ together: the player finds its libraries and
+# fallback resources relative to its executable.
+find_pgmmv() {                       # $1 = auto | bundle dir
+    local spec="$1" d
+    if [ "$spec" != auto ]; then
+        printf '%s\n' "$spec"
+        return
+    fi
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}"/pgmmv-player*/ \
+             "$HOME/.local/opt"/pgmmv-player*/ /opt/pgmmv-player*/ \
+             "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/pgmmv-player-decrypt/"; do
+        if [ -x "$d/bin/pgmmv-player" ]; then printf '%s\n' "${d%/}"; return; fi
+    done
+    return 0
+}
+
+PGMMV_ARGS=()
+if [ -n "$PGMMV_SPEC" ]; then
+    PGMMV="${PGMMV_DIR:-$(find_pgmmv "$PGMMV_SPEC")}"
+    [ -n "$PGMMV" ] && [ -x "$PGMMV/bin/pgmmv-player" ] || {
+        echo "no PGMMV Linux player found; unpack the whole bundle into" >&2
+        echo "  ~/.local/share/pgmmv-player-decrypt/ or ~/.local/opt/pgmmv-player*/" >&2
+        echo "or set PGMMV_DIR=/path/to/bundle (containing bin/pgmmv-player)" >&2
+        exit 1; }
+    PGMMV="$(realpath "$PGMMV")"
+    PGMMV_ARGS=( --ro-bind "$PGMMV" /pgmmv )
+    # GLFW selects its platform by the session type. An X11 game under
+    # gamescope must use its private Xwayland even on a Wayland desktop.
+    if [ "$WAYLAND" = 1 ]; then
+        PGMMV_ARGS+=( --setenv XDG_SESSION_TYPE wayland )
+    else
+        PGMMV_ARGS+=( --setenv XDG_SESSION_TYPE x11 )
+    fi
+    set -- /pgmmv/bin/pgmmv-player --game-dir=/game "$@"
 fi
 
 # Wine's Wayland driver will not start on gamescope's own Wayland server: it
@@ -1326,6 +1375,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${OVERLAY_ARGS[@]}"
     "${PROTON_ARGS[@]}"
     "${MKXP_ARGS[@]}"
+    "${PGMMV_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
     "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above

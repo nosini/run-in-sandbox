@@ -141,7 +141,7 @@ _sandbox_game()
                 fi
                 return
             fi ;;
-        --mkxp)
+        --mkxp | --pgmmv)
             [[ $split_here ]] && { _sandbox_game_filedir -d; return; } ;;
     esac
     # --ro's second argument is a path inside the sandbox: nothing to offer.
@@ -149,11 +149,11 @@ _sandbox_game()
         return
     fi
 
-    # --proton, --gamescope and --mkxp take an optional =VALUE; they are
+    # --proton, --gamescope, --mkxp and --pgmmv take an optional =VALUE; they are
     # listed plain, and typing the = gets the values completed.
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --gamescope --host-x11 --headless
-            --proton --mod-loaders --mkxp --net --ro --name --env --mangohud --list --stop
+            --proton --mod-loaders --mkxp --pgmmv --net --ro --name --env --mangohud --list --stop
             --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
         return
     fi

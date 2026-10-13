@@ -131,6 +131,13 @@ fi
 each install_one
 each_old remove_one
 each_completion install_completion
+# A locally supplied PGMMV bundle is optional and stays outside git. Install
+# it whole so the player can find its libraries and resources beside bin/.
+if [ -x "$SRC/pgmmv-player-decrypt/bin/pgmmv-player" ]; then
+    mkdir -p "$DATA/pgmmv-player-decrypt"
+    cp -a "$SRC/pgmmv-player-decrypt/." "$DATA/pgmmv-player-decrypt/"
+    say "installed PGMMV player: $DATA/pgmmv-player-decrypt"
+fi
 mkdir -p "$TOOLS"
 say "tools folder: $TOOLS (unpack a portable Cheat Engine here)"
 

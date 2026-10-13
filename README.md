@@ -33,9 +33,10 @@ enable it for a game you do not trust.
 This is not a complete security boundary against actively malicious software.
 The host kernel, graphics drivers and exposed display services remain shared.
 
-Four engines are handled without being told which is which: RPG Maker MV/MZ
+Five engines are handled without being told which is which: RPG Maker MV/MZ
 (NW.js), Ren'Py and other native `.sh` games, RPG Maker XP/VX/VX Ace (natively,
-via mkxp-z — no Wine), and Windows `.exe` games via Proton.
+via mkxp-z — no Wine), Pixel Game Maker MV (natively, including encrypted
+games), and Windows `.exe` games via Proton.
 
 ## Install
 
@@ -305,16 +306,47 @@ binary moved out on its own will not start. Also searched under
 Japanese games want a Japanese font installed — VL Gothic is the usual one — for
 `fontSub` in `mkxp.json` to have anything to substitute.
 
+#### Pixel Game Maker MV / Action Game Maker MV — Linux player
+
+Download the Linux player bundle from
+[PGMMV-decrypt](https://github.com/nosini/PGMMV-decrypt/releases/latest) and
+unpack it whole into `~/.local/opt/` or `~/.local/share/`, keeping its
+`pgmmv-player*` directory with `bin/`, `lib/` and `share/` together. This uses
+the [Linux port of PGMMV](https://github.com/nosini/PGMMV) with the decoder
+built in, so encrypted exports and plain editor projects use the same launcher.
+`PGMMV_DIR=/path/to/bundle` or `--pgmmv=/path/to/bundle` overrides the search.
+
+If you keep a self-built bundle in this checkout as `pgmmv-player-decrypt/`,
+`./install.sh` copies it into `~/.local/share/pgmmv-player-decrypt/`. That local
+folder is ignored by git, and uninstalling the sandbox scripts keeps the
+installed player. Running `sandbox-game` from the checkout also finds it there.
+
+Right-click the game folder or its `player.exe` and choose **Sandbox game**.
+The launcher recognises `data/project.json` (also under `Resources/`) and uses
+the Linux player. A `.sh` launcher still takes precedence. From the shell:
+
+```sh
+sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
+```
+
+The bundle is mounted read-only at `/pgmmv`, and the game runs at `/game`.
+Saves in the player's home go under `~/game-sandboxes/<name>/home/`; saves and
+`action_log.txt` written into the game folder go into its overlay. Games with
+movies need system VLC; games that require Windows DLL plugins may not work
+with the Linux player. Use `--proton` explicitly to run their Windows player.
+
 ## Usage
 
 ### From Nautilus
 
 **Sandbox game** — right-click the game folder, or the thing inside it that
 looks like a launcher: `www`/`index.html`/`package.json` for RPG Maker MV/MZ,
-the `.sh`, the `.exe`. Dispatch runs in that order, so a Ren'Py or Unity game
+the `.sh`, the `.exe`. A Ren'Py or Unity game
 shipping both a `.sh` and a `.exe` runs the Linux build rather than emulating
 the Windows one, and an RPG Maker VX Ace game runs under mkxp-z rather than
-dragging its `Game.exe` through Wine. `.exe` files are looked for at the top
+dragging its `Game.exe` through Wine. Pixel Game Maker MV games use the Linux
+player when their project data is present, including when selecting `player.exe`.
+`.exe` files are looked for at the top
 level first, then deeper — past a top level with nothing but junk
 (installers, uninstallers, crash handlers, redistributables) in it — and
 several candidates get a picker, with the junk filtered out.
@@ -346,7 +378,7 @@ fullscreen or one that will not quit, without a terminal.
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
-             [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]] GAMEDIR CMD...
+             [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
 ```
@@ -363,6 +395,7 @@ sandbox-game ~/Games/SomeRenpyGame /game/SomeRenpyGame.sh
 sandbox-game --proton ~/Games/SomeWindowsGame /game/game.exe
 sandbox-game --proton=GE-Proton11 ~/Games/Foo /game/bin/foo.exe -windowed
 sandbox-game --mkxp ~/Games/SomeVXAceGame          # CMD omitted: the runtime is the program
+sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/game.x86_64
 ```
 
@@ -378,6 +411,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
 | `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
 | `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
+| `--pgmmv[=DIR]` | run a Pixel Game Maker MV game natively; `CMD` is optional and supplies extra player arguments |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
