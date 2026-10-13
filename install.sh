@@ -186,7 +186,7 @@ command -v systemd-run >/dev/null \
 command -v pasta >/dev/null \
     || warn "pasta not found -- games can only be offered internet access with it (package passt)"
 "$HELPERS/sandbox-game-dialog" check >/dev/null 2>&1 \
-    || warn "GTK 4 / Python PyGObject not found -- the Nautilus dialogs need them"
+    || warn "GTK 4 / libadwaita / Python PyGObject not found -- the Nautilus dialogs need them"
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *) warn "$BIN is not on PATH -- the Nautilus scripts find it anyway, but add it to use the commands from a shell" ;;

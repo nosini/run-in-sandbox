@@ -120,13 +120,14 @@ unprivileged user namespaces cover what setuid was for. If yours disables them
 | Binary | Usual package | Why |
 |---|---|---|
 | `nautilus` | `nautilus` | the scripts are Nautilus scripts |
-| GTK 4 and Python PyGObject | see below | preferences, launcher picker, error windows and confirmations |
+| GTK 4, libadwaita and Python PyGObject | see below | preferences, launcher picker, error windows and confirmations |
 | `notify-send` | `libnotify` / `libnotify-bin` / `libnotify-tools` | launch and warning notifications; fallback for error messages |
 
-The dialogs use GTK 4 through the system Python bindings. On Debian/Ubuntu,
-install `python3-gi` and `gir1.2-gtk-4.0`; on Fedora, `python3-gobject` and
-`gtk4`; on openSUSE, `python3-gobject`, `python3-gobject-Gdk`,
-`typelib-1_0-Gtk-4_0` and `libgtk-4-1`. See
+The dialogs use GTK 4 and libadwaita through the system Python bindings.
+On Debian/Ubuntu, install `python3-gi`, `gir1.2-gtk-4.0` and `gir1.2-adw-1`;
+on Fedora, `python3-gobject`, `gtk4` and `libadwaita`; on openSUSE,
+`python3-gobject`, `python3-gobject-Gdk`, `typelib-1_0-Gtk-4_0`,
+`libgtk-4-1` and `typelib-1_0-Adw-1`. See
 [PyGObject's installation guide](https://pygobject.gnome.org/getting_started.html)
 for other distributions. Without them, preferences and launcher pickers cannot
 open, and the stop script leaves the game running when it cannot ask for confirmation.
@@ -382,6 +383,13 @@ Windows games only; whether file names ignore case, and what WebGL runs on, for 
 MV/MZ only. Choosing gamescope shows resolution and fullscreen controls inline.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
+
+**Appearance (all dialogs)** offers **System**, **Light** and **Dark**, with
+an immediate preview. Save remembers the choice for preferences, launcher
+pickers, error windows and confirmations; Cancel discards the preview.
+Appearance is stored separately in `~/.config/sandbox-game/interface` as
+`theme=system`, `theme=light` or `theme=dark`, independent of per-game settings
+and the **Save for** choice. System follows the desktop's light/dark preference.
 
 **Stop sandboxed game** — right-click the game, as for launching it, to end
 its sandbox after a confirmation: `sandbox-game --stop` for a game hung in
@@ -906,7 +914,7 @@ them.
 
 `host_x11=1` opts into the host X server and overrides the Wayland/gamescope
 choices. `gamescope=0` means automatic: X11 games still use a private gamescope
-instance unless `host_x11=1`. Resolution and fullscreen get a dialog; anything
+instance unless `host_x11=1`. Resolution and fullscreen are shown inline; anything
 else in `gamescope_args`, and all of `env`, is set by hand and carried through
 saves untouched. `env` values cannot contain spaces — the list is split on
 them.

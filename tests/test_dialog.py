@@ -1,6 +1,10 @@
 """Preference policy and GTK signal tests; GUI tests need a display server."""
 import itertools
+import os
 import runpy
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,14 +28,18 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.result()["casefold"], "0")
         self.assertEqual(state.result()["webgl"], "vulkan")
 
-    def test_gamescope_edits_preserve_other_options(self):
+    def test_gamescope_response_contains_only_editable_controls(self):
         state = Preferences({"engine": "native", "values": {
             "gamescope_args": "--fullscreen --output-height 1080 -W 1920 --adaptive-sync -r 60"}})
         state.resolution = ""
         state.fullscreen = False
-        self.assertEqual(state.result()["gamescope_args"], "--adaptive-sync -r 60")
-        state.display = "wayland"
+        self.assertEqual(state.result()["gamescope_resolution"], "")
+        self.assertEqual(state.result()["gamescope_fullscreen"], "0")
         self.assertNotIn("gamescope_args", state.result())
+        self.assertNotIn("--adaptive-sync", repr(state.result()))
+        state.display = "wayland"
+        self.assertNotIn("gamescope_resolution", state.result())
+        self.assertNotIn("gamescope_fullscreen", state.result())
         state.scope = "clear"
         self.assertEqual(state.result(), {"scope": "clear"})
 
@@ -41,22 +49,52 @@ class GtkDialogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            cls.Gio, cls.Gtk = MODULE["gtk_modules"]()
+            cls.Gio, cls.Gtk, cls.Adw = MODULE["gtk_modules"]()
         except (ImportError, ValueError):
-            raise unittest.SkipTest("GTK 4 Python bindings are unavailable")
+            raise unittest.SkipTest("GTK 4 / libadwaita Python bindings are unavailable")
         if not cls.Gtk.init_check():
             raise unittest.SkipTest("GTK needs a display (run with xvfb-run)")
+        cls.Adw.init()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-theme-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.theme_file = Path(self.tmp.name) / "interface"
 
     def create(self, mode, request):
         app = self.Gtk.Application(application_id=f"eu.nosini.SandboxGame.Test{next(self.ids)}",
                                    flags=self.Gio.ApplicationFlags.NON_UNIQUE)
         app.register(None)
         self.responses = []
+        appearance = MODULE["Appearance"](self.Adw, self.theme_file)
         dialog = MODULE["Dialog"](self.Gtk, app, mode, request,
-                                  lambda code, response: self.responses.append((code, response)))
+                                  lambda code, response: self.responses.append((code, response)), appearance)
         self.addCleanup(dialog.window.destroy)
         self.app = app
         return dialog
+
+    def test_dark_theme_previews_then_cancel_restores_without_saving(self):
+        dialog = self.create("preferences", {"engine": "native"})
+        dialog.widgets["appearance"].set_selected(2)
+        self.assertTrue(dialog.appearance.manager.get_dark())
+        self.assertFalse(self.theme_file.exists())
+        dialog.cancel()
+        self.assertFalse(self.theme_file.exists())
+        self.assertEqual(dialog.appearance.manager.get_color_scheme(), self.Adw.ColorScheme.DEFAULT)
+
+    def test_saved_dark_theme_is_used_by_other_dialogs(self):
+        dialog = self.create("preferences", {"engine": "native"})
+        dialog.widgets["appearance"].set_selected(2)
+        dialog.save_preferences()
+        self.assertEqual(self.theme_file.read_text(), "theme=dark\n")
+        self.assertNotIn("theme", self.responses[0][1])  # independent of game/default scope
+        message = self.create("error", {"text": "Game failed"})
+        self.assertTrue(message.appearance.manager.get_dark())
+        light = self.create("preferences", {"engine": "native"})
+        light.widgets["appearance"].set_selected(1)
+        self.assertFalse(light.appearance.manager.get_dark())
+        light.save_preferences()
+        self.assertEqual(self.theme_file.read_text(), "theme=light\n")
 
     def test_launcher_changes_controls_inside_the_same_window(self):
         dialog = self.create("preferences", {"engine": "nwjs", "can_proton": True,
@@ -99,3 +137,40 @@ class GtkDialogTests(unittest.TestCase):
         label = message.body.get_first_child()
         self.assertEqual(label.get_label(), "<b>game</b> & log")
         self.assertFalse(label.get_use_markup())
+
+    def test_log_bytes_open_and_close_with_strict_and_surrogateescape_stdin(self):
+        # Exercise main's input decoding and the real GTK application loop.
+        # A watchdog makes the old invisible-window failure exit promptly.
+        script = r'''
+import os, runpy, sys
+from gi.repository import GLib
+path = sys.argv[1]
+module = runpy.run_path(path)
+main = module["main"]
+original = main.__globals__["Dialog"]
+def inspect_dialog(*args):
+    dialog = original(*args)
+    buffer = dialog.body.get_first_child().get_buffer()
+    text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    assert text == "caf\ufffd\nUTF-8: caf\u00e9\n", repr(text)
+    def close():
+        if not dialog.window.get_mapped():
+            return True
+        dialog.buttons.get_first_child().emit("clicked")
+        print("window opened and closed", flush=True)
+        return False
+    GLib.timeout_add(50, close)
+    return dialog
+main.__globals__["Dialog"] = inspect_dialog
+GLib.timeout_add(2000, lambda: os._exit(3))
+sys.argv = [path, "log"]
+sys.exit(main())
+'''
+        for errors in ("strict", "surrogateescape"):
+            with self.subTest(errors=errors):
+                env = {**os.environ, "PYTHONIOENCODING": "utf-8:" + errors}
+                result = subprocess.run(
+                    [sys.executable, "-c", script, str(Path(__file__).resolve().parents[1] / "sandbox-game-dialog")],
+                    input=b"caf\xe9\nUTF-8: caf\xc3\xa9\n", capture_output=True, env=env, timeout=5, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+                self.assertIn(b"window opened and closed", result.stdout)

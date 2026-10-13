@@ -40,7 +40,7 @@ if dialog question --title="Stop sandboxed game" --text="Stop $NAME?\n\nAnything
 else
     rc=$?
     [ "$rc" != 1 ] || exit 0
-    die "Cannot show the stop confirmation. Install GTK 4 and the Python PyGObject bindings."
+    die "Cannot show the stop confirmation. Install GTK 4, libadwaita and the Python PyGObject bindings."
 fi
 if ! OUT="$("$SANDBOX" --stop "$NAME" 2>&1)"; then
     case "$OUT" in

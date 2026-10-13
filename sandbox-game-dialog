@@ -2,7 +2,10 @@
 """Host-side GTK dialogs. Requests and preference responses use plain JSON."""
 import argparse
 import json
+import os
 import sys
+import tempfile
+from pathlib import Path
 
 DISPLAY_CHOICES = {
     "wayland": "Native Wayland",
@@ -10,6 +13,48 @@ DISPLAY_CHOICES = {
     "x11": "X11, in gamescope (private Xwayland)",
     "host-x11": "Host X11 (other X apps can watch and control it)",
 }
+
+
+class Appearance:
+    """Application-wide theme; previewing never writes the desktop settings."""
+
+    def __init__(self, Adw, path=None):
+        self.schemes = {"system": Adw.ColorScheme.DEFAULT,
+                        "light": Adw.ColorScheme.FORCE_LIGHT,
+                        "dark": Adw.ColorScheme.FORCE_DARK}
+        config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        self.path = path if path is not None else config / "sandbox-game" / "interface"
+        self.saved_theme = "system"
+        try:
+            for line in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == "theme":
+                    self.saved_theme = value.strip()
+        except OSError:
+            pass
+        if self.saved_theme not in self.schemes:
+            self.saved_theme = "system"
+        self.manager = Adw.StyleManager.get_default()
+        self.preview(self.saved_theme)
+
+    def preview(self, theme):
+        self.manager.set_color_scheme(self.schemes[theme])
+
+    def save(self, theme):
+        if theme == self.saved_theme:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
+                                             prefix=".interface-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write("theme=" + theme + "\n")
+            temporary.replace(self.path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        self.saved_theme = theme
 
 
 def gamescope_parts(text):
@@ -37,16 +82,6 @@ def gamescope_parts(text):
     return (f"{width}x{height}" if width and height else ""), fullscreen, rest
 
 
-def gamescope_args(resolution, fullscreen, rest):
-    words = []
-    if resolution:
-        width, height = resolution.split("x", 1)
-        words += ["-W", width, "-H", height]
-    if fullscreen:
-        words.append("-f")
-    return " ".join(words + rest)
-
-
 class Preferences:
     """Preferences that remain unsaved until the window's Save button is used."""
 
@@ -67,7 +102,7 @@ class Preferences:
             self.display = "wayland-gamescope" if self.values.get("gamescope") == "1" else "wayland"
         else:
             self.display = "x11"
-        self.resolution, self.fullscreen, self.extra_gamescope = gamescope_parts(
+        self.resolution, self.fullscreen, _ = gamescope_parts(
             self.values.get("gamescope_args", ""))
         self.set_runtime(self.runtime)
 
@@ -115,15 +150,22 @@ class Preferences:
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
         if self.uses_gamescope:
-            result["gamescope_args"] = gamescope_args(
-                self.resolution, self.fullscreen, self.extra_gamescope)
+            # Only these controls are editable here. The persistence layer
+            # preserves the destination scope's remaining arguments.
+            result["gamescope_resolution"] = self.resolution
+            result["gamescope_fullscreen"] = "1" if self.fullscreen else "0"
         return result
 
 
 class Dialog:
-    def __init__(self, Gtk, app, mode, request, finish):
+    def __init__(self, Gtk, app, mode, request, finish, appearance=None):
         self.Gtk = Gtk
         self.finish = finish
+        if appearance is None:
+            _, _, Adw = gtk_modules()
+            Adw.init()
+            appearance = Appearance(Adw)
+        self.appearance = appearance
         self.window = Gtk.ApplicationWindow(application=app, title=request.get("title", "Sandbox game"))
         self.window.set_default_size(760, 580 if mode == "preferences" else 220)
         self.window.connect("close-request", self.cancel)
@@ -187,6 +229,7 @@ class Dialog:
         return button
 
     def cancel(self, *_):
+        self.appearance.preview(self.appearance.saved_theme)
         self.finish(1, None)
         return True
 
@@ -230,6 +273,9 @@ class Dialog:
         heading = Gtk.Label(label=request.get("game", ""), xalign=0, wrap=True, selectable=True)
         heading.add_css_class("title-2")
         self.body.append(heading)
+        self.dropdown("appearance", "Appearance (all dialogs)",
+                      [("system", "System"), ("light", "Light"), ("dark", "Dark")],
+                      self.appearance.saved_theme, lambda *_: self.appearance.preview(self.selected("appearance")))
         if request.get("can_proton"):
             self.dropdown("launch_with", "Launch with", [("auto", "Automatic"), ("proton", "Proton (Windows .exe)")],
                           self.state.runtime, self.runtime_changed)
@@ -266,6 +312,10 @@ class Dialog:
         self.scope_note.add_css_class("dim-label")
         self.scope_note.set_visible(False)
         self.body.append(self.scope_note)
+        self.error_note = Gtk.Label(xalign=0, wrap=True)
+        self.error_note.add_css_class("error")
+        self.error_note.set_visible(False)
+        self.body.append(self.error_note)
         self.refresh()
 
     def set_value(self, key, value):
@@ -287,7 +337,7 @@ class Dialog:
     def scope_changed(self, *_):
         self.state.scope = self.selected("scope")
         for key, row in self.rows.items():
-            if key != "scope":
+            if key not in ("scope", "appearance"):
                 row.set_sensitive(self.state.scope != "clear")
         self.scope_note.set_label(
             "This game's settings will be removed when you save." if self.state.scope == "clear" else
@@ -314,6 +364,12 @@ class Dialog:
         self.note.set_visible(self.state.engine == "nwjs")
 
     def save_preferences(self, *_):
+        try:
+            self.appearance.save(self.selected("appearance"))
+        except OSError as error:
+            self.error_note.set_label(f"Cannot save appearance: {error}")
+            self.error_note.set_visible(True)
+            return
         self.finish(0, self.state.result())
 
     def build_picker(self, request):
@@ -339,8 +395,9 @@ class Dialog:
 def gtk_modules():
     import gi
     gi.require_version("Gtk", "4.0")
-    from gi.repository import Gio, Gtk
-    return Gio, Gtk
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, Gtk
+    return Gio, Gtk, Adw
 
 
 def main():
@@ -350,17 +407,21 @@ def main():
     parser.add_argument("--text", default="")
     args = parser.parse_args()
     try:
-        Gio, Gtk = gtk_modules()
+        Gio, Gtk, Adw = gtk_modules()
     except (ImportError, ValueError) as error:
-        print(f"sandbox-game: GTK 4 and PyGObject are needed for dialogs: {error}", file=sys.stderr)
+        print(f"sandbox-game: GTK 4, libadwaita and PyGObject are needed for dialogs: {error}", file=sys.stderr)
         return 2
     if args.mode == "check":
         return 0
+    Adw.init()
+    appearance = Appearance(Adw)
     request = {"title": args.title, "text": args.text.replace("\\n", "\n")}
     if args.mode in ("preferences", "pick"):
         request.update(json.load(sys.stdin))
     elif args.mode == "log":
-        request["text"] = sys.stdin.read()
+        # Game output can use a Windows encoding. Bypass stdin's locale/error
+        # policy so undecodable bytes never become surrogates handed to GTK.
+        request["text"] = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     result = 1
     app = Gtk.Application(application_id="eu.nosini.SandboxGame.Dialog", flags=Gio.ApplicationFlags.NON_UNIQUE)
 
@@ -372,7 +433,7 @@ def main():
         app.quit()
 
     def activate(application):
-        dialog = Dialog(Gtk, application, args.mode, request, finish)
+        dialog = Dialog(Gtk, application, args.mode, request, finish, appearance)
         # Keep signal callbacks and their state alive until the window closes.
         application.dialog = dialog
         dialog.window.present()

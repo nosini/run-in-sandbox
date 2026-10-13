@@ -56,19 +56,24 @@ if OUT="$(dialog preferences <<<"$REQUEST")"; then :
 else
     rc=$?
     [ "$rc" != 1 ] || exit 0   # closing or cancelling saves nothing
-    die "Cannot open preferences. Install GTK 4 and the Python PyGObject bindings."
+    die "Cannot open preferences. Install GTK 4, libadwaita and the Python PyGObject bindings."
 fi
 
 # Only fields belonging to the selected engine are returned. Hidden fields
 # come from the file being written, so they never copy across config scopes.
 PARSED="$(python3 - "$OUT" <<'PY'
-import json, sys
+import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
-        "net", "proton", "mod_loaders", "casefold", "webgl", "gamescope_args"}
+        "net", "proton", "mod_loaders", "casefold", "webgl",
+        "gamescope_resolution", "gamescope_fullscreen"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
+if "gamescope_resolution" in values or "gamescope_fullscreen" in values:
+    assert "gamescope_resolution" in values and "gamescope_fullscreen" in values
+    assert not values["gamescope_resolution"] or re.fullmatch(r"[0-9]+x[0-9]+", values["gamescope_resolution"])
+    assert values["gamescope_fullscreen"] in {"0", "1"}
 for key, value in values.items():
     print(key + "\t" + value)
 PY
@@ -90,29 +95,43 @@ chosen() {
     else kept "$1" "$2"; fi
 }
 
-# Compare gamescope's resolution/fullscreen options in a stable order, so an
-# unchanged inherited value stays inherited. Other options are preserved.
-ga_normalise() {
-    local words width="" height="" full=0 rest=() i=0
+# Parse the destination's arguments, then replace only the exposed controls.
+# A game without its own arguments inherits the defaults; saving defaults
+# never takes hidden options from the selected game's merged view.
+ga_parse() {
+    local words i=0
+    GA_WIDTH=""; GA_HEIGHT=""; GA_FULL=0; GA_REST=()
     read -r -a words <<<"$1"
     while [ "$i" -lt "${#words[@]}" ]; do
         case "${words[$i]}" in
-            -W|--output-width) width="${words[$((i+1))]:-}"; i=$((i+2)) ;;
-            -H|--output-height) height="${words[$((i+1))]:-}"; i=$((i+2)) ;;
-            -f|--fullscreen) full=1; i=$((i+1)) ;;
-            *) rest+=( "${words[$i]}" ); i=$((i+1)) ;;
+            -W|--output-width) GA_WIDTH="${words[$((i+1))]:-}"; i=$((i+2)) ;;
+            -H|--output-height) GA_HEIGHT="${words[$((i+1))]:-}"; i=$((i+2)) ;;
+            -f|--fullscreen) GA_FULL=1; i=$((i+1)) ;;
+            *) GA_REST+=( "${words[$i]}" ); i=$((i+1)) ;;
         esac
     done
+}
+ga_join() {
     local out=()
-    [ -z "$width" ] || [ -z "$height" ] || out+=( -W "$width" -H "$height" )
-    [ "$full" != 1 ] || out+=( -f )
-    out+=( "${rest[@]}" )
+    [ -z "$GA_WIDTH" ] || [ -z "$GA_HEIGHT" ] || out+=( -W "$GA_WIDTH" -H "$GA_HEIGHT" )
+    [ "$GA_FULL" != 1 ] || out+=( -f )
+    out+=( "${GA_REST[@]}" )
     printf '%s\n' "${out[*]}"
 }
+ga_normalise() { ga_parse "$1"; ga_join; }
 GA_OWN=0
 if GA_OUT="$(file_get "$TARGET" gamescope_args)"; then GA_OWN=1; fi
-if [ "${RESULT[gamescope_args]+set}" ]; then
-    GA_OUT="${RESULT[gamescope_args]}"
+if [ "${RESULT[gamescope_resolution]+set}" ]; then
+    if [ "$TARGET" != "$CFGDIR/defaults" ] && [ "$GA_OWN" = 0 ]; then
+        GA_OUT="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
+    fi
+    ga_parse "$GA_OUT"
+    GA_WIDTH=""; GA_HEIGHT=""
+    if [[ "${RESULT[gamescope_resolution]}" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        GA_WIDTH="${BASH_REMATCH[1]}"; GA_HEIGHT="${BASH_REMATCH[2]}"
+    fi
+    GA_FULL="${RESULT[gamescope_fullscreen]}"
+    GA_OUT="$(ga_join)"
     if [ "$TARGET" != "$CFGDIR/defaults" ]; then
         GA_DEFAULT="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
         [ "$(ga_normalise "$GA_OUT")" = "$(ga_normalise "$GA_DEFAULT")" ] || GA_OWN=1

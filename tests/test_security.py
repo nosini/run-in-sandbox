@@ -676,6 +676,38 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(save("Game default (no override)\tNo"), ["gamescope_args="])
         self.assertEqual(effective(), "")
 
+    def test_saving_defaults_keeps_their_hidden_gamescope_arguments(self):
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        config = self.home / ".config" / "sandbox-game"
+        (config / "games").mkdir(parents=True)
+        defaults = config / "defaults"
+        own = config / "games" / "game"
+        own.write_text("gamescope_args=-r 30\n")
+        form = ["X11, in gamescope (private Xwayland)", "Off", "Off", "All games (defaults)"]
+        for initial in ("--adaptive-sync -r 60", ""):
+            for resolution, fullscreen in (("Game default (no override)", "No"), ("1280x720", "Yes")):
+                with self.subTest(initial=initial, resolution=resolution, fullscreen=fullscreen):
+                    defaults.write_text("gamescope_args=" + initial + "\n")
+                    self.env["TEST_GS_FORM"] = resolution + "\t" + fullscreen
+                    self.preferences(form)
+                    settings = dict(line.split("=", 1) for line in defaults.read_text().splitlines()
+                                    if "=" in line)
+                    visible = "-W 1280 -H 720 -f" if fullscreen == "Yes" else ""
+                    expected = " ".join(part for part in (visible, initial) if part)
+                    self.assertEqual(settings.get("gamescope_args", ""), expected)
+                    self.assertEqual(own.read_text(), "gamescope_args=-r 30\n")
+
+    def test_saving_game_keeps_inherited_hidden_gamescope_arguments(self):
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        config = self.home / ".config" / "sandbox-game"
+        config.mkdir(parents=True)
+        defaults = config / "defaults"
+        defaults.write_text("gamescope_args=--adaptive-sync -r 60\n")
+        self.env["TEST_GS_FORM"] = "1280x720\tYes"
+        _, saved = self.preferences(["X11, in gamescope (private Xwayland)", "Off", "Off", "This game only"])
+        self.assertEqual(saved["gamescope_args"], "-W 1280 -H 720 -f --adaptive-sync -r 60")
+        self.assertEqual(defaults.read_text(), "gamescope_args=--adaptive-sync -r 60\n")
+
     def test_pgmmv_launcher_and_preferences_agree(self):
         # Encrypted project data is recognised without parsing it. Selecting
         # the Windows player or the project must keep the same sandbox key.
