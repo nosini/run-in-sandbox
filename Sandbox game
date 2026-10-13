@@ -268,6 +268,13 @@ WL=0
 [ "$WL" = 1 ] && FLAG+=( --wayland )
 [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
 [ "$(cfg_get net 0)" = 1 ] && FLAG+=( --net )
+# Native programs only. The .NET runtime is opt-in, and only for a program
+# recognised as needing it.
+DOTNET_APP=0
+if [ -z "$APPDIR" ] && [ "$PROTON" = 0 ] && [ "$MKXP" = 0 ] && [ "$PGMMV" = 0 ]; then
+    is_dotnet "$GAMEDIR" && DOTNET_APP=1
+    [ "$DOTNET_APP" = 1 ] && [ "$(cfg_get dotnet 0)" = 1 ] && FLAG+=( --dotnet )
+fi
 if [ -n "$APPDIR" ] && [ "$(cfg_get casefold 1)" = 1 ] && [ -f "$CASEFOLD" ]; then
     RO+=( --ro "$CASEFOLD" /nwjs-casefold.js )
 fi
@@ -346,7 +353,20 @@ if wait "$GAME"; then
 else
     rc=$?
     kill "$NOTE" 2>/dev/null
-    if ! { echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
+    # A .NET program's starter, finding no runtime it can use, says so in
+    # these words and exits 131; the answer is in the preferences.
+    HINT=""
+    if grep -qE 'You must install (or update )?\.NET' "$LOG" 2>/dev/null; then
+        if [[ " ${FLAG[*]} " == *" --dotnet "* ]]; then
+            HINT="The sandbox gave this .NET program your .NET runtime, but not a version it accepts. Install the version the log below asks for."
+        elif [ "$DOTNET_APP" = 1 ]; then
+            HINT='This is a .NET program, and the sandbox has no .NET runtime unless you allow one: turn on ".NET runtime" in Sandbox game preferences.'
+        else
+            HINT="This is a .NET program, and the sandbox has no .NET runtime. sandbox-game --dotnet gives it yours."
+        fi
+    fi
+    if ! { [ -z "$HINT" ] || printf '%s\n\n' "$HINT"
+           echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
         | dialog log --title="sandbox-game failed (${BASE})"; then
         notify-send "sandbox-game failed (${BASE})" "exit $rc — see $LOG" 2>/dev/null
     fi

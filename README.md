@@ -152,6 +152,7 @@ working directory.
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
+| `--dotnet` | a .NET runtime | your distribution's package, or Microsoft's install script into `~/.dotnet` |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
@@ -342,6 +343,40 @@ Saves in the player's home go under `~/game-sandboxes/<name>/home/`; saves and
 movies need system VLC; games that require Windows DLL plugins may not work
 with the Linux player. Use `--proton` explicitly to run their Windows player.
 
+#### Native .NET programs
+
+Some games come with a Linux launcher of their own, written in .NET. A private
+server's launcher is a typical example. The **.NET runtime** preference covers
+what such a launcher needs from outside the sandbox. It applies only when the
+game runs natively, through a `.sh` or the launcher itself.
+
+**.NET runtime.** A .NET program published without the runtime bundled stops
+at once with *You must install .NET to run this application*, even when .NET is
+installed: the sandbox does not show your home folder or the usual install
+locations. When the game folder holds such a program (a
+`NAME.runtimeconfig.json` naming a framework, beside a Linux `NAME`), the
+preferences offer **.NET runtime**. It is off until you turn it on. Then
+`--dotnet` finds your install and mounts it read-only at `/dotnet`. It looks
+in `$DOTNET_ROOT_X64` or `$DOTNET_ROOT_ARM64` before `$DOTNET_ROOT`, then
+`/etc/dotnet/install_location`, `~/.dotnet`,
+`/usr/share/dotnet`, `/usr/lib64/dotnet`, `/usr/lib/dotnet`, `/opt/dotnet`
+and beside the `dotnet` on `PATH`. `--dotnet=DIR` names it outright. If a
+launch fails with that message, the failure window says which of these to
+change.
+
+A launcher that lives in a subfolder of the game, next to the folder it
+installs the game into, needs a sandbox for the whole thing. Put a small script
+at the top of the folder and right-click that folder:
+
+```sh
+#!/bin/sh
+# ~/Games/SomeGame/start.sh
+cd /game/launcher && exec ./SomeLauncher "$@"
+```
+
+Paths the launcher saves for itself are as the sandbox sees them: the install
+folder is `/game/...`, not its path on disk.
+
 ## Usage
 
 ### From Nautilus
@@ -380,7 +415,9 @@ gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version and mod loaders are asked for
 Windows games only; whether file names ignore case, and what WebGL runs on, for RPG Maker
-MV/MZ only. Choosing gamescope shows resolution and fullscreen controls inline.
+MV/MZ only. The .NET runtime is asked for native .NET programs only; see
+[Native .NET programs](#native-net-programs).
+Choosing gamescope shows resolution and fullscreen controls inline.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
@@ -400,6 +437,7 @@ fullscreen or one that will not quit, without a terminal.
 ```sh
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
+             [--dotnet[=DIR]]
              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
@@ -426,6 +464,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--net` | internet access, and only that; see [Network](#network) |
+| `--dotnet[=DIR]` | the host's .NET runtime, read-only at `/dotnet` |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
@@ -900,6 +939,7 @@ host_x11=0|1
 gamescope_args=-f -W 2560 -H 1440
 env=WAYLANDDRV_PRIMARY_MONITOR=HDMI-1 SOME_OTHER=value
 proton=auto|<install name>
+dotnet=0|1
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -921,6 +961,8 @@ them.
 
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
+
+`dotnet` applies only to a native program recognised as needing a .NET runtime.
 
 ## Known rough edges
 

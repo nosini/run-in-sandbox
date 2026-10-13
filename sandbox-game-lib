@@ -92,6 +92,21 @@ is_pgmmv() {
         | grep -iEx 'data/project[.]json|resources/data/project[.]json' >/dev/null
 }
 
+# A .NET program that needs a .NET runtime installed: its NAME.runtimeconfig.json
+# names a shared framework, and NAME beside it is the Linux starter (an ELF
+# file). Self-contained programs list "includedFrameworks" instead and bring
+# their own; a Windows .NET program has NAME.exe, which a Linux runtime cannot
+# start anyway. Only these get the preference that hands them the runtime.
+is_dotnet() {                                  # $1 = game dir
+    local f
+    while IFS= read -r -d '' f; do
+        [ -f "${f%.runtimeconfig.json}" ] \
+            && cmp -s -n 4 "${f%.runtimeconfig.json}" <(printf '\177ELF') \
+            && grep -qE '"frameworks?"[[:space:]]*:' "$f" && return 0
+    done < <(find "$1" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null)
+    return 1
+}
+
 has_windows_exe() {
     [ -n "$(find "$1" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]
 }

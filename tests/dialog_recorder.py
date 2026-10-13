@@ -11,7 +11,9 @@ if MODE == "check":
     sys.exit(0)
 if MODE != "preferences":
     if os.environ.get("DIALOG_RECORD"):
-        Path(os.environ["DIALOG_RECORD"]).write_text(json.dumps(sys.argv[1:]))
+        # The failure window's text arrives on stdin.
+        shown = sys.argv[1:] + ([sys.stdin.read()] if MODE == "log" else [])
+        Path(os.environ["DIALOG_RECORD"]).write_text(json.dumps(shown))
     sys.exit(int(os.environ.get("DIALOG_EXIT", "0")))
 
 request = json.load(sys.stdin)
@@ -47,6 +49,8 @@ for key, value in zip(fields, form):
         state.values[key] = "0" if value == "Match exactly" else "1"
     elif key == "webgl":
         state.values[key] = "vulkan" if value == "Vulkan" else "auto"
+# Controls outside the positional form, by key, as the window stores them.
+state.values.update(json.loads(os.environ.get("TEST_VALUES", "{}")))
 if os.environ.get("TEST_GS_FORM"):
     resolution, full = os.environ["TEST_GS_FORM"].split("\t")
     state.resolution = "" if resolution == "Game default (no override)" else resolution

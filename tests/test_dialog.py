@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-MODULE = runpy.run_path(str(Path(__file__).resolve().parents[1] / "sandbox-game-dialog"))
+ROOT = Path(__file__).resolve().parents[1]
+MODULE = runpy.run_path(str(ROOT / "sandbox-game-dialog"))
 Preferences = MODULE["Preferences"]
 
 
@@ -42,6 +43,14 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertNotIn("gamescope_fullscreen", state.result())
         state.scope = "clear"
         self.assertEqual(state.result(), {"scope": "clear"})
+
+    def test_dotnet_only_for_native_programs_needing_it(self):
+        state = Preferences({"engine": "native", "dotnet": True, "values": {"dotnet": "1"}})
+        self.assertEqual(state.result()["dotnet"], "1")
+        state.set_runtime("proton")                  # the .exe under Proton instead
+        self.assertNotIn("dotnet", state.result())
+        plain = Preferences({"engine": "native", "values": {"dotnet": "1"}})
+        self.assertNotIn("dotnet", plain.result())
 
 
 class GtkDialogTests(unittest.TestCase):
@@ -120,6 +129,14 @@ class GtkDialogTests(unittest.TestCase):
         self.assertEqual(self.responses[0][0], 0)
         self.assertEqual(self.responses[0][1]["launch_with"], "proton")
         self.assertEqual(self.responses[0][1]["proton"], "GE-Test")
+
+    def test_dotnet_switch_only_for_programs_needing_it(self):
+        dialog = self.create("preferences", {"engine": "native", "dotnet": True})
+        self.assertTrue(dialog.rows["dotnet"].get_visible())
+        dialog.widgets["dotnet"].set_active(True)
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["dotnet"], "1")
+        self.assertFalse(self.create("preferences", {"engine": "native"}).rows["dotnet"].get_visible())
 
     def test_cancel_after_editing_returns_no_preferences(self):
         dialog = self.create("preferences", {"engine": "pgmmv", "can_proton": True})

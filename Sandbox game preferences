@@ -29,6 +29,7 @@ game_engine "$SEL" auto
 CAN_PROTON=0; RENPY_X11=0
 if has_windows_exe "$GAMEDIR" || [ "$(cfg_get launch_with auto)" = proton ]; then CAN_PROTON=1; fi
 if [ "$R_ENGINE" = native ] && renpy_without_wayland "$GAMEDIR"; then RENPY_X11=1; fi
+DOTNET_APP=0; is_dotnet "$GAMEDIR" && DOTNET_APP=1
 RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
 [ -n "$RES" ] || RES="$(wlr-randr 2>/dev/null | awk '/current/ {print $1; exit}')"
 [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=""
@@ -37,19 +38,20 @@ OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
 
 # JSON is data, never shell code. Folder names and values need no escaping by
 # hand, and all controls keep their values while switching between runtimes.
-REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" \
+REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" "$DOTNET_APP" \
     launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
     host_x11 "$(cfg_get host_x11 0)" gamescope "$(cfg_get gamescope 0)" \
     mangohud "$(cfg_get mangohud 0)" net "$(cfg_get net 0)" \
     proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" \
     casefold "$(cfg_get casefold 1)" webgl "$(cfg_get webgl auto)" \
-    gamescope_args "$(cfg_get gamescope_args '')" <<'PY'
+    gamescope_args "$(cfg_get gamescope_args '')" \
+    dotnet "$(cfg_get dotnet 0)" <<'PY'
 import json, sys
-name, engine, proton, renpy, resolution, installs, own = sys.argv[1:8]
+name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
-               can_proton=proton == "1", renpy_x11=renpy == "1",
+               can_proton=proton == "1", renpy_x11=renpy == "1", dotnet=dotnet == "1",
                resolution=resolution, protons=installs.splitlines(),
-               game_settings=own == "1", values=dict(zip(sys.argv[8::2], sys.argv[9::2]))), sys.stdout)
+               game_settings=own == "1", values=dict(zip(sys.argv[9::2], sys.argv[10::2]))), sys.stdout)
 PY
 )" || die "Cannot prepare preferences."
 if OUT="$(dialog preferences <<<"$REQUEST")"; then :
@@ -66,7 +68,7 @@ import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
         "net", "proton", "mod_loaders", "casefold", "webgl",
-        "gamescope_resolution", "gamescope_fullscreen"}
+        "gamescope_resolution", "gamescope_fullscreen", "dotnet"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
@@ -140,7 +142,8 @@ fi
 
 mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
-    for key in wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton; do
+    for key in wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton \
+               dotnet; do
         case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
         printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
     done

@@ -69,6 +69,12 @@
 #               $PGMMV_DIR wins. Otherwise pgmmv-player* under ~/.local/share,
 #               ~/.local/opt and /opt are searched, then this checkout's
 #               pgmmv-player-decrypt/. The bundle is read-only at /pgmmv.
+#   --dotnet    give a .NET program the host's .NET runtime, read-only at
+#               /dotnet with DOTNET_ROOT pointing there. Programs published
+#               without the runtime bundled stop otherwise with "You must
+#               install .NET to run this application". =DIR names the
+#               install; else $DOTNET_ROOT, /etc/dotnet/install_location,
+#               ~/.dotnet, the usual system folders and the dotnet on PATH.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -471,6 +477,8 @@ Runtimes
                         (BepInEx, MelonLoader, UE4SS, ASI loaders)
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
   --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
+  --dotnet[=DIR]        the host's .NET runtime, for a .NET program that does
+                        not bundle it
 
 Access
   --net                 the internet, and only that: no LAN, nothing on this
@@ -502,7 +510,7 @@ Examples
   sandbox-game --mkxp ~/Games/SomeVXAceGame
   sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 
-Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, SANDBOX_TOOLS_DIR,
+Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBOX_TOOLS_DIR,
 SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, MANGOHUD=1. Sound is playback only once
 `install.sh --restrict-audio` has set that up. More in the README.
 EOF
@@ -519,6 +527,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
+DOTNET_SPEC=""
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -549,6 +558,8 @@ while [ "$#" -gt 0 ]; do
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --pgmmv)     PGMMV_SPEC="auto"; shift ;;
         --pgmmv=*)   PGMMV_SPEC="${1#--pgmmv=}"; PGMMV_SPEC="${PGMMV_SPEC:-auto}"; shift ;;
+        --dotnet)    DOTNET_SPEC="auto"; shift ;;
+        --dotnet=*)  DOTNET_SPEC="${1#--dotnet=}"; DOTNET_SPEC="${DOTNET_SPEC:-auto}"; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
@@ -837,6 +848,51 @@ if [ -n "$PGMMV_SPEC" ]; then
     set -- /pgmmv/bin/pgmmv-player --game-dir=/game "$@"
 fi
 
+# What PATH the game gets; .NET adds to it below.
+SANDBOX_PATH=/usr/bin:/bin
+
+# ---- .NET ------------------------------------------------------------------
+# A .NET program published without the runtime is a small native starter
+# (the "apphost") that loads the runtime from an install elsewhere: where
+# DOTNET_ROOT_<ARCH> or DOTNET_ROOT says, else where /etc/dotnet/install_location
+# says, else /usr/share/dotnet. Users' installs tend to be in ~/.dotnet, with DOTNET_ROOT
+# set in a shell profile -- neither of which is in here. So the install found
+# goes in read-only at /dotnet, and DOTNET_ROOT says so. An install is a
+# folder with host/fxr, which the starter loads, and the shared runtime.
+dotnet_root() { [ -d "$1/host/fxr" ] && [ -d "$1/shared/Microsoft.NETCore.App" ]; }
+find_dotnet() {                       # $1 = auto | dir
+    local d arch onpath=""
+    if [ "$1" != auto ]; then
+        ! dotnet_root "$1" || realpath "$1"
+        return 0
+    fi
+    case "$(uname -m)" in x86_64) arch=X64 ;; aarch64) arch=ARM64 ;; *) arch="" ;; esac
+    onpath="$(command -v dotnet 2>/dev/null)" && onpath="$(dirname "$(realpath "$onpath")")" \
+        || onpath=""
+    for d in "$([ -z "$arch" ] || printenv "DOTNET_ROOT_$arch" || true)" "${DOTNET_ROOT:-}" \
+             "$(head -n1 "/etc/dotnet/install_location_${arch,,}" 2>/dev/null || true)" \
+             "$(head -n1 /etc/dotnet/install_location 2>/dev/null || true)" \
+             "$HOME/.dotnet" /usr/share/dotnet /usr/lib64/dotnet /usr/lib/dotnet /opt/dotnet \
+             "$onpath"; do
+        if [ -n "$d" ] && dotnet_root "$d"; then realpath "$d"; return 0; fi
+    done
+    return 0
+}
+
+DOTNET_ARGS=()
+if [ -n "$DOTNET_SPEC" ]; then
+    DOTNET="$(find_dotnet "$DOTNET_SPEC")"
+    [ -n "$DOTNET" ] || {
+        [ "$DOTNET_SPEC" = auto ] && echo "no .NET runtime found" >&2 \
+                                  || echo "no .NET runtime at '$DOTNET_SPEC'" >&2
+        echo "looked for host/fxr and shared/Microsoft.NETCore.App in \$DOTNET_ROOT," >&2
+        echo "/etc/dotnet/install_location, ~/.dotnet, /usr/share/dotnet, /usr/lib64/dotnet," >&2
+        echo "/usr/lib/dotnet, /opt/dotnet and beside the dotnet on PATH" >&2
+        echo "override with --dotnet=/path/to/dotnet" >&2; exit 1; }
+    DOTNET_ARGS=( --ro-bind "$DOTNET" /dotnet --setenv DOTNET_ROOT /dotnet )
+    SANDBOX_PATH="$SANDBOX_PATH:/dotnet"
+fi
+
 # Wine's Wayland driver will not start on gamescope's own Wayland server: it
 # requires wl_subcompositor and wp_viewporter (winewayland.drv, wayland.c),
 # which gamescope does not offer. With Proton's Wayland setting that driver
@@ -927,7 +983,7 @@ fi
 # ---- environment, display and devices --------------------------------------
 # Use explicit names, never prefixes such as AWS_* or even arbitrary LC_*:
 # shell sessions and file managers can carry credentials in their environment.
-BASE_ENV=( --clearenv --setenv PATH /usr/bin:/bin
+BASE_ENV=( --clearenv --setenv PATH "$SANDBOX_PATH"
     --setenv HOME "$HOME" --setenv USER "$(id -un)" --setenv LOGNAME "$(id -un)"
     --setenv XDG_CONFIG_HOME "$HOME/.config"
     --setenv XDG_DATA_HOME "$HOME/.local/share"
@@ -1376,6 +1432,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     "${PROTON_ARGS[@]}"
     "${MKXP_ARGS[@]}"
     "${PGMMV_ARGS[@]}"
+    "${DOTNET_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
     "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above

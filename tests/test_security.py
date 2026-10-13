@@ -88,6 +88,34 @@ else:
 """
 
 
+class RuntimeAndNetworkPolicyTests(unittest.TestCase):
+    def test_architecture_specific_dotnet_root_precedes_generic_root(self):
+        source = (ROOT / "sandbox-game").read_text()
+        functions = source.split("dotnet_root()", 1)[1].split("\nDOTNET_ARGS=()", 1)[0]
+        functions = "dotnet_root()" + functions
+        with tempfile.TemporaryDirectory(prefix="sandbox-game-dotnet-test-") as tmp:
+            base = Path(tmp)
+            generic, specific, explicit = [base / name for name in ("generic", "specific", "explicit")]
+            for root in (generic, specific, explicit):
+                (root / "host" / "fxr").mkdir(parents=True)
+                (root / "shared" / "Microsoft.NETCore.App").mkdir(parents=True)
+            for machine, arch in (("x86_64", "X64"), ("aarch64", "ARM64")):
+                env = {**os.environ, "DOTNET_ROOT": str(generic), "TEST_ARCH": machine,
+                       f"DOTNET_ROOT_{arch}": str(specific)}
+                def discover(spec="auto"):
+                    return subprocess.run(
+                        ["bash", "-c", 'uname() { echo "$TEST_ARCH"; };\n' + functions
+                         + '\nfind_dotnet "$1"', "test", spec], env=env,
+                        capture_output=True, text=True, check=True).stdout.strip()
+                with self.subTest(arch=arch):
+                    self.assertEqual(discover(), str(specific))
+                    self.assertEqual(discover(str(explicit)), str(explicit))
+                    env[f"DOTNET_ROOT_{arch}"] = str(base / "missing")
+                    self.assertEqual(discover(), str(generic))
+                    env.pop(f"DOTNET_ROOT_{arch}")
+                    self.assertEqual(discover(), str(generic))
+
+
 class SecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-")
@@ -103,7 +131,7 @@ class SecurityTests(unittest.TestCase):
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
         for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "SANDBOX_DIALOG", "XDG_DATA_HOME",
-                    "SANDBOX_GPU_CARD"):
+                    "SANDBOX_GPU_CARD", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64"):
             self.env.pop(key, None)
         # A tools folder of the test's own, never the real one.
         self.tools = self.base / "tools"
@@ -878,6 +906,29 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(args[i - 1:i + 2], ["--dev-bind-try", "/dev/ntsync", "/dev/ntsync"])
         self.assertNotIn("/dev/ntsync", self.recorded_args())
 
+    def test_dotnet_runtime_only_when_asked(self):
+        def install(root):
+            (root / "host" / "fxr" / "10.0.12").mkdir(parents=True)
+            (root / "shared" / "Microsoft.NETCore.App" / "10.0.12").mkdir(parents=True)
+            return root
+        script = ('echo "${DOTNET_ROOT-unset} $PATH"; ls /dotnet/host/fxr 2>&1 || true; '
+                  '{ touch /dotnet/x; } 2>/dev/null && echo writable || true')
+        out = self.run_guest(script, f"--dotnet={install(self.base / 'dotnet')}").stdout.splitlines()
+        self.assertEqual(out[:2], ["/dotnet /usr/bin:/bin:/dotnet", "10.0.12"])
+        self.assertNotIn("writable", out)
+        out = self.run_guest(script).stdout
+        self.assertTrue(out.startswith("unset /usr/bin:/bin\n"), out)
+        self.assertNotIn("10.0.12", out)
+        # Found in ~/.dotnet, where a user's install usually is -- unless the
+        # machine has one of its own, which is looked for first.
+        install(self.home / ".dotnet")
+        if not any(Path(p).exists() for p in ("/etc/dotnet", "/usr/share/dotnet", "/usr/lib64/dotnet",
+                                              "/usr/lib/dotnet", "/opt/dotnet")):
+            self.assertIn("10.0.12", self.run_guest(script, "--dotnet").stdout)
+        result = self.cli("--headless", f"--dotnet={self.base}", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no .NET runtime at", result.stderr)
+
     def test_check_reports_every_protection(self):
         result = self.cli("--check", check=False)
         lines = result.stdout.splitlines()
@@ -1319,6 +1370,98 @@ print(json.dumps({{
                                 capture_output=True, text=True, timeout=15)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Proton requested, but no Windows .exe", error.read_text())
+
+    def stub_launcher(self, then=""):
+        """sandbox-game for the Nautilus scripts: records its arguments, then runs THEN."""
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True, exist_ok=True)
+        if not (helpers / "sandbox-game-lib").exists():
+            (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{recorded}"\n{then}\n')
+        stub.chmod(0o755)
+        self.env["PATH"] = "/usr/bin:/bin"
+        return recorded
+
+    def dotnet_launcher(self):
+        """A game folder like EpinelPS's: a .sh starting a .NET launcher, Windows programs beside."""
+        game = self.base / "games" / "Epinelps"
+        (game / "launcher").mkdir(parents=True)
+        (game / "start.sh").write_text("#!/bin/sh\nexec /game/launcher/App\n")
+        (game / "launcher" / "App").write_bytes(b"\x7fELF" + bytes(60))
+        (game / "launcher" / "App.runtimeconfig.json").write_text(
+            '{"runtimeOptions": {"framework": {"name": "Microsoft.NETCore.App", "version": "10.0.0"}}}')
+        (game / "launcher" / "Utility.exe").write_text("x")
+        return game
+
+    def launch_with(self, recorded, game, prefs):
+        """Launch GAME from Nautilus with these per-game preferences; the arguments passed on."""
+        config = self.home / ".config" / "sandbox-game" / "games"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / self.cli("--print-name", game).stdout.strip()).write_text(prefs)
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return recorded.read_text().splitlines()
+
+    def test_launcher_gives_dotnet_only_to_programs_needing_it(self):
+        recorded = self.stub_launcher()
+        game = self.dotnet_launcher()
+        args = self.launch_with(recorded, game, "dotnet=1\n")
+        self.assertEqual(args[-2:], [str(game), "/game/start.sh"])
+        self.assertIn("--dotnet", args)
+        self.assertNotIn("--dotnet", self.launch_with(recorded, game, "dotnet=0\n"))
+        # Opt-in: off unless the preferences say so.
+        self.assertNotIn("--dotnet", self.launch_with(recorded, game, ""))
+        # Not for a program that brings its own runtime.
+        (game / "launcher" / "App.runtimeconfig.json").write_text(
+            '{"runtimeOptions": {"includedFrameworks": [{"name": "Microsoft.NETCore.App"}]}}')
+        self.assertNotIn("--dotnet", self.launch_with(recorded, game, "dotnet=1\n"))
+        # Nor for the Windows programs beside it, run with Proton instead.
+        (game / "launcher" / "App.runtimeconfig.json").write_text(
+            '{"runtimeOptions": {"framework": {"name": "Microsoft.NETCore.App"}}}')
+        self.assertNotIn("--dotnet", self.launch_with(recorded, game, "dotnet=1\nlaunch_with=proton\n"))
+
+    def test_failure_window_points_dotnet_programs_at_the_preference(self):
+        self.stub_launcher('echo "You must install .NET to run this application." >&2; exit 131')
+        game = self.dotnet_launcher()
+        self.env["SANDBOX_DIALOG"] = str(ROOT / "tests" / "dialog_recorder.py")
+        self.env["DIALOG_RECORD"] = str(self.base / "shown.json")
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
+        config = self.home / ".config" / "sandbox-game" / "games"
+        config.mkdir(parents=True)
+        for prefs, hint in (("", 'turn on ".NET runtime" in Sandbox game preferences'),
+                            ("dotnet=1\n", "not a version it accepts")):
+            (config / "epinelps").write_text(prefs)
+            result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 131)
+            shown = json.loads((self.base / "shown.json").read_text())
+            self.assertEqual(shown[0], "log")
+            self.assertTrue(shown[-1].startswith("This is a .NET program" if not prefs else "The sandbox"))
+            self.assertIn(hint, shown[-1])
+            self.assertIn("You must install .NET", shown[-1])
+        # Nothing about .NET for other failures.
+        self.stub_launcher("exit 1")
+        subprocess.run([str(ROOT / "Sandbox game")], env=self.env, capture_output=True, timeout=15)
+        self.assertNotIn(".NET", json.loads((self.base / "shown.json").read_text())[-1])
+
+    def test_preferences_offer_and_save_the_dotnet_runtime(self):
+        game = self.dotnet_launcher()
+        self.env["TEST_VALUES"] = json.dumps({"dotnet": "1"})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"], game)
+        self.assertTrue(json.loads(Path(self.env["DIALOG_RECORD"]).read_text())["dotnet"])
+        self.assertEqual(saved["dotnet"], "1")
+        # Not offered for a game without such a program.
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        self.preferences([], self.game)
+        self.assertFalse(json.loads(Path(self.env["DIALOG_RECORD"]).read_text())["dotnet"])
 
     def test_runtime_choice_updates_preferences_and_can_be_cancelled(self):
         (self.game / "www").mkdir()

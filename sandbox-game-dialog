@@ -88,7 +88,7 @@ class Preferences:
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders"):
+        for key in ("net", "mangohud", "mod_loaders", "dotnet"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
         self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
@@ -123,6 +123,15 @@ class Preferences:
         return self.engine in ("proton", "")
 
     @property
+    def native(self):
+        return self.engine == "native"
+
+    @property
+    def dotnet_controls(self):
+        """Only for a program recognised as needing a .NET runtime."""
+        return self.native and bool(self.request.get("dotnet"))
+
+    @property
     def uses_gamescope(self):
         return self.display in ("x11", "wayland-gamescope")
 
@@ -149,6 +158,8 @@ class Preferences:
         if self.engine == "nwjs":
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
+        if self.dotnet_controls:
+            result["dotnet"] = self.values["dotnet"]
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -295,6 +306,8 @@ class Dialog:
                       self.state.values.get("casefold", "1"), lambda *_: self.set_value("casefold", self.selected("casefold")))
         self.dropdown("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")],
                       self.state.values.get("webgl", "auto"), lambda *_: self.set_value("webgl", self.selected("webgl")))
+        self.switch("dotnet", ".NET runtime (yours, read-only)", self.state.values["dotnet"] == "1",
+                    lambda widget, *_: self.set_value("dotnet", "1" if widget.get_active() else "0"))
         self.switch("net", "Internet only (no LAN, nothing on this PC)", self.state.values.get("net") == "1",
                     lambda widget, *_: self.set_value("net", "1" if widget.get_active() else "0"))
         resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
@@ -360,6 +373,7 @@ class Dialog:
             self.rows[key].set_visible(self.state.engine == "nwjs")
         for key in ("resolution", "fullscreen"):
             self.rows[key].set_visible(self.state.uses_gamescope)
+        self.rows["dotnet"].set_visible(self.state.dotnet_controls)
         self.note.set_label("MangoHud is unavailable with NW.js." if self.state.engine == "nwjs" else "")
         self.note.set_visible(self.state.engine == "nwjs")
 
