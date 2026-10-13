@@ -356,8 +356,15 @@ the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
 
-**Sandbox game preferences** — the display, MangoHud, the Proton version, mod
-loaders and internet access, saved per game or as the library-wide default. The display is
+**Sandbox game preferences** — when a Windows `.exe` is present, choose
+**Launch with → Automatic** or **Proton (Windows .exe)** first. Proton skips
+NW.js, mkxp-z, PGMMV and native `.sh` launchers and runs the Windows executable.
+This choice is saved per game or as the library-wide default; choose Automatic
+for an individual game to override a default that forces Proton. The Windows
+executable still gets a picker when several candidates remain.
+
+The next dialog sets the display, MangoHud, the Proton version, mod
+loaders and internet access, saved in the same scope. The display is
 one choice, each entry saying what happens: native Wayland; native Wayland in
 gamescope; X11 in gamescope (private Xwayland); or the host X server. Only
 what the game can do is offered — a Windows game does not get Wayland in
@@ -870,6 +877,7 @@ wayland=0|1
 mangohud=0|1
 net=0|1
 mod_loaders=0|1
+launch_with=auto|proton
 casefold=0|1
 webgl=auto|vulkan
 gamescope=0|1

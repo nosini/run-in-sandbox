@@ -99,8 +99,26 @@ RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; PGMMV=0; ALLOW_MANGOHUD=1
 # Shared with the preferences dialog, so both agree on which game this is.
 resolve_selection "$SEL"
 APPDIR="$R_APPDIR"
+GAMEDIR="$R_GAMEDIR"
+NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
+    || die "Cannot derive a sandbox name for:\n$GAMEDIR"
 
-if [ -n "$APPDIR" ]; then
+if [ "$(cfg_get launch_with auto)" = proton ]; then
+    # A saved override skips NW.js and the native replacement players, even
+    # when a data folder or Linux launcher was selected.
+    APPDIR=""
+    PROTON=1
+    if [ -f "$SEL" ] && [[ "${SEL,,}" = *.exe ]]; then
+        LAUNCHER="$SEL"
+    else
+        mapfile -t exes < <(find_exes "$GAMEDIR")
+        [ "${#exes[@]}" -gt 0 ] \
+            || die "Proton requested, but no Windows .exe was found at:\n$GAMEDIR\n\nChoose Automatic in Sandbox game preferences to use the native launcher."
+        LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
+        [ -n "$LAUNCHER" ] || exit 0
+    fi
+    CMD=( "/game/${LAUNCHER#"$GAMEDIR"/}" )
+elif [ -n "$APPDIR" ]; then
     # ----- RPG Maker / NW.js -----
     # MangoHud is out for NW.js: its GL shim is LD_PRELOADed
     # into every child, and Chromium spawns a zygote and its own sandboxed
@@ -238,10 +256,8 @@ fi
 BASE="$(basename "$GAMEDIR")"
 
 # ---- saved preferences -----------------------------------------------------
-# Keyed by the sandbox name so prefs and captured writes stay together, and
-# read only now that the dispatch above has settled which game this is.
-NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
-    || die "Cannot derive a sandbox name for:\n$GAMEDIR"
+# Keyed by the sandbox name so prefs and captured writes stay together. The
+# name was resolved before dispatch so launch_with can choose the runtime.
 FLAG=()
 HOST_X11="$(cfg_get host_x11 0)"
 [ "$HOST_X11" = 1 ] && FLAG+=( --host-x11 )

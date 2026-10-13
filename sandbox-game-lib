@@ -83,6 +83,10 @@ is_pgmmv() {
         | grep -iEx 'data/project[.]json|resources/data/project[.]json' >/dev/null
 }
 
+has_windows_exe() {
+    [ -n "$(find "$1" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]
+}
+
 # RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
 # names the runtime it wants; the data files and encrypted archives catch dumps
 # that arrived without one. MV/MZ never match -- those are the NW.js case.
@@ -98,8 +102,12 @@ is_rgss() {
 # Proton. For the preferences, which offer only what that engine can do.
 # Sets R_ENGINE to nwjs, native, pgmmv, mkxp, proton, or empty when nothing is found.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
-game_engine() {                                # $1 = selected path, after resolve_selection
+game_engine() {                                # $1 = selection, $2 = optional launch_with override
     R_ENGINE=""
+    if [ "${2:-$(cfg_get launch_with auto)}" = proton ]; then
+        R_ENGINE=proton
+        return
+    fi
     if [ -n "$R_APPDIR" ]; then
         R_ENGINE=nwjs
     elif [ -d "$1" ]; then
@@ -109,7 +117,7 @@ game_engine() {                                # $1 = selected path, after resol
             R_ENGINE=pgmmv
         elif is_rgss "$R_GAMEDIR"; then
             R_ENGINE=mkxp
-        elif [ -n "$(find "$R_GAMEDIR" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]; then
+        elif has_windows_exe "$R_GAMEDIR"; then
             R_ENGINE=proton
         fi
     else

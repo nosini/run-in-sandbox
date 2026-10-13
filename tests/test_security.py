@@ -1176,7 +1176,7 @@ print(json.dumps({{
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
 
-    def preferences(self, form, game=None, gamedir=None):
+    def preferences(self, form, game=None, gamedir=None, launch_with=""):
         """Run the preferences dialog on `game` with a zenity that answers
         every form with `form` and records what it was offered."""
         bindir = self.home / ".local" / "bin"         # where the dialog looks
@@ -1184,11 +1184,12 @@ print(json.dumps({{
         for script in ("sandbox-game", "sandbox-game-lib"):
             if not (bindir / script).exists():
                 (bindir / script).symlink_to(ROOT / script)
-        # The first form of a run is the main one; no answer is Cancel.
+        # The runtime chooser precedes the main form for Windows builds.
         offered = self.base / "offered"
         offered.unlink(missing_ok=True)
         (bindir / "zenity").write_text(
-            f'#!/bin/sh\ncase "$*" in *--forms*)\n'
+            '#!/bin/sh\ncase "$*" in *Choose\\ game\\ launcher*)\n'
+            '  printf "%s\\n" "$TEST_LAUNCH_WITH" ;; *--forms*)\n'
             f'  [ -e "{offered}" ] || printf "%s\\n" "$@" > "{offered}"\n'
             '  [ -n "$TEST_FORM" ] || exit 1\n'
             '  printf "%s\\n" "$TEST_FORM" ;; esac\n')
@@ -1197,6 +1198,7 @@ print(json.dumps({{
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
         self.env["TEST_FORM"] = "\t".join(form)
+        self.env["TEST_LAUNCH_WITH"] = launch_with
         subprocess.run([str(ROOT / "Sandbox game preferences")], env=self.env,
                        capture_output=True, timeout=15, check=True)       # Cancel exits 0
         lines = offered.read_text().splitlines()
@@ -1207,6 +1209,91 @@ print(json.dumps({{
         saved = dict(l.split("=", 1) for l in settings.read_text().splitlines() if "=" in l) \
             if settings.exists() else {}
         return combos, saved
+
+    def test_forced_proton_skips_detected_native_launchers(self):
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        config = self.home / ".config" / "sandbox-game"
+        (config / "games").mkdir(parents=True)
+        (config / "defaults").write_text("launch_with=proton\nproton=GE-Test\nmod_loaders=1\n")
+        self.env["PATH"] = "/usr/bin:/bin"
+        builds = {
+            "pgmmv": "data/project.json", "rgss": "Game.ini",
+            "nwjs": "www/index.html", "native": "start.sh",
+        }
+        for engine, marker in builds.items():
+            game = self.base / "games" / engine
+            entry = game / marker
+            entry.parent.mkdir(parents=True)
+            entry.write_text("Library=RGSS301.dll\n")
+            exe = game / "game.exe"
+            exe.touch()
+            for selection in (game, entry, exe):
+                with self.subTest(engine=engine, selection=selection):
+                    self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(selection)
+                    result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = recorded.read_text().splitlines()
+                    self.assertEqual(args[-2:], [str(game), "/game/game.exe"])
+                    self.assertIn("--proton=GE-Test", args)
+                    self.assertIn("--mod-loaders", args)
+                    self.assertNotIn("--pgmmv", args)
+                    self.assertNotIn("--mkxp", args)
+        # A per-game auto choice overrides the library's forced Proton.
+        (config / "games" / "native").write_text("launch_with=auto\n")
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded.read_text().splitlines()[-1], "/game/start.sh")
+        # Never pass a Linux launcher to Proton when no Windows build exists.
+        (config / "games" / "native").write_text("launch_with=proton\n")
+        exe.unlink()
+        error = self.base / "error-dialog"
+        (bindir / "zenity").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$@" > "{error}"\n')
+        (bindir / "zenity").chmod(0o755)
+        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Proton requested, but no Windows .exe", error.read_text())
+
+    def test_runtime_choice_updates_preferences_and_can_be_cancelled(self):
+        (self.game / "www").mkdir()
+        (self.game / "www" / "index.html").touch()
+        (self.game / "game.exe").touch()
+        combos, saved = self.preferences([
+            "Native Wayland", "On", "GE-Test", "Off", "Off", "This game only"
+        ], launch_with="Proton (Windows .exe)")
+        self.assertEqual(saved["launch_with"], "proton")
+        self.assertEqual(saved["proton"], "GE-Test")
+        self.assertEqual(saved["mangohud"], "1")
+        self.assertIn("Proton version", combos)
+        self.assertNotIn("Native Wayland, in gamescope", combos["Display"])
+        self.assertNotIn("File names", combos)
+        self.assertNotIn("WebGL", combos)
+        # Cancelling the main form must not save the tentative runtime choice.
+        combos, cancelled = self.preferences([], launch_with="Automatic")
+        self.assertEqual(cancelled, saved)
+        self.assertNotIn("Proton version", combos)
+        self.assertIn("File names", combos)
+        self.assertIn("Off (forced: hangs NW.js)", combos["MangoHud overlay"])
+        _, automatic = self.preferences([
+            "Native Wayland", "", "", "", "Off", "This game only"
+        ], launch_with="Automatic")
+        self.assertEqual(automatic["launch_with"], "auto")
+        self.assertEqual(automatic["proton"], "GE-Test")
 
     def test_display_choices_save_what_they_say(self):
         # One Display choice, saved as the keys the launcher reads. X11 in
