@@ -84,11 +84,12 @@ def gamescope_parts(text):
     return (f"{width}x{height}" if width and height else ""), fullscreen, rest
 
 
-# The syntax sandbox-game's --allow-lan accepts, checked as the
+# The syntax sandbox-game's --allow-lan and --add-host accept, checked as the
 # preferences are saved; sandbox-game checks it again (PREF_CHECK) at launch.
 LAN_ENTRY = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+(?:/\d+)?)\]|(?P<v4>[0-9.]+(?:/\d+)?)"
                        r"|(?P<bare6>[0-9a-f]*:[0-9a-f:.]*(?:/\d+)?))"
                        r"(?::(?P<port>\d+(?:-\d+)?))?(?:/(?P<proto>tcp|udp))?", re.I)
+HOST_NAME = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?", re.I)
 
 
 def lan_error(text):
@@ -110,15 +111,43 @@ def lan_error(text):
     return None
 
 
+def hosts_error(text):
+    """Why a list of hosts entries is not valid, or None."""
+    for line in re.split(r"[,\n]", text):
+        words = line.split()
+        if not words:
+            continue
+        try:
+            ipaddress.ip_address(words[0])
+        except ValueError:
+            return f"Hosts entry does not start with an address: {line.strip()}"
+        if len(words) < 2:
+            return f"Hosts entry has no names after {words[0]}"
+        for name in words[1:]:
+            if not HOST_NAME.fullmatch(name):
+                return f"Not a host name: {name}"
+    return None
+
+
+def hosts_lines(value):
+    """The saved form, ADDR NAME..., ADDR NAME..., as one entry per line."""
+    return "\n".join(entry.strip() for entry in value.split(",") if entry.strip())
+
+
+def hosts_value(text):
+    return ", ".join(" ".join(line.split()) for line in re.split(r"[,\n]", text) if line.strip())
+
+
 class Preferences:
     """Preferences that remain unsaved until the window's Save button is used."""
 
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders", "dotnet", "lan"):
+        for key in ("net", "mangohud", "mod_loaders", "dotnet", "lan", "private_hosts",
+                    "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
-        for key in ("with_proton", "lan_allow"):
+        for key in ("with_proton", "lan_allow", "hosts"):
             self.values[key] = self.values.get(key, "")
         self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
         self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
@@ -174,12 +203,18 @@ class Preferences:
     def lan_allow_controls(self):
         return self.lan_controls and self.values.get("lan") != "1"
 
+    @property
+    def hosts_controls(self):
+        return self.values.get("private_hosts") == "1"
+
     def error(self):
         """Why the visible settings cannot be saved, or None."""
         if self.scope == "clear":
             return None
         if self.lan_allow_controls and lan_error(self.values["lan_allow"]):
             return lan_error(self.values["lan_allow"])
+        if self.hosts_controls:
+            return hosts_error(self.values["hosts"])
         return None
 
     @property
@@ -219,6 +254,10 @@ class Preferences:
             result["lan"] = self.values["lan"]
         if self.lan_allow_controls:
             result["lan_allow"] = ", ".join(w for w in re.split(r"[\s,]+", self.values["lan_allow"]) if w)
+        result["private_hosts"] = self.values["private_hosts"]
+        if self.hosts_controls:
+            result["hosts"] = hosts_value(self.values["hosts"])
+            result["hosts_writable"] = self.values["hosts_writable"]
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -342,6 +381,23 @@ class Dialog:
         self.row(key, label, widget)
         widget.connect("changed", lambda widget: self.set_value(key, widget.get_text()))
 
+    def text_area(self, key, label, text):
+        """A label above a multi-line text field, both in one row."""
+        Gtk = self.Gtk
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(Gtk.Label(label=label, xalign=0, wrap=True))
+        view = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False,
+                            top_margin=6, bottom_margin=6, left_margin=6, right_margin=6)
+        view.set_size_request(-1, 110)
+        view.get_buffer().set_text(text)
+        frame = Gtk.Frame()
+        frame.set_child(view)
+        box.append(frame)
+        self.body.append(box)
+        self.rows[key], self.widgets[key] = box, view
+        view.get_buffer().connect("changed", lambda buffer: self.set_value(
+            key, buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)))
+
     def toggle(self, key):
         """A switch whose value decides which other controls show."""
         def changed(widget, *_):
@@ -392,6 +448,13 @@ class Dialog:
                     self.toggle("lan"))
         self.entry("lan_allow", "LAN addresses allowed anyway", self.state.values["lan_allow"],
                    "10.0.50.105:443, 192.168.1.0/24")
+        self.switch("private_hosts", "Private hosts file (names redirected for this game only)",
+                    self.state.values["private_hosts"] == "1", self.toggle("private_hosts"))
+        self.text_area("hosts", "Hosts entries, one per line: an address, then the names it is for",
+                       hosts_lines(self.state.values["hosts"]))
+        self.switch("hosts_writable", "The game may edit its hosts file too",
+                    self.state.values["hosts_writable"] == "1",
+                    lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
         resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
                                          "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
         self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
@@ -459,6 +522,8 @@ class Dialog:
         self.rows["with_proton"].set_visible(self.state.with_proton_controls)
         self.rows["lan"].set_visible(self.state.lan_controls)
         self.rows["lan_allow"].set_visible(self.state.lan_allow_controls)
+        for key in ("hosts", "hosts_writable"):
+            self.rows[key].set_visible(self.state.hosts_controls)
         self.note.set_label("MangoHud is unavailable with NW.js." if self.state.engine == "nwjs" else "")
         self.note.set_visible(self.state.engine == "nwjs")
 

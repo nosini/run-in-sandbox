@@ -84,6 +84,15 @@
 #               IPv6 in brackets when a port follows. A port without a
 #               protocol means TCP and UDP. Repeatable.
 #   --lan       with --net: the whole LAN too. Still not this machine.
+#   --hosts     a private /etc/hosts: the host's, with the --add-host entries
+#               in front of it, made afresh on every launch. The game's own
+#               name lookups only; the desktop's are not affected.
+#   --add-host "ADDR NAME..."  an entry for it; implies --hosts. Repeatable.
+#   --hosts-writable  the game may change that file as well, which then
+#               lives on as ~/game-sandboxes/NAME/hosts; the --add-host entries
+#               are rewritten and conflicting names elsewhere removed on later
+#               launches. pkexec runs its command as is in here, so a program
+#               that edits /etc/hosts through it gets on.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -497,6 +506,9 @@ Access
   --allow-lan LIST      with --net: these LAN addresses after all, e.g.
                         10.0.50.105:443,192.168.1.0/24 ([v6]:port, :80/tcp)
   --lan                 with --net: the whole LAN, still not this machine
+  --hosts               a private /etc/hosts, the host's plus --add-host's
+  --add-host "ADDR NAME..."  an entry in it (implies --hosts)
+  --hosts-writable      the game may edit it too; kept in the capture folder
   --ro SRC DST          bind SRC in read-only at DST
 
 Other
@@ -541,7 +553,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
-DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0
+DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -580,6 +592,10 @@ while [ "$#" -gt 0 ]; do
         --allow-lan) LAN_ALLOW+=( "${2?--allow-lan needs a list of addresses}" ); shift 2 ;;
         --allow-lan=*) LAN_ALLOW+=( "${1#--allow-lan=}" ); shift ;;
         --lan)       LAN_ALL=1; shift ;;
+        --hosts)     HOSTS=1; shift ;;
+        --add-host)  HOSTS=1; HOSTS_ADD+=( "${2?--add-host needs \"ADDRESS NAME...\"}" ); shift 2 ;;
+        --add-host=*) HOSTS=1; HOSTS_ADD+=( "${1#--add-host=}" ); shift ;;
+        --hosts-writable) HOSTS=1; HOSTS_RW=1; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
@@ -599,7 +615,7 @@ done
 [ "$NET" = 1 ] || { [ "${#LAN_ALLOW[@]}" = 0 ] && [ "$LAN_ALL" = 0 ]; } || {
     echo "--allow-lan and --lan widen --net: they need it" >&2; exit 1; }
 
-# The LAN allowances, checked before anything starts and
+# The LAN allowances and hosts entries, checked before anything starts and
 # handed on in a form nothing has to parse again. The preferences window
 # (sandbox-game-dialog) checks the same syntax as it is typed.
 read -r -d '' PREF_CHECK <<'PY' || true
@@ -607,6 +623,7 @@ import ipaddress, json, re, sys
 LAN_ENTRY = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+(?:/\d+)?)\]|(?P<v4>[0-9.]+(?:/\d+)?)"
                        r"|(?P<bare6>[0-9a-f]*:[0-9a-f:.]*(?:/\d+)?))"
                        r"(?::(?P<port>\d+(?:-\d+)?))?(?:/(?P<proto>tcp|udp))?", re.I)
+HOST_NAME = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?", re.I)
 kind, texts = sys.argv[1], sys.argv[2:]
 try:
     if kind == "lan":
@@ -627,11 +644,27 @@ try:
                     raise ValueError(f"no such port: {word}")
             rules.append([str(net), (m["proto"] or "").lower(), m["port"] or ""])
         json.dump(rules, sys.stdout)
+    else:
+        for line in re.split(r"[,\n]", "\n".join(texts)):
+            words = line.split()
+            if not words:
+                continue
+            try:
+                address = ipaddress.ip_address(words[0])
+            except ValueError:
+                raise ValueError(f"not an address: {words[0]}") from None
+            if len(words) < 2:
+                raise ValueError(f"no host names after {words[0]}")
+            for name in words[1:]:
+                if not HOST_NAME.fullmatch(name):
+                    raise ValueError(f"not a host name: {name}")
+            print(address, *words[1:])
 except ValueError as error:
-    sys.exit(f"--allow-lan: {error}")
+    sys.exit(f"{'--allow-lan' if kind == 'lan' else '--add-host'}: {error}")
 PY
-LAN_RULES="[]"
+LAN_RULES="[]"; HOSTS_LINES=""
 [ "${#LAN_ALLOW[@]}" = 0 ] || LAN_RULES="$(python3 -c "$PREF_CHECK" lan "${LAN_ALLOW[@]}")" || exit 1
+[ "${#HOSTS_ADD[@]}" = 0 ] || HOSTS_LINES="$(python3 -c "$PREF_CHECK" hosts "${HOSTS_ADD[@]}")" || exit 1
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
 GAMEDIR="$(realpath "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
@@ -912,7 +945,7 @@ if [ -n "$PGMMV_SPEC" ]; then
     set -- /pgmmv/bin/pgmmv-player --game-dir=/game "$@"
 fi
 
-# What PATH the game gets; .NET adds to it below.
+# What PATH the game gets; .NET and the pkexec stand-in add to it below.
 SANDBOX_PATH=/usr/bin:/bin
 
 # ---- .NET ------------------------------------------------------------------
@@ -973,6 +1006,87 @@ if [ -n "$WITH_PROTON_SPEC" ]; then
             echo "sandbox-game: $(basename "$WITH_PROTON") is at /proton; its Wine is /proton/$w" >&2
             break; }
     done
+fi
+
+# ---- private hosts file ----------------------------------------------------
+# /etc/hosts is the host's, like the rest of /etc. --hosts gives the game one
+# of its own: the host's, with the --add-host names removed from inherited
+# entries before their replacements are added. Name lookups in the sandbox
+# read files before DNS, as on the host (/etc/nsswitch.conf), so this redirects names
+# for the game alone and leaves the desktop's lookups alone.
+#
+# Read-only, it is made afresh on every launch. --hosts-writable keeps it in
+# the capture folder instead, where whatever the game writes stays, and only
+# the block of --add-host entries is rewritten and conflicting names removed
+# from the rest of the file. bwrap sets no_new_privs, so
+# pkexec cannot do anything in here; a program that edits /etc/hosts through
+# it (pkexec cp TMP /etc/hosts) finds a stand-in that runs the command as is,
+# which, with the file writable, works.
+HOSTS_ARGS=()
+if [ "$HOSTS" = 1 ]; then
+    HOSTS_BEGIN="# sandbox-game: from its preferences, rewritten on every launch"
+    HOSTS_END="# sandbox-game: end"
+    hosts_block() {
+        [ -n "$HOSTS_LINES" ] || return 0
+        printf '%s\n' "$HOSTS_BEGIN" "$HOSTS_LINES" "$HOSTS_END"
+    }
+    hosts_inherited() {
+        awk -v b="$HOSTS_BEGIN" -v e="$HOSTS_END" -v added="$HOSTS_LINES" '
+            BEGIN {
+                count = split(added, lines, "\n")
+                for (i = 1; i <= count; i++) {
+                    n = split(lines[i], fields, /[ \t]+/)
+                    for (j = 2; j <= n; j++) overridden[tolower(fields[j])] = 1
+                }
+            }
+            $0 == b { skip = 1; next }
+            skip && $0 == e { skip = 0; next }
+            skip { next }
+            {
+                line = $0
+                comment = ""
+                pos = index(line, "#")
+                if (pos) { comment = substr(line, pos); line = substr(line, 1, pos - 1) }
+                sub(/^[ \t]+/, "", line)
+                n = split(line, fields, /[ \t]+/)
+                kept = fields[1]; aliases = 0; changed = 0
+                for (i = 2; i <= n; i++) {
+                    if (fields[i] == "") continue
+                    if (tolower(fields[i]) in overridden) { changed = 1; continue }
+                    kept = kept " " fields[i]; aliases++
+                }
+                if (!changed) print $0
+                else if (aliases) print kept (comment == "" ? "" : " " comment)
+                else if (comment != "") print comment
+            }' "$1"
+    }
+    if [ "$HOSTS_RW" = 1 ]; then
+        [ -f "$CAP/hosts" ] || cat /etc/hosts > "$CAP/hosts" 2>/dev/null || : > "$CAP/hosts"
+        { hosts_block
+          hosts_inherited "$CAP/hosts"
+        } > "$CAP/hosts.new"
+        mv -f "$CAP/hosts.new" "$CAP/hosts"
+        exec 4<<'SH'
+#!/bin/sh
+# sandbox-game's stand-in for pkexec, which cannot raise privileges in here:
+# the command runs as it is.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user) shift; [ "$#" -eq 0 ] || shift ;;
+        --disable-internal-agent|--keep-cwd) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+SH
+        HOSTS_ARGS=( --bind "$CAP/hosts" "$(realpath -m /etc/hosts)"
+                     --perms 0555 --ro-bind-data 4 /run/sandbox-bin/pkexec )
+        SANDBOX_PATH="/run/sandbox-bin:$SANDBOX_PATH"
+    else
+        exec 5< <(hosts_block; hosts_inherited /etc/hosts 2>/dev/null || true)
+        HOSTS_ARGS=( --ro-bind-data 5 "$(realpath -m /etc/hosts)" )
+    fi
 fi
 
 # Wine's Wayland driver will not start on gamescope's own Wayland server: it
@@ -1520,6 +1634,7 @@ BWRAP=( "${SCOPE[@]}" bwrap
     --proc /proc
     --dev /dev
     "${ID_ARGS[@]}"                   # after /etc, /sys and /proc, to cover them
+    "${HOSTS_ARGS[@]}"
     "${DEVICE_ARGS[@]}"
     --tmpfs /tmp
     "${XSOCK_ARGS[@]}"

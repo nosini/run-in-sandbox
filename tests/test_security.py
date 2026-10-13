@@ -942,6 +942,83 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(args[i - 1:i + 2], ["--dev-bind-try", "/dev/ntsync", "/dev/ntsync"])
         self.assertNotIn("/dev/ntsync", self.recorded_args())
 
+    def test_private_hosts_file_is_the_games_alone(self):
+        host = Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else ""
+        out = self.run_guest(
+            'cat /etc/hosts; echo ---; getent ahosts lobby.example; echo ---; '
+            '{ echo x >> /etc/hosts; } 2>/dev/null && echo wrote || echo refused; '
+            'command -v pkexec || true',
+            "--add-host", "10.0.50.105 lobby.example other.example",
+            "--add-host", "255.255.221.21 sentry.io").stdout
+        hosts, lookup, rest = out.split("---\n")
+        # Configured entries lead the private file.
+        self.assertEqual(hosts.splitlines()[1:3], ["10.0.50.105 lobby.example other.example",
+                                                   "255.255.221.21 sentry.io"])
+        self.assertEqual({line.split()[0] for line in lookup.splitlines()}, {"10.0.50.105"})
+        self.assertIn("refused", rest)
+        self.assertNotIn("/run/sandbox-bin", rest)
+        self.assertEqual(Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else "", host)
+        self.assertFalse((self.home / "game-sandboxes" / "game" / "hosts").exists())
+        # Without --hosts, the host's own.
+        self.assertEqual(self.run_guest("cat /etc/hosts").stdout, host)
+
+    def test_private_hosts_remove_inherited_conflicts_and_keep_other_aliases(self):
+        fixture = self.base / "inherited-hosts"
+        fixture.write_text("127.0.0.1 localhost\n"
+                           "192.0.2.10 Lobby.Example kept.example # keep this comment\n"
+                           "2001:db8::10 lobby.example ipv6-kept.example\n"
+                           "192.0.2.11 lobby.example # no aliases left\n"
+                           "# lobby.example in a comment\n")
+        probe = ('cat /etc/hosts; echo ---; python3 -c \'import json, socket; '
+                 'print(json.dumps({n: sorted({a[4][0] for a in socket.getaddrinfo(n, 80)}) '
+                 'for n in ("lobby.example", "kept.example", "ipv6-kept.example")}))\'')
+        for writable in (False, True):
+            with self.subTest(writable=writable):
+                options = ["--hosts-writable"] if writable else []
+                args = ["bwrap", "--dev-bind", "/", "/", "--ro-bind", str(fixture), "/etc/hosts",
+                        str(ROOT / "sandbox-game"), "--headless", *options,
+                        "--add-host", "10.0.50.105 lobby.example", str(self.game), "/bin/sh", "-ec", probe]
+                result = subprocess.run(args, env=self.env, stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                hosts, lookups = result.stdout.split("---\n")
+                self.assertEqual(json.loads(lookups), {"lobby.example": ["10.0.50.105"],
+                                                     "kept.example": ["192.0.2.10"],
+                                                     "ipv6-kept.example": ["2001:db8::10"]})
+                self.assertIn("192.0.2.10 kept.example # keep this comment\n", hosts)
+                self.assertIn("# no aliases left\n", hosts)
+                self.assertIn("# lobby.example in a comment\n", hosts)
+                if writable:
+                    kept = self.home / "game-sandboxes" / "game" / "hosts"
+                    with kept.open("a") as f:
+                        f.write("192.0.2.20 LOBBY.EXAMPLE edited.example\n")
+                    updated = self.run_guest(probe, "--hosts-writable", "--add-host",
+                                             "10.0.50.106 lobby.example").stdout
+                    hosts, lookups = updated.split("---\n")
+                    self.assertEqual(json.loads(lookups)["lobby.example"], ["10.0.50.106"])
+                    self.assertIn("192.0.2.20 edited.example\n", hosts)
+
+    def test_writable_hosts_file_keeps_the_games_edits(self):
+        host = Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else ""
+        # What a launcher that edits /etc/hosts through pkexec does.
+        self.run_guest('cp /etc/hosts /tmp/new; echo "10.9.9.9 app.example" >> /tmp/new; '
+                       'pkexec --disable-internal-agent cp /tmp/new /etc/hosts',
+                       "--hosts-writable", "--add-host", "10.0.50.105 lobby.example")
+        kept = self.home / "game-sandboxes" / "game" / "hosts"
+        self.assertIn("10.9.9.9 app.example", kept.read_text())
+        # Next time the preferences' entries are rewritten, and the game's stay.
+        out = self.run_guest("cat /etc/hosts", "--hosts-writable",
+                             "--add-host", "10.0.50.106 lobby.example").stdout
+        self.assertEqual(out.splitlines()[1], "10.0.50.106 lobby.example")
+        self.assertIn("10.9.9.9 app.example", out.splitlines())
+        self.assertNotIn("10.0.50.105", out)
+        self.assertEqual(out.count("# sandbox-game: end"), 1)
+        self.assertEqual(Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else "", host)
+        # And with no entries left, none of the block.
+        out = self.run_guest("cat /etc/hosts", "--hosts-writable").stdout
+        self.assertNotIn("sandbox-game", out)
+        self.assertIn("10.9.9.9 app.example", out.splitlines())
+
     def test_dotnet_runtime_only_when_asked(self):
         def install(root):
             (root / "host" / "fxr" / "10.0.12").mkdir(parents=True)
@@ -1566,6 +1643,19 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         args = self.launch_with(recorded, self.game, "net=0\nlan=1\nlan_allow=10.0.50.105\n")
         self.assertFalse([a for a in args if a.startswith(("--net", "--lan", "--allow-lan"))], args)
 
+    def test_launcher_passes_hosts_preferences_behind_their_switch(self):
+        recorded = self.stub_launcher()
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        args = self.launch_with(recorded, self.game,
+                                "private_hosts=1\nhosts_writable=1\n"
+                                "hosts=10.0.50.105 a.example b.example, 255.255.221.21 sentry.io,\n")
+        for flag in ("--hosts", "--add-host=10.0.50.105 a.example b.example",
+                     "--add-host=255.255.221.21 sentry.io", "--hosts-writable"):
+            self.assertIn(flag, args)
+        self.assertEqual(len([a for a in args if a.startswith("--add-host")]), 2)
+        args = self.launch_with(recorded, self.game, "private_hosts=0\nhosts=10.0.0.1 x\nhosts_writable=1\n")
+        self.assertFalse([a for a in args if a.startswith(("--hosts", "--add-host"))], args)
+
     def test_failure_window_points_dotnet_programs_at_the_preference(self):
         self.stub_launcher('echo "You must install .NET to run this application." >&2; exit 131')
         game = self.dotnet_launcher()
@@ -1626,6 +1716,24 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertIn(b"nas.local", refused.exception.stderr)
         _, saved = self.preferences([])                  # cancelled: still as before
         self.assertEqual(saved["lan_allow"], "10.0.50.105:443")
+
+    def test_preferences_save_hosts_entries(self):
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        self.env["TEST_VALUES"] = json.dumps({
+            "private_hosts": "1", "hosts": "10.0.50.105 a.example\n255.255.221.21 sentry.io",
+            "hosts_writable": "1"})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertEqual((saved["private_hosts"], saved["hosts"], saved["hosts_writable"]),
+                         ("1", "10.0.50.105 a.example, 255.255.221.21 sentry.io", "1"))
+        # Hidden behind their switch, the entries are kept as they were.
+        self.env["TEST_VALUES"] = json.dumps({"private_hosts": "0", "hosts": ""})
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertEqual(saved["private_hosts"], "0")
+        self.assertEqual(saved["hosts"], "10.0.50.105 a.example, 255.255.221.21 sentry.io")
+        self.env["TEST_VALUES"] = json.dumps({"private_hosts": "1", "hosts": "sentry.io 255.255.221.21"})
+        with self.assertRaises(subprocess.CalledProcessError) as refused:
+            self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertIn(b"sentry.io", refused.exception.stderr)
 
     def test_runtime_choice_updates_preferences_and_can_be_cancelled(self):
         (self.game / "www").mkdir()

@@ -276,6 +276,16 @@ if [ "$(cfg_get net 0)" = 1 ]; then
         [ -z "$LAN_ALLOW" ] || FLAG+=( "--allow-lan=$LAN_ALLOW" )
     fi
 fi
+# hosts=ADDR NAME..., ADDR NAME... -- one --add-host each.
+if [ "$(cfg_get private_hosts 0)" = 1 ]; then
+    FLAG+=( --hosts )
+    IFS=, read -r -a HOST_ENTRIES <<<"$(cfg_get hosts "")"
+    for e in ${HOST_ENTRIES[@]+"${HOST_ENTRIES[@]}"}; do
+        e="${e#"${e%%[![:space:]]*}"}"; e="${e%"${e##*[![:space:]]}"}"
+        [ -z "$e" ] || FLAG+=( "--add-host=$e" )
+    done
+    [ "$(cfg_get hosts_writable 0)" = 1 ] && FLAG+=( --hosts-writable )
+fi
 # Native programs only. The .NET runtime is opt-in, and only for a program
 # recognised as needing it.
 DOTNET_APP=0

@@ -425,7 +425,8 @@ Windows games only; whether file names ignore case, and what WebGL runs on, for 
 MV/MZ only. The .NET runtime and Proton for a program that starts Wine itself
 are asked for native programs only; see [Native programs that need .NET, or run
 Wine themselves](#native-programs-that-need-net-or-run-wine-themselves).
-Turning on **Internet** shows the LAN controls; see [Network](#network).
+Turning on **Internet** shows the LAN controls, and **Private hosts file**
+the hosts entries; see [Network](#network).
 Choosing gamescope shows resolution and fullscreen controls inline.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
@@ -447,6 +448,7 @@ fullscreen or one that will not quit, without a terminal.
 sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--dotnet[=DIR]] [--with-proton[=VER]] [--net [--allow-lan LIST|--lan]]
+             [--hosts] [--add-host "ADDR NAME..."] [--hosts-writable]
              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
@@ -475,6 +477,9 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--net` | internet access, and only that; see [Network](#network) |
 | `--allow-lan LIST` | with `--net`: these LAN addresses or networks after all, optionally only one port or protocol; see [Network](#network) |
 | `--lan` | with `--net`: the whole LAN, but still not this machine |
+| `--hosts` | a private `/etc/hosts`; see [Private hosts file](#private-hosts-file) |
+| `--add-host "ADDR NAME..."` | an entry in it, ahead of the host's own; implies `--hosts`, repeatable |
+| `--hosts-writable` | the game may edit that file too; it is then kept in the capture folder |
 | `--dotnet[=DIR]` | the host's .NET runtime, read-only at `/dotnet` |
 | `--with-proton[=VER]` | a Proton install, read-only at `/proton`, for a native program that starts Wine itself |
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
@@ -624,6 +629,7 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── compat/     --proton: the Wine prefix, under pfx/
 ├── mkxp.json   --mkxp: the runtime config, yours to edit
 ├── machine-id  the game's own stand-in for /etc/machine-id
+├── hosts       --hosts-writable: the game's /etc/hosts
 └── playtime    one line per launch: when it started, seconds played
 ```
 
@@ -785,6 +791,32 @@ Off by default, and like the list it only applies with the internet on.
 
 Neither reaches this machine itself, even by name. Its interface addresses
 stay blocked even when an allowed address or network includes them.
+
+### Private hosts file
+
+**Private hosts file** in the preferences, or `--hosts`, gives the game its own
+`/etc/hosts`: yours, with conflicting names removed and the entries you list
+added in front of it, one per line, as in a hosts file:
+
+```
+10.0.50.105 lobby.example.com login.example.com
+255.255.221.21 telemetry.example.com
+```
+
+Names resolve through that file before DNS, so this redirects them for the game
+alone. Other programs, including another copy of the same game running outside
+the sandbox, still reach the real servers. Your own `/etc/hosts` is never
+changed.
+
+The file is read-only and made afresh on every launch, unless **The game may
+edit its hosts file too** (`--hosts-writable`) is on. Then it is kept as
+`~/game-sandboxes/<name>/hosts`, and what the game writes there stays. Only the
+block holding your entries is rewritten on later launches, and any conflicting
+names elsewhere in the file are removed, preserving unrelated aliases. Some
+programs edit `/etc/hosts` through `pkexec`, which cannot work in a sandbox.
+With this switch on, `pkexec` runs the command as it is, without extra
+privileges, and the edit goes into the game's own file. Delete that file to
+start again from yours.
 
 ## Sound
 
@@ -977,6 +1009,9 @@ dotnet=0|1
 with_proton=|auto|<install name>
 lan=0|1
 lan_allow=10.0.50.105:443, 192.168.1.0/24
+private_hosts=0|1
+hosts=10.0.50.105 lobby.example.com login.example.com, 255.255.221.21 telemetry.example.com
+hosts_writable=0|1
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -1002,6 +1037,8 @@ when launching from the file manager.
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
 `with_proton` applies only when the game runs natively; empty means none.
 `lan` and `lan_allow` apply only with `net=1`.
+`hosts` and `hosts_writable` apply only with `private_hosts=1`; commas separate
+the entries in `hosts`.
 
 ## Known rough edges
 

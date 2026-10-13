@@ -98,7 +98,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -130,7 +130,7 @@ _sandbox_game()
         --ro)
             _sandbox_game_filedir
             return ;;
-        --env | --gamescope | --allow-lan)
+        --env | --gamescope | --allow-lan | --add-host)
             return ;;
         --proton | --with-proton)
             if [[ $split_here ]]; then
@@ -156,7 +156,7 @@ _sandbox_game()
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --gamescope --host-x11 --headless
             --proton --mod-loaders --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
-            --lan --ro --name --env --mangohud --list --stop
+            --lan --hosts --add-host --hosts-writable --ro --name --env --mangohud --list --stop
             --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
         return
     fi

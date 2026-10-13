@@ -63,6 +63,23 @@ class PreferencePolicyTests(unittest.TestCase):
         state.values["lan_allow"] = "10.0.50.105:443, 127.0.0.1"
         self.assertIn("127.0.0.1", state.error())
 
+    def test_hosts_entries_and_writing_follow_the_private_hosts_switch(self):
+        state = Preferences({"engine": "proton", "values": {
+            "private_hosts": "0", "hosts": "10.0.50.105 a.example b.example", "hosts_writable": "1"}})
+        self.assertEqual(state.result()["private_hosts"], "0")
+        self.assertNotIn("hosts", state.result())
+        self.assertNotIn("hosts_writable", state.result())
+        state.values["private_hosts"] = "1"
+        state.values["hosts"] = "10.0.50.105   a.example b.example\n\n255.255.221.21 sentry.io\n"
+        self.assertEqual(state.result()["hosts"], "10.0.50.105 a.example b.example, 255.255.221.21 sentry.io")
+        self.assertEqual(state.result()["hosts_writable"], "1")
+        self.assertEqual(MODULE["hosts_lines"](state.result()["hosts"]),
+                         "10.0.50.105 a.example b.example\n255.255.221.21 sentry.io")
+        state.values["hosts"] = "sentry.io 255.255.221.21"
+        self.assertIn("address", state.error())
+        state.scope = "clear"
+        self.assertIsNone(state.error())
+
     def test_dotnet_only_for_native_programs_needing_it(self):
         state = Preferences({"engine": "native", "dotnet": True, "values": {"dotnet": "1"}})
         self.assertEqual(state.result()["dotnet"], "1")
@@ -89,6 +106,16 @@ class PreferencePolicyTests(unittest.TestCase):
                 launcher = subprocess.run([str(ROOT / "sandbox-game"), "--net", "--allow-lan", sample,
                                            "--print-name", "/"], capture_output=True, text=True)
                 self.assertEqual(MODULE["lan_error"](sample) is None, launcher.returncode == 0,
+                                 launcher.stderr)
+
+    def test_dialog_and_launcher_accept_the_same_hosts_entries(self):
+        samples = ["10.0.0.1 a.example", "10.0.0.1 a.example b_c.example, ::1 local", "10.0.0.1",
+                   "a.example 10.0.0.1", "10.0.0.1 -a", "10.0.0.1 a..b", "10.0.0.1 a/b"]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                launcher = subprocess.run([str(ROOT / "sandbox-game"), "--add-host", sample,
+                                           "--print-name", "/"], capture_output=True, text=True)
+                self.assertEqual(MODULE["hosts_error"](sample) is None, launcher.returncode == 0,
                                  launcher.stderr)
 
 
@@ -208,6 +235,24 @@ class GtkDialogTests(unittest.TestCase):
         dialog.save_preferences()
         saved = self.responses[0][1]
         self.assertEqual((saved["net"], saved["lan"], saved["lan_allow"]), ("1", "0", "10.0.50.105:443"))
+
+    def test_hosts_entries_appear_with_their_switch_and_bad_entries_block_saving(self):
+        dialog = self.create("preferences", {"engine": "native"})
+        self.assertFalse(dialog.rows["hosts"].get_visible())
+        self.assertFalse(dialog.rows["hosts_writable"].get_visible())
+        dialog.widgets["private_hosts"].set_active(True)
+        self.assertTrue(dialog.rows["hosts"].get_visible())
+        self.assertTrue(dialog.rows["hosts_writable"].get_visible())
+        dialog.widgets["hosts"].get_buffer().set_text("10.0.50.105 a.example\nsentry.io")
+        dialog.save_preferences()
+        self.assertEqual(self.responses, [])
+        self.assertIn("sentry.io", dialog.error_note.get_label())
+        dialog.widgets["hosts"].get_buffer().set_text("10.0.50.105 a.example\n255.255.221.21 sentry.io")
+        dialog.widgets["hosts_writable"].set_active(True)
+        dialog.save_preferences()
+        saved = self.responses[0][1]
+        self.assertEqual((saved["private_hosts"], saved["hosts"], saved["hosts_writable"]),
+                         ("1", "10.0.50.105 a.example, 255.255.221.21 sentry.io", "1"))
 
     def test_cancel_after_editing_returns_no_preferences(self):
         dialog = self.create("preferences", {"engine": "pgmmv", "can_proton": True})
