@@ -679,6 +679,41 @@ class SecurityTests(unittest.TestCase):
             env=self.env, capture_output=True, text=True, pass_fds=(secret,), timeout=15)
         self.assertNotIn("private", leak.stdout)
 
+    def test_attach_cannot_be_steered_into_another_sandbox(self):
+        # A process that names another sandbox's capture home on its command
+        # line, the way that sandbox's bwrap does, and that comes first in
+        # /proc. A game can make one: /proc lists PIDs as strings, so it only
+        # has to run through PIDs until its own sorts before its pid 1's. It
+        # stands in here in a user namespace of its own, started before the
+        # victim. Attaching to the victim must still land in the victim.
+        victim_home = self.home / "game-sandboxes" / "victim" / "home"
+        decoy = subprocess.Popen(
+            ["unshare", "--user", "/bin/bash", "-c",
+             'echo ready; exec -a bwrap /bin/bash -c "sleep 30; :" --bind "$0" "$1"',
+             str(victim_home), str(self.home)],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(decoy.kill)
+        self.assertEqual(decoy.stdout.readline().strip(), "ready")
+        victim = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "victim",
+             str(self.game), "/bin/sh", "-c", "echo ready; exec sleep 30"],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop():
+            if victim.poll() is None:
+                victim.terminate()
+            victim.communicate(timeout=10)
+        self.addCleanup(stop)
+        self.assertEqual(victim.stdout.readline().strip(), "ready")
+        listed = subprocess.run([str(ROOT / "sandbox-attach"), "--list"], env=self.env,
+                                capture_output=True, text=True, timeout=15).stdout
+        self.assertEqual([line.split()[0] for line in listed.splitlines()[1:]], ["victim"])
+        result = subprocess.run(
+            [str(ROOT / "sandbox-attach"), "--name", "victim", "--exec", "--",
+             "/bin/sh", "-c", 'printf attached > "$HOME/attached"'],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((victim_home / "attached").is_file(), "attached somewhere else")
+
     def test_preferences_save_explicit_permissions(self):
         bindir = self.home / ".local" / "bin"
         bindir.mkdir(parents=True)

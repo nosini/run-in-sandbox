@@ -57,36 +57,35 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ---- find the running sandboxes -------------------------------------------
-# A sandbox is a bwrap whose command line mentions the capture directory. Two
-# bwrap processes exist per launch and further ones may be nested, so the user
-# namespace -- not the pid -- identifies a sandbox. Anything still sharing our
-# own namespace is the outer half and cannot be joined into.
+# As sandbox-game --stop finds them: by the outer bwrap, which runs in our own
+# user namespace -- where nothing a game starts can be -- and binds the
+# capture's home: `--bind ~/game-sandboxes/NAME/home $HOME`. Its one child is
+# the sandbox's pid 1, in the sandbox's namespaces: that is what is joined.
+# A process inside a game could name any capture dir on its command line, so
+# that alone says nothing.
 #
 # Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
-SB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SEEN_NS=()
+SB_PIDS=(); SB_NAMES=(); SB_PROTON=()
 scan() {
-    local p cmd ns name proton self_ns
-    self_ns="$(readlink /proc/self/ns/user)"
+    local p args i name child
     for p in /proc/[0-9]*; do
         p="${p##*/}"
-        # Grouped so that 2>/dev/null also covers the shell's own complaint
-        # when the redirection fails -- processes come and go while we scan,
-        # and a game exiting mid-loop should not print anything.
-        cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null )" || continue
-        case "$cmd" in *bwrap*) ;; *) continue ;; esac
-        case "$cmd" in *game-sandboxes/*) ;; *) continue ;; esac
-        ns="$(readlink "/proc/$p/ns/user" 2>/dev/null)" || continue
-        [ "$ns" != "$self_ns" ] || continue
-        [[ " ${SEEN_NS[*]-} " == *" $ns "* ]] && continue
-        # First match only: the command line names the capture dir several
-        # times over (home, rw, work, compat), and a greedy match would land
-        # on the last one.
-        name="$(grep -o 'game-sandboxes/[^/]*/' <<<"$cmd" | head -n1)"
-        name="${name#game-sandboxes/}"; name="${name%/}"
-        [ -n "$name" ] || continue
-        case "$cmd" in *STEAM_COMPAT_DATA_PATH*) proton=1 ;; *) proton=0 ;; esac
-        SEEN_NS+=( "$ns" ); SB_PIDS+=( "$p" ); SB_NAMES+=( "$name" )
-        SB_PROTON+=( "$proton" )
+        [[ "/proc/$p/ns/user" -ef /proc/self/ns/user ]] || continue
+        # Grouped so a process exiting mid-scan does not print anything.
+        { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
+        [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
+        name=""
+        for ((i = 1; i < ${#args[@]}; i++)); do
+            [ "${args[i-1]}" = --bind ] || continue
+            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
+            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
+        done
+        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        # No newline after the last PID, so read fails even when it got one.
+        child=""; { read -r child _ < "/proc/$p/task/$p/children"; } 2>/dev/null || true
+        [ -n "$child" ] && ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]] || continue
+        SB_PIDS+=( "$child" ); SB_NAMES+=( "$name" )
+        [[ " ${args[*]} " == *" STEAM_COMPAT_DATA_PATH "* ]] && SB_PROTON+=( 1 ) || SB_PROTON+=( 0 )
     done
 }
 scan
