@@ -829,6 +829,47 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--mod-loaders", recorded.read_text().splitlines())
 
+    def test_nwjs_runs_under_the_games_name_without_a_copy(self):
+        # The runtime's nw, under the game's name beside links to the rest of
+        # it, and the same file: a copy would fill /tmp, which is memory.
+        (self.game / "www").mkdir()
+        (self.game / "www" / "index.html").write_text("")
+        (self.game / "package.json").write_text('{"name": "", "main": "www/index.html"}')
+        nwjs = self.base / "nwjs"
+        nwjs.mkdir()
+        (nwjs / "nw").write_text('#!/bin/sh\n[ "$0" -ef /nwjs/nw ] && echo same\n'
+                                 '[ -e "${0%/*}/resources.pak" ] && echo linked\n'
+                                 'echo "${0##*/}"\n')
+        (nwjs / "nw").chmod(0o755)
+        (nwjs / "resources.pak").write_text("")
+        self.env["NWJS_DIR"] = str(nwjs)
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        for helper in ("sandbox-game-lib", "nwjs-casefold.js"):
+            (helpers / helper).symlink_to(ROOT / helper)
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\0" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        path = self.env["PATH"]
+        self.env["PATH"] = "/usr/bin:/bin"
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env["PATH"] = path
+        args = recorded.read_text().split("\0")[:-1]
+        # What the launcher binds, and the command it runs, in a real sandbox;
+        # the display options are not what this is about.
+        binds = [x for i, a in enumerate(args) if a == "--ro" for x in args[i:i + 3]]
+        command = args[args.index(str(self.game)) + 1:]
+        result = self.cli("--headless", *binds, self.game, *command)
+        self.assertEqual(result.stdout.split(), ["same", "linked", "Game"])
+
     def test_nwjs_file_name_case_and_webgl_follow_the_preferences(self):
         # An RPG Maker MV game: nwjs-casefold.js is bound in read-only and
         # package.json names it, until the preferences say casefold=0 -- then

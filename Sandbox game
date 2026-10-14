@@ -140,7 +140,12 @@ elif [ -n "$APPDIR" ]; then
     [ -n "$NW_DIR" ] && [ -x "$NW_DIR/nw" ] \
         || die "NW.js runtime not found under ~/.config/nvm (or set NWJS_DIR=...)."
     NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
-    RO=( --ro "$NW_DIR" /nwjs )
+    # nw under the game's name -- the process name, and the node name the
+    # sound server keys the game's device by -- in a directory of links to
+    # the rest of the runtime, where Chromium looks for it beside the binary.
+    # Bound there rather than copied: a copy lands in /tmp, which is memory,
+    # some 200 MB of it on every launch.
+    RO=( --ro "$NW_DIR" /nwjs --ro "$NW_DIR/nw" "/tmp/nwrun/$NW_NAME" )
     # Windows ignores case in file names, and so do the games made on it:
     # asking for img/pictures/B.png when the file is b.png leaves an invisible
     # character or a "Failed to load" on Linux. nwjs-casefold.js, run ahead of
@@ -191,8 +196,8 @@ if changed:
         json.dump(pkg, f, indent=2, ensure_ascii=False)
     os.replace(path + ".tmp", path)
 EOF
-    # Inside the sandbox: fix up package.json, rebuild the runtime dir with nw
-    # renamed to the game, then exec it against the app. $1=name $2=app-path
+    # Inside the sandbox: fix up package.json, link the rest of the runtime in
+    # beside nw renamed to the game, then exec it against the app. $1=name $2=app-path
     # $3=the fix above $4=ozone platform, then any further NW.js options,
     # appended below once the display preferences are known.
     # Chromium tells the sound server it is "Chromium", like every Chromium
@@ -209,9 +214,10 @@ EOF
         export PULSE_PROP_OVERRIDE="application.name=$1"
         casefold=; [ ! -f /nwjs-casefold.js ] || casefold=1
         [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" "$casefold" || true
-        d=/tmp/nwrun; mkdir -p "$d"
-        cp /nwjs/nw "$d/$1"
-        for f in /nwjs/*; do b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"; done
+        d=/tmp/nwrun
+        for f in /nwjs/*; do
+            b=${f##*/}; [ "$b" = nw ] || [ "$b" = "$1" ] || ln -sf "$f" "$d/$b"
+        done
         name=$1 app=$2 ozone=$4; shift 4
         exec "$d/$name" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
     ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
