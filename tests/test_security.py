@@ -1121,6 +1121,31 @@ class SecurityTests(unittest.TestCase):
         seen = self.cli("--headless", played, "/bin/cat", "/etc/machine-id").stdout.strip()
         self.assertEqual(seen, read("/etc/machine-id"))
 
+    def test_standard_input_reaches_the_game_with_and_without_network(self):
+        payload = "input for the game\n"
+        for options in ([], ["--net"]):
+            for terminal in (False, True):
+                with self.subTest(options=options, terminal=terminal):
+                    if options and not shutil.which("pasta"):
+                        self.skipTest("pasta (package passt) is not installed")
+                    script = ('test -t 0; ' if terminal else '') + (
+                        'IFS= read -r line; printf "%s\\n" "$line"')
+                    args = [str(ROOT / "sandbox-game"), "--headless", *options,
+                            self.game, "/bin/sh", "-ec", script]
+                    kwargs = dict(env=self.env, capture_output=True, text=True, timeout=15)
+                    if terminal:
+                        master, slave = os.openpty()
+                        try:
+                            os.write(master, payload.encode())
+                            result = subprocess.run(args, stdin=slave, **kwargs)
+                        finally:
+                            os.close(slave)
+                            os.close(master)
+                    else:
+                        result = subprocess.run(args, input=payload, **kwargs)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, payload)
+
     def test_network_reaches_the_internet_and_nothing_else(self):
         if not shutil.which("pasta"):
             self.skipTest("pasta (package passt) is not installed")
