@@ -1350,6 +1350,14 @@ trap cleanup EXIT
 # Proton gets one too, whose writes are thrown away: Valve's builds lock
 # dist.lock in their own folder on every start, and write their first-run
 # "steampipe fixups" there when Steam has not run them yet.
+fuse_overlay() {                     # lower, upper, work, mountpoint
+    # FUSE parses commas as options and colons as lower-layer separators,
+    # even inside a shell-quoted path. Use directory descriptors so names
+    # cannot add options or expose an unintended host directory. These fds
+    # belong only to this command; bwrap and the game never inherit them.
+    fuse-overlayfs -o lowerdir=/proc/self/fd/14,upperdir=/proc/self/fd/15,workdir=/proc/self/fd/16 \
+        "$4" 14<"$1" 15<"$2" 16<"$3"
+}
 if bwrap --help 2>&1 | grep -q -- --overlay; then
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
     [ -z "$PROTON" ] || OVERLAY_ARGS+=( --overlay-src "$PROTON" --tmp-overlay /proton )
@@ -1357,16 +1365,14 @@ else
     command -v fuse-overlayfs >/dev/null || {
         echo "bwrap lacks --overlay and fuse-overlayfs is not installed" >&2
         echo "install fuse-overlayfs (openSUSE: zypper in fuse-overlayfs)" >&2; exit 1; }
-    fuse-overlayfs -o \
-        "lowerdir=$GAMEDIR,upperdir=$CAP/rw,workdir=$CAP/work" "$CAP/merged"
+    fuse_overlay "$GAMEDIR" "$CAP/rw" "$CAP/work" "$CAP/merged"
     CLEANUP+=( "$CAP/merged" )
     OVERLAY_ARGS=( --bind "$CAP/merged" /game )
     if [ -n "$PROTON" ]; then
         PROTON_LAYER="$CAP/proton"
         rm_proton_layer               # one a killed run left behind
         mkdir -p "$CAP/proton/rw" "$CAP/proton/work" "$CAP/proton/merged"
-        fuse-overlayfs -o "lowerdir=$PROTON,upperdir=$CAP/proton/rw,workdir=$CAP/proton/work" \
-            "$CAP/proton/merged"
+        fuse_overlay "$PROTON" "$CAP/proton/rw" "$CAP/proton/work" "$CAP/proton/merged"
         CLEANUP+=( "$CAP/proton/merged" )
         OVERLAY_ARGS+=( --bind "$CAP/proton/merged" /proton )
     fi

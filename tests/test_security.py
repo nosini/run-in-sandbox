@@ -236,6 +236,85 @@ class SecurityTests(unittest.TestCase):
         # The real complaint: this must not need a chmod first.
         shutil.rmtree(capture)
 
+    def use_fuse_overlay(self):
+        if not shutil.which("fuse-overlayfs") or not Path("/dev/fuse").exists():
+            self.skipTest("fuse-overlayfs and /dev/fuse are needed")
+        bwrap = shutil.which("bwrap")
+        self.assertIsNotNone(bwrap, "bubblewrap is needed")
+        wrappers = self.base / "fuse-bin"
+        wrappers.mkdir()
+        # Only hide the built-in overlay capability. All launches still use
+        # real bubblewrap and real FUSE mounts.
+        wrapper = wrappers / "bwrap"
+        wrapper.write_text("#!/usr/bin/env python3\nimport os, sys\n"
+                           "if sys.argv[1:] == ['--help']: sys.exit(0)\n"
+                           f"os.execv({bwrap!r}, ['bwrap', *sys.argv[1:]])\n")
+        wrapper.chmod(0o755)
+        self.env["PATH"] = str(wrappers) + os.pathsep + self.env["PATH"]
+
+    def test_fuse_paths_are_literal_and_writes_stay_in_the_capture(self):
+        self.use_fuse_overlay()
+        original_home = self.home
+        for part in ("game", "home", "proton"):
+            for index, name in enumerate(("plain", "comma,dir", "colon:dir", "back\\slash")):
+                with self.subTest(part=part, name=name):
+                    folder = self.base / part / name
+                    folder.mkdir(parents=True)
+                    self.home = folder if part == "home" else original_home
+                    self.env["HOME"] = str(self.home)
+                    game = folder if part == "game" else self.game
+                    (game / "asset").write_text("original")
+                    (game / "removed").write_text("original")
+                    options = []
+                    if part == "proton":
+                        (folder / "proton").write_text(
+                            '#!/bin/sh\nshift\nprintf changed > /proton/runtime-write\nexec "$@"\n')
+                        (folder / "proton").chmod(0o755)
+                        options = [f"--proton={folder}"]
+                    # Each case has fresh persistent state, then reuses it.
+                    sandbox = f"literal-{part}-{index}"
+                    capture = self.home / "game-sandboxes" / sandbox
+                    result = self.cli("--headless", "--name", sandbox, *options, game,
+                                      "/bin/sh", "-ec", 'cat /game/asset; '
+                                      'printf changed > /game/asset; rm /game/removed')
+                    self.assertEqual(result.stdout, "original")
+                    self.assertEqual((game / "asset").read_text(), "original")
+                    self.assertTrue((game / "removed").exists())
+                    self.assertEqual((capture / "rw/asset").read_text(), "changed")
+                    self.assertEqual(self.cli("--headless", "--name", sandbox, *options, game,
+                                             "/bin/sh", "-ec", 'test ! -e /game/removed; '
+                                             'cat /game/asset').stdout, "changed")
+                    self.assertFalse(os.path.ismount(capture / "merged"))
+                    self.assertFalse((capture / "proton").exists())
+                    self.assertFalse((folder / "runtime-write").exists())
+
+    def test_fuse_lower_paths_cannot_add_an_outside_directory(self):
+        self.use_fuse_overlay()
+        for proton in (False, True):
+            with self.subTest(proton=proton):
+                lower = self.base / f"lower-{proton}"
+                outside = self.base / f"outside-{proton}"
+                for directory in (lower, outside):
+                    directory.mkdir()
+                (outside / "private-marker").write_text("outside the chosen directory")
+                selected = Path(str(lower) + ":" + str(outside))
+                selected.mkdir(parents=True)
+                (selected / "selected-marker").write_text("selected")
+                options = []
+                if proton:
+                    # Let the old, wrongly split lower layer start too, so
+                    # the test detects the unintended contents in /proton.
+                    for directory in (lower, selected):
+                        runtime = directory / "proton"
+                        runtime.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+                        runtime.chmod(0o755)
+                    options = [f"--proton={selected}"]
+                mount = "/proton" if proton else "/game"
+                result = self.cli("--headless", "--name", f"layers-{proton}", *options,
+                                  self.game if proton else selected, "/bin/sh", "-ec",
+                                  f'test ! -e {mount}/private-marker; cat {mount}/selected-marker')
+                self.assertEqual(result.stdout, "selected")
+
     def test_environment_is_allowlisted_and_overrides_are_explicit(self):
         result = self.run_guest('test -z "${REVIEW_SECRET+x}"; '
                                 'test "$PATH" = /usr/bin:/bin; '
