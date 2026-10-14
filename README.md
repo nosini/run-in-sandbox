@@ -148,7 +148,6 @@ working directory.
 | `--gamescope` | `gamescope` | |
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
-| `sandbox-attach` | `nsenter` | `util-linux`, installed practically everywhere |
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
@@ -552,8 +551,12 @@ launch its own PID and mount namespace, so the new process cannot see the game's
 processes, and Wine's server socket lives in `/tmp/.wine-$UID`, a tmpfs private
 to each sandbox. Same prefix, second wineserver, no contact.
 
-`sandbox-attach` joins the running sandbox's namespaces instead of creating new
-ones. No root: the user namespace is already yours to enter.
+`sandbox-attach` has the running sandbox start the program instead. The
+first step of every sandbox, `sandbox-landlock`, stays behind for that and
+starts what `sandbox-attach` asks for, inside the sandbox, under the same
+Landlock rules as the game but in a domain one level above the game's: from
+there the program can read the game's memory, which is Cheat Engine's job,
+and the game cannot reach into it. No root is needed.
 
 ### Cheat Engine
 
@@ -610,16 +613,21 @@ prefix, deliberately **not** with `proton run` — that verb re-enters prefix
 setup, which has no business touching a prefix a game is currently using, and in
 practice it exits silently without starting anything.
 
-The attached program is as confined as the game: it joins the sandbox's network
-namespace too, so it has loopback and nothing else.
+The attached program is as confined as the game: the same mounts, network,
+filter, Landlock rules and memory limits. Under gamescope it shows in
+gamescope's window and cannot reach the desktop any more than the game can.
+That matters because the game can take it over: through its Wine session
+(the game can replace its `wineserver`, and writes the prefix the program
+loads DLLs and settings from), or through the terminal of `--shell`. Doing
+so gets the game nothing it did not have.
 
-It starts with the environment the game was launched with, which
-`sandbox-game` records outside the game's reach, not one read from a process
-in the sandbox. The `--shell` reads no `.bashrc` or profile, since those
-would be in the game's home. A Windows program also takes Proton's
-run-time settings from the game's `wineserver`. Running in the game's Wine
-session means trusting it anyway: the game can replace its `wineserver`, and
-it can write to the prefix the program loads DLLs and settings from.
+It starts with the game's environment as the sandbox gave it, plus `TERM`;
+a Windows program also takes Proton's run-time settings from `wineserver`.
+The `--shell` reads no `.bashrc` or profile. In a terminal, the program gets
+a terminal of the sandbox's own, which `sandbox-attach` relays, so your own
+is never handed to it; elsewhere it gets `sandbox-attach`'s stdin, stdout
+and stderr. `sandbox-attach` exits with the program's exit status. Games
+started before this version have nothing to attach to; restart them.
 
 CE's kernel-mode features — DBVM, the driver — do not work under Wine;
 scanning, pointer maps and speedhack do.
@@ -959,11 +967,17 @@ Stray descriptors are also simply closed, whatever their number: only stdin,
 stdout and stderr are passed into the sandbox, so a file or directory left
 open by whatever started `sandbox-game` never gets there at all — neither to
 be reopened nor to be read through as it is, which Landlock would not stop.
-`sandbox-attach` closes them the same way.
+`sandbox-attach` passes in nothing but those three either.
 
-`sandbox-attach` does not go through Landlock: a process cannot ptrace one in
-another Landlock domain, and that is Cheat Engine's whole job. What it runs is
-still inside the sandbox's mounts, filter and scope.
+What `sandbox-attach` brings in runs under the same rules, in a domain one
+level above the game's: `sandbox-landlock` restricts itself, starts the game,
+which restricts itself once more with the same rules, and stays behind to
+start attached programs. Landlock lets a process ptrace one in its own domain
+or below, never above, so the attached program can read the game's memory as
+Cheat Engine must, and the game cannot read or signal it. Only a process
+outside the sandbox can ask: the request comes through a socket on the
+sandbox's root that no rule lets the game remove or replace, and is turned
+away unless it comes from outside the sandbox's PID namespace.
 
 **Memory, CPU and task limits.** The sandbox runs in a transient systemd
 scope, `sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM, 4096 tasks,
@@ -992,8 +1006,8 @@ sudo systemctl daemon-reload     # then log out and back in
 To end a sandbox, `sandbox-game --stop NAME` is simpler and works without
 systemd too.
 
-`sandbox-attach` puts the program it brings in under the same filter, and into
-the same scope when there is one.
+What `sandbox-attach` brings in runs under the same filter, and in the same
+scope when there is one.
 
 RPG Maker MV/MZ runs with Chromium's own sandbox switched off (`--no-sandbox`).
 It gives up nothing: Chromium builds that sandbox from the user namespaces

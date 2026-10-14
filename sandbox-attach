@@ -8,8 +8,10 @@
 #   launch its own PID and mount namespace, so the new process could not see
 #   the game's processes, and Wine's server socket lives in /tmp/.wine-$UID,
 #   which is a tmpfs private to each sandbox. Same prefix on disk, second
-#   wineserver, no contact. So join the running namespaces instead of making
-#   new ones -- unprivileged, since the user namespace is ours to enter.
+#   wineserver, no contact. So have the running sandbox start it instead:
+#   its sandbox-landlock stays behind for that (see --attach there), and puts
+#   what it starts under the game's own Landlock rules, one level above the
+#   game -- where it can read the game's memory and the game cannot reach it.
 #
 #   Windows programs are run with Proton's own wine binary against the live
 #   prefix, NOT with `proton run`: the run verb re-enters prefix setup, which
@@ -60,7 +62,7 @@ done
 # As sandbox-game --stop finds them: by the outer bwrap, which runs in our own
 # user namespace -- where nothing a game starts can be -- and binds the
 # capture's home: `--bind ~/game-sandboxes/NAME/home $HOME`. Its one child is
-# the sandbox's pid 1, in the sandbox's namespaces: that is what is joined.
+# the sandbox's pid 1, whose root is the sandbox's: the way in to its socket.
 # A process inside a game could name any capture dir on its command line, so
 # that alone says nothing.
 #
@@ -172,19 +174,18 @@ done
     echo "restart the game to mount it" >&2; exit 1; }
 
 # ---- what to run once inside ----------------------------------------------
-# nsenter carries our own environment in, which is the file manager's or the
-# shell's -- not the sandbox's. What goes in instead is the game's own, as
-# sandbox-game gave it to bwrap and recorded where the game cannot touch it.
-# Nothing is taken from a process inside for a shell or a native command: the
-# game decides what those have in their environment. Nor does the shell read
-# rc files, which are in the game's $HOME.
+# The sandbox's sandbox-landlock starts it (see --attach there): in the
+# sandbox's namespaces, filter and scope, under the game's Landlock rules, in a
+# domain one level above the game's -- able to read the game's memory, out of
+# the game's reach -- with the game's own environment, as bwrap and gamescope
+# gave it. Nothing of ours goes in but the arguments, TERM and stdin, stdout
+# and stderr, or a terminal of the sandbox's own when this runs in one.
 #
-# A Windows program takes Proton's run-time settings -- library and DLL
-# paths, the display under gamescope -- from wineserver, since Proton works
-# them out only once it runs. That trusts the game, but no more than running
-# a program in its Wine session does anyway: wineserver is the game's to
-# replace, and the prefix the program loads DLLs and settings from is the
-# game's to write.
+# A Windows program also takes Proton's run-time settings -- library and DLL
+# paths -- from wineserver, since Proton works them out only once it runs. The
+# game could hand it anything there, as it could through the prefix the
+# program loads DLLs and settings from; what it would get is a program as
+# confined as itself. The shell reads no rc files, which are the game's too.
 INNER='
 set -e
 mode="$1"; shift
@@ -210,55 +211,106 @@ case "$mode" in
         exec /proton/files/bin/wine "$@" ;;
 esac
 '
-GAME_ENV=()
-{ mapfile -d '' -t GAME_ENV < "$HOME/game-sandboxes/$TNAME/.attach-env"; } 2>/dev/null || {
+
+# Talks to the starter: sends the request, then either relays a terminal or
+# passes on signals, and exits as the program did. Only stdin, stdout and
+# stderr go in, never another descriptor of ours.
+read -r -d '' CLIENT <<'EOF' || true
+import fcntl, json, os, selectors, signal, socket, struct, sys, termios, tty
+path, argv = sys.argv[1], sys.argv[2:]
+conn = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+try:
+    conn.connect(path)
+except OSError as e:
+    sys.exit(f"sandbox-attach: cannot reach the sandbox: {e.strerror}")
+terminal = os.isatty(0) and os.isatty(1)
+req = {"argv": argv, "env": {"TERM": os.environ.get("TERM") or "dumb"}, "terminal": terminal}
+stdio = []
+if terminal:
+    req["size"] = list(struct.unpack("4H", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))[:2])
+else:
+    for fd in (0, 1, 2):
+        try:
+            os.fstat(fd)
+            stdio.append(fd)
+        except OSError:
+            stdio.append(os.open(os.devnull, os.O_RDWR))
+socket.send_fds(conn, [json.dumps(req).encode()], stdio)
+
+
+def status_of(msg):
+    if not msg:
+        sys.exit("sandbox-attach: the sandbox ended")
+    code = json.loads(msg)["status"]
+    return code if code >= 0 else 128 - code
+
+
+if not terminal:
+    def forward(sig, _frame):
+        try:
+            conn.send(json.dumps({"signal": sig}).encode())
+        except OSError:
+            pass
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, forward)
+    sys.exit(status_of(conn.recv(4096)))
+
+msg, fds, _, _ = socket.recv_fds(conn, 4096, 1)
+if not fds:
+    status_of(msg)
+    sys.exit("sandbox-attach: the sandbox gave no terminal")
+master = fds[0]
+wake_read, wake = os.pipe()
+signal.signal(signal.SIGWINCH, lambda *_: os.write(wake, b"x"))
+saved = termios.tcgetattr(0)
+tty.setraw(0, termios.TCSADRAIN)        # not TCSAFLUSH: keep what was typed ahead
+status = None
+try:
+    sel = selectors.DefaultSelector()
+    sel.register(0, selectors.EVENT_READ, "in")
+    sel.register(master, selectors.EVENT_READ, "out")
+    sel.register(conn, selectors.EVENT_READ, "status")
+    sel.register(wake_read, selectors.EVENT_READ, "size")
+    output = True
+    while output:
+        # Once the program has ended, only what it left behind to read.
+        events = sel.select(0.2 if status is not None else None)
+        if not events:
+            break
+        for key, _ in events:
+            if key.data == "in":
+                data = os.read(0, 65536)
+                if data:
+                    os.write(master, data)
+                else:
+                    sel.unregister(0)
+            elif key.data == "out":
+                try:
+                    data = os.read(master, 65536)
+                except OSError:             # EIO: nothing has it open any more
+                    data = b""
+                if data:
+                    os.write(1, data)
+                else:
+                    output = False
+            elif key.data == "size":
+                os.read(wake_read, 64)
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+            else:
+                status = status_of(conn.recv(4096))
+                sel.unregister(conn)
+    if status is None:
+        status = status_of(conn.recv(4096))
+finally:
+    termios.tcsetattr(0, termios.TCSADRAIN, saved)
+sys.exit(status)
+EOF
+
+# On the sandbox's own root, where sandbox-game made it; a sandbox started by
+# an older sandbox-game has none.
+SOCK="/proc/$TARGET/root/run/sandbox-attach/socket"
+[ -S "$SOCK" ] || {
     echo "$SELF: '$TNAME' was started by an older sandbox-game; restart it to attach" >&2
     exit 1; }
-# The terminal this runs in is ours, not the game's.
-[ -z "${TERM:-}" ] || GAME_ENV+=( "TERM=$TERM" )
-
-# -U -m -p are what make the game visible: its user, mount and pid namespaces.
-# -n -i -u come along so the attached program stays as confined as the game --
-# without -n in particular it would keep the host's network, quietly undoing
-# the one thing the sandbox is most for. --preserve-credentials because we are
-# not root and have nothing to drop.
-NS=( -U -m -p -n -i -u )
-[ -e "/proc/$TARGET/ns/cgroup" ] && NS+=( -C )
-
-# The game's seccomp filter is not inherited by anything nsenter starts, and an
-# unfiltered program beside the game is one the game could ptrace its way into.
-# So the filter goes on here, before nsenter, never to be off inside: it leaves
-# nsenter the setns and chroot it needs, which the game has no capability for.
-# Beside this script (a checkout), then where install.sh puts it, then PATH.
-SECCOMP=""
-for d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
-    [ -x "$d/sandbox-seccomp" ] && { SECCOMP="$d/sandbox-seccomp"; break; }
-done
-[ -n "$SECCOMP" ] || SECCOMP="$(command -v sandbox-seccomp || true)"
-[ -n "$SECCOMP" ] || { echo "$SELF: sandbox-seccomp not found beside $SELF or on PATH" >&2; exit 1; }
-
-# Only stdin, stdout and stderr go in, as with sandbox-game: a descriptor
-# inherited from whatever ran this would carry a host file, directory or
-# socket past the namespaces into the sandbox -- and what is attached runs
-# without Landlock. Bash's own descriptor on this script stays.
-for fd in /proc/self/fd/*; do
-    fd="${fd##*/}"
-    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] || continue
-    [[ "/proc/self/fd/$fd" -ef "$0" ]] && continue
-    eval "exec $fd>&-"
-done
-
-# Join the game's cgroup as well, so its memory, CPU and task limits cover what is
-# attached too, and stopping the scope stops both. Best effort: the scope is
-# only there when sandbox-game found a systemd user manager to ask for one.
-CG="$(sed -n 's/^0:://p' "/proc/$TARGET/cgroup" 2>/dev/null || true)"
-case "$CG" in
-    */sandbox-game-*.scope)
-        { echo 0 >"/sys/fs/cgroup$CG/cgroup.procs"; } 2>/dev/null \
-            || echo "$SELF: warning: could not join $CG; running outside its limits" >&2 ;;
-esac
-
-# Enter both the target root and a directory inside it. Keeping the host cwd
-# would leave a filesystem reference outside the sandbox even after chroot.
-exec "$SECCOMP" nsenter -t "$TARGET" "${NS[@]}" --root --wdns=/ --preserve-credentials -- \
-     env -i -- ${GAME_ENV[@]+"${GAME_ENV[@]}"} /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}
+exec python3 -I -c "$CLIENT" "$SOCK" /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}

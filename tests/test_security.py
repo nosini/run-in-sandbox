@@ -696,14 +696,20 @@ class SecurityTests(unittest.TestCase):
             [str(ROOT / "sandbox-attach"), "--name", name, "--exec", "--",
              "/bin/sh", "-ec", 'test "$(pwd)" = /; test -d /game; '
              'test ! -e "$HOME/host-secret"; test -z "${REVIEW_SECRET+x}"; '
-             # Nor in the sandbox's pid 1, which bwrap would leave it with.
-             'pid1_env="$(wc -c </proc/1/environ)"; test "$pid1_env" -eq 0; '
              # A host path into the tools folder arrives as its /tools path.
              'test "$(cat "$0")" = tool; '
              'printf attached > "$HOME/attached"', str(self.tools / "tool")],
             env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.home / "game-sandboxes" / name / "home" / "attached").is_file())
+        # Nor is it in the sandbox's pid 1, bwrap, which keeps its own
+        # environment: the outer bwrap's child, read from out here.
+        outer = next(p for p in Path("/proc").glob("[0-9]*")
+                     if (p / "cmdline").read_bytes().split(b"\0")[0].endswith(b"bwrap")
+                     and f"game-sandboxes/{name}/home".encode() in (p / "cmdline").read_bytes()
+                     and os.path.samestat(os.stat(p / "ns" / "user"), os.stat("/proc/self/ns/user")))
+        pid1 = (outer / "task" / outer.name / "children").read_text().split()[0]
+        self.assertEqual(Path("/proc", pid1, "environ").read_bytes(), b"")
         # A descriptor handed to sandbox-attach stays outside: what is attached
         # runs without Landlock, and namespaces do not revoke an open file.
         secret = os.open(self.home / "host-secret", os.O_RDONLY)
@@ -715,10 +721,11 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("private", leak.stdout)
 
     def test_attached_programs_take_nothing_from_the_game(self):
-        # What is attached runs outside the game's Landlock domain, so the game
-        # must not get to choose what it runs: no rc file from the game's
-        # $HOME for the shell, no PATH from a process the game started --
-        # here a "wineserver" of its own -- for a native command.
+        # What is attached runs above the game's Landlock domain, able to read
+        # the game's memory, so the game does not get to choose what it runs:
+        # no rc file from the game's $HOME for the shell, no PATH from a
+        # process the game started -- here a "wineserver" of its own -- for a
+        # native command.
         name = "env-" + self.base.name
         proc = subprocess.Popen(
             [str(ROOT / "sandbox-game"), "--headless", "--name", name, str(self.game),
@@ -745,6 +752,135 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((home / "planted-ran").exists(), f"{mode[0]} ran the game's code")
         self.assertIn("clean", result.stdout)
+
+    def launch_named(self, name, *command):
+        """A sandbox running COMMAND, once it has printed a line."""
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", name, str(self.game), *command],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop():
+            if proc.poll() is None:
+                proc.terminate()
+            proc.communicate(timeout=10)
+        self.addCleanup(stop)
+        self.assertEqual(proc.stdout.readline().strip(), "ready", proc.stderr.read()
+                         if proc.poll() is not None else "")
+        return proc
+
+    def attach(self, name, *args, **kwargs):
+        return subprocess.run([str(ROOT / "sandbox-attach"), "--name", name, *args],
+                              env=self.env, capture_output=True, text=True, timeout=15, **kwargs)
+
+    def test_attached_programs_live_above_the_game(self):
+        # What is attached runs under the game's Landlock rules, so a game
+        # that takes it over gains nothing -- but in a domain above the
+        # game's: it can read the game's memory, as Cheat Engine does under
+        # Proton, and the game cannot reach into it. The game lets anyone
+        # trace it, so Yama's ptrace_scope is not what decides.
+        name = "above-" + self.base.name
+        home = self.home / "game-sandboxes" / name / "home"
+        (self.game / "probe.py").write_text(
+            "import ctypes, os, time\n"
+            "ctypes.CDLL(None).prctl(0x59616d61, ctypes.c_ulong(-1), 0, 0, 0)\n"
+            "print('ready', flush=True)\n"
+            "target = os.path.expanduser('~/target')\n"
+            "while not os.path.exists(target):\n"
+            "    time.sleep(0.1)\n"
+            "try:\n"
+            "    open(f'/proc/{open(target).read().strip()}/environ', 'rb').read()\n"
+            "    verdict = 'reached'\n"
+            "except OSError:\n"
+            "    verdict = 'refused'\n"
+            "open(os.path.expanduser('~/verdict'), 'w').write(verdict)\n"
+            "time.sleep(30)\n")
+        self.launch_named(name, "python3", "/game/probe.py")
+        target = subprocess.Popen(
+            [str(ROOT / "sandbox-attach"), "--name", name, "--exec", "--", "/bin/sh", "-c",
+             'echo $$ > "$HOME/target.new"; mv "$HOME/target.new" "$HOME/target"; exec sleep 20'],
+            env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        self.addCleanup(target.wait)
+        self.addCleanup(target.terminate)
+        for _ in range(100):
+            if (home / "verdict").exists():
+                break
+            time.sleep(0.1)
+        self.assertEqual((home / "verdict").read_text(), "refused",
+                         "the game reached into an attached program")
+        reader = self.attach(name, "--exec", "--", "python3", "-c", (
+            "import ctypes, os\n"
+            "game = next(p for p in os.listdir('/proc') if p.isdigit() and\n"
+            "            open(f'/proc/{p}/cmdline', 'rb').read() == b'python3\\0/game/probe.py\\0')\n"
+            "start = int(open(f'/proc/{game}/maps').readline().split('-')[0], 16)\n"
+            "class iovec(ctypes.Structure):\n"
+            "    _fields_ = [('base', ctypes.c_void_p), ('len', ctypes.c_size_t)]\n"
+            "buf = ctypes.create_string_buffer(4)\n"
+            "got = ctypes.CDLL(None).process_vm_readv(int(game),\n"
+            "    ctypes.byref(iovec(ctypes.addressof(buf), 4)), 1,\n"
+            "    ctypes.byref(iovec(start, 4)), 1, 0)\n"
+            "print(buf.raw if got == 4 else 'refused')\n"
+            "try:\n"
+            "    open('/attached-probe', 'w')\n"
+            "    print('root writable')\n"
+            "except OSError:\n"
+            "    print('root refused')\n"))
+        self.assertEqual(reader.returncode, 0, reader.stderr)
+        self.assertEqual(reader.stdout.splitlines(), ["b'\\x7fELF'", "root refused"])
+
+    def test_game_cannot_use_the_attach_socket(self):
+        # Only a process outside the sandbox may have something started in
+        # the domain above the game's; the game may not remove the socket
+        # either, or put one of its own in its place.
+        result = self.run_guest(
+            "python3 - <<'EOF'\n"
+            "import json, os, socket\n"
+            "s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)\n"
+            "s.connect('/run/sandbox-attach/socket')\n"
+            "socket.send_fds(s, [json.dumps({'argv': ['touch', '/game/started']}).encode()],\n"
+            "                [0, 1, 2])\n"
+            "try:\n"
+            "    print('answer', s.recv(100))\n"
+            "except ConnectionResetError:\n"
+            "    print('answer', b'')\n"
+            "try:\n"
+            "    os.unlink('/run/sandbox-attach/socket')\n"
+            "    print('removed')\n"
+            "except OSError:\n"
+            "    print('kept')\n"
+            "EOF\n"
+            "sleep 0.5; test ! -e /game/started && echo 'not started'")
+        self.assertEqual(result.stdout.splitlines(), ["answer b''", "kept", "not started"])
+
+    def test_attach_runs_a_terminal_and_passes_the_exit_status_on(self):
+        name = "tty-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        self.assertEqual(self.attach(name, "--exec", "--", "sh", "-c", "exit 7").returncode, 7)
+        self.assertEqual(self.attach(name, "--exec", "--", "sh", "-c",
+                                     "kill -TERM $$").returncode, 143)
+        # In a terminal, the shell gets one of the sandbox's own, with job
+        # control, rather than ours.
+        master, slave = os.openpty()
+        shell = subprocess.Popen([str(ROOT / "sandbox-attach"), "--name", name, "--shell"],
+                                 env={**self.env, "TERM": "xterm"}, stdin=slave, stdout=slave,
+                                 stderr=slave, start_new_session=True)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        out = b""
+        while not out.endswith(b"$ "):              # the prompt: it is reading
+            out += os.read(master, 4096)
+        os.write(master, b'tty; case $- in *m*) echo job-control; esac; exit 3\n')
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            out += data
+        self.assertEqual(shell.wait(timeout=10), 3, out)
+        self.assertIn(b"/dev/pts/", out)
+        self.assertIn(b"job-control", out)
+        self.assertNotIn(b"no job control", out)
 
     def test_attach_cannot_be_steered_into_another_sandbox(self):
         # A process that names another sandbox's capture home on its command
@@ -2220,6 +2356,28 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         covered = {args[i + 2] for i, a in enumerate(args)
                    if a == "--ro-bind-try" and args[i + 1] == empty}
         self.assertEqual(present - covered, set())
+
+    def test_attach_socket_is_made_above_the_game(self):
+        # Under gamescope the game's sandbox-landlock runs in gamescope's
+        # domain when it makes the socket: that layer may write there, the
+        # game's may not. Without gamescope it is made before any layer.
+        def layers(args):
+            starts = [i for i, a in enumerate(args)
+                      if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"]]
+            return [args[i + 1:args.index("--", i)] for i in starts]
+        def pairs(layer):
+            return list(zip(layer, layer[1:]))
+        args = self.recorded_args()                            # gamescope
+        self.assertIn(("--dir", "/run/sandbox-attach"), pairs(args))
+        outer, inner = layers(args)
+        self.assertIn(("--rw", "/run/sandbox-attach"), pairs(outer))
+        self.assertNotIn(("--attach", "/run/sandbox-attach"), pairs(outer))
+        self.assertIn(("--attach", "/run/sandbox-attach"), pairs(inner))
+        self.assertNotIn("/run/sandbox-attach", [b for a, b in pairs(inner) if a != "--attach"])
+        (only,) = layers(self.recorded_args("--wayland"))
+        self.assertEqual([b for a, b in pairs(only) if b == "/run/sandbox-attach"],
+                         ["/run/sandbox-attach"])
+        self.assertIn(("--attach", "/run/sandbox-attach"), pairs(only))
 
     def test_title_bars_get_the_desktops_button_layout(self):
         # GTK-drawn title bars read their buttons from GNOME's settings, which

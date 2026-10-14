@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """sandbox-landlock [--rw PATH | --ro PATH | --ls PATH]...
-                 [--unix-connect-where-writable] [--no-abstract-scope] -- CMD...
+                 [--unix-connect-where-writable] [--no-abstract-scope]
+                 [--attach DIR] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
    sandbox-landlock --has-unix-connect   exit 0 if the kernel can restrict
                                          connecting to Unix sockets by path
@@ -43,15 +44,41 @@ On a kernel without Landlock the command runs anyway, with a warning, the way
 sandbox-game carries on without a systemd scope: it is defence in depth, and
 everything else still stands. Any other failure stops the launch.
 
-sandbox-attach does not go through this: Landlock refuses to let a process
-ptrace one in a different Landlock domain, and ptrace is Cheat Engine's job.
+--attach DIR: stay behind as the starter for what sandbox-attach brings in,
+listening on DIR/socket. The socket is made before anything is restricted, in
+a directory the rules give no one the right to change, so the game can
+neither remove nor replace it. Then this process restricts itself, starts the
+game, which restricts itself once more with the same rules, and waits for it,
+passing on the signals it gets and exiting as the game did.
+
+That puts what sandbox-attach starts -- a child of this process -- in a
+Landlock domain with the game's rules, one level above the game's own. From
+there it may ptrace the game and read its memory, which is Cheat Engine's job
+(Proton reads another process's memory with process_vm_readv, from the
+reading process), while the game cannot reach into it. And should the game
+take it over anyway -- through its Wine session, which it controls -- it gets
+nothing it did not have: the same rules, the same mounts, the same filter.
+
+Only a process outside the sandbox may ask: one inside has a PID in its PID
+namespace, and SO_PEERCRED shows anyone outside it as PID 0. A request names
+the command and a few variables to set on top of this process's environment,
+which is the game's own as bwrap and gamescope gave it, and either passes
+stdin, stdout and stderr or asks for a terminal, whose master side is sent
+back. The command runs in a session of its own, in /; its exit status is
+sent back when it ends, and closing the connection hangs it up.
 """
 import ctypes
 import fcntl
+import json
 import os
+import resource
+import selectors
 import signal
+import socket
 import stat
+import struct
 import sys
+import termios
 
 # The same numbers on every architecture: allocated after the syscall
 # tables were unified.
@@ -92,15 +119,191 @@ class PathBeneathAttr(ctypes.Structure):
 
 def fail(what):
     err = ctypes.get_errno()
-    sys.exit(f"sandbox-landlock: {what}: {os.strerror(err)}")
+    print(f"sandbox-landlock: {what}: {os.strerror(err)}", file=sys.stderr)
+    sys.exit(1)
+
+
+# What the starter passes on to the game, and resets for what it starts.
+FORWARDED = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT,
+             signal.SIGUSR1, signal.SIGUSR2)
+
+
+def reset_signals():
+    # Python ignores SIGPIPE and SIGXFSZ, and an ignored signal stays ignored
+    # across exec: the game would never be stopped by writing to a closed pipe.
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ) + FORWARDED:
+        signal.signal(sig, signal.SIG_DFL)
 
 
 def execute(cmd):
-    # Python ignores SIGPIPE and SIGXFSZ, and an ignored signal stays ignored
-    # across exec: the game would never be stopped by writing to a closed pipe.
-    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
-        signal.signal(sig, signal.SIG_DFL)
+    reset_signals()
     os.execvp(cmd[0], cmd)
+
+
+def listen(directory):
+    path = os.path.join(directory, "socket")
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
+    listener.bind(path)
+    listener.listen(8)
+    return listener
+
+
+def start_game(cmd, listener, restrict):
+    pid = os.fork()
+    if pid:
+        return pid
+    status = 127
+    try:
+        listener.close()
+        restrict()
+        execute(cmd)
+    except SystemExit as e:
+        status = e.code if isinstance(e.code, int) else 1
+    except OSError as e:
+        print(f"sandbox-landlock: {cmd[0]}: {e.strerror}", file=sys.stderr)
+    os._exit(status)
+
+
+def run_attached(argv, env, stdio, terminal):
+    try:
+        os.setsid()
+        if terminal:
+            fcntl.ioctl(stdio[0], termios.TIOCSCTTY, 0)
+        for target, fd in enumerate(stdio):
+            os.dup2(fd, target)
+        os.closerange(3, 1 << 20)
+        os.chdir("/")
+        reset_signals()
+        os.execvpe(argv[0], argv, env)
+    except OSError as e:
+        os.write(2, f"sandbox-attach: {argv[0]}: {e.strerror}\n".encode())
+    os._exit(127)
+
+
+def attach(conn):
+    """Start what a request asks for; returns (pid, master or None)."""
+    # Only from outside the sandbox: inside, every process has a PID here.
+    pid, uid, _ = struct.unpack("3i", conn.getsockopt(
+        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+    if pid != 0 or uid != os.getuid():
+        raise PermissionError("not from outside the sandbox")
+    conn.settimeout(5)
+    msg, fds, flags, _ = socket.recv_fds(conn, 1 << 20, 3)
+    conn.settimeout(None)
+    master = None
+    try:
+        req = json.loads(msg)
+        argv, extra = req["argv"], req.get("env", {})
+        if (flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC) or not argv
+                or not all(isinstance(a, str) for a in argv)
+                or not all(isinstance(k, str) and isinstance(v, str) and k and "=" not in k
+                           for k, v in extra.items())):
+            raise ValueError("malformed request")
+        env = {**os.environ, **extra}
+        if req.get("terminal"):
+            master, slave = os.openpty()
+            fds.append(slave)
+            rows, cols = req.get("size", [24, 80])
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("4H", rows, cols, 0, 0))
+            stdio = [slave] * 3
+        elif len(fds) == 3:
+            stdio = fds
+        else:
+            raise ValueError("malformed request")
+        child = os.fork()
+        if child == 0:
+            run_attached(argv, env, stdio, master is not None)
+        return child, master
+    except BaseException:
+        if master is not None:
+            os.close(master)
+        raise
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def finish(status):
+    """Exit as the game did."""
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if sig in FORWARDED:
+            signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+        os._exit(128 + sig)
+    os._exit(os.waitstatus_to_exitcode(status))
+
+
+def serve(listener, game):
+    def forward(sig, _frame):
+        try:
+            os.kill(game, sig)
+        except ProcessLookupError:
+            pass
+    for sig in FORWARDED:
+        signal.signal(sig, forward)
+    sel = selectors.DefaultSelector()
+    sel.register(os.pidfd_open(game), selectors.EVENT_READ, ("game", game))
+    sel.register(listener, selectors.EVENT_READ, ("listen", None))
+    clients = {}                        # attached PID -> its connection
+    while True:
+        for key, _ in sel.select():
+            kind, pid = key.data
+            if kind == "game":
+                finish(os.waitpid(game, 0)[1])
+            elif kind == "listen":
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    continue
+                try:
+                    child, master = attach(conn)
+                    if master is not None:
+                        socket.send_fds(conn, [b"{}"], [master])
+                        os.close(master)
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    if not isinstance(e, PermissionError):
+                        print(f"sandbox-landlock: attach: {e}", file=sys.stderr)
+                    conn.close()
+                    continue
+                clients[child] = conn
+                sel.register(conn, selectors.EVENT_READ, ("client", child))
+                sel.register(os.pidfd_open(child), selectors.EVENT_READ, ("child", child))
+            elif kind == "client":
+                if clients.get(pid) is not key.fileobj:
+                    continue                # its program ended in this round
+                # A signal to pass on, or the end of the connection: a hangup.
+                try:
+                    msg = key.fileobj.recv(4096)
+                    sig = json.loads(msg).get("signal") if msg else signal.SIGHUP
+                except (OSError, ValueError, AttributeError):
+                    msg, sig = b"", signal.SIGHUP
+                if not msg:
+                    sel.unregister(key.fileobj)
+                    key.fileobj.close()
+                    clients.pop(pid, None)
+                if sig in [int(s) for s in FORWARDED]:
+                    try:
+                        os.killpg(pid, sig)
+                    except ProcessLookupError:
+                        pass
+            elif kind == "child":
+                sel.unregister(key.fileobj)
+                os.close(key.fileobj)
+                status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+                conn = clients.pop(pid, None)
+                if conn is not None:
+                    try:
+                        conn.send(json.dumps({"status": status}).encode())
+                    except OSError:
+                        pass
+                    sel.unregister(conn)
+                    conn.close()
 
 
 def main():
@@ -122,8 +325,12 @@ def main():
         os.close(fd)
     if args == ["--has-unix-connect"]:  # for sandbox-game --check
         sys.exit(0 if has_unix else 1)
-    rules, unix, abstract = [], False, True
+    rules, unix, abstract, attach_dir = [], False, True, None
     while args and args[0] != "--":
+        if args[0] == "--attach" and len(args) > 1:
+            attach_dir = args[1]
+            args = args[2:]
+            continue
         if args[0] in ("--unix-connect-where-writable", "--no-abstract-scope"):
             unix = unix or args[0] == "--unix-connect-where-writable"
             abstract = abstract and args[0] != "--no-abstract-scope"
@@ -137,9 +344,14 @@ def main():
     if not cmd:
         sys.exit(__doc__.split("\n\n")[0])
 
+    # Made while this process can still create it there.
+    listener = listen(attach_dir) if attach_dir else None
+
     if abi < 1:
         print("sandbox-landlock: warning: no Landlock in this kernel; running without it", file=sys.stderr)
-        execute(cmd)
+        if listener is None:
+            execute(cmd)
+        serve(listener, start_game(cmd, listener, lambda: None))
 
     handled = ABI_FS[min(abi, 5)]
     if unix and has_unix:
@@ -202,13 +414,20 @@ def main():
                      ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule), ctypes.c_uint32(0))
         os.close(fd)
 
-    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
-        fail("setting no_new_privs")
-    if libc.syscall(ctypes.c_long(SYS_RESTRICT_SELF), ctypes.c_int(ruleset),
-                    ctypes.c_uint32(0)) < 0:
-        fail("restricting")
+    def restrict():
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
+            fail("setting no_new_privs")
+        if libc.syscall(ctypes.c_long(SYS_RESTRICT_SELF), ctypes.c_int(ruleset),
+                        ctypes.c_uint32(0)) < 0:
+            fail("restricting")
+    restrict()
+    if listener is None:
+        os.close(ruleset)
+        execute(cmd)
+    # The same rules once more for the game: a domain below this one.
+    game = start_game(cmd, listener, restrict)
     os.close(ruleset)
-    execute(cmd)
+    serve(listener, game)
 
 
 if __name__ == "__main__":
