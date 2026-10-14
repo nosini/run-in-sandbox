@@ -663,6 +663,8 @@ class SecurityTests(unittest.TestCase):
             [str(ROOT / "sandbox-attach"), "--name", name, "--exec", "--",
              "/bin/sh", "-ec", 'test "$(pwd)" = /; test -d /game; '
              'test ! -e "$HOME/host-secret"; test -z "${REVIEW_SECRET+x}"; '
+             # Nor in the sandbox's pid 1, which bwrap would leave it with.
+             'pid1_env="$(wc -c </proc/1/environ)"; test "$pid1_env" -eq 0; '
              # A host path into the tools folder arrives as its /tools path.
              'test "$(cat "$0")" = tool; '
              'printf attached > "$HOME/attached"', str(self.tools / "tool")],

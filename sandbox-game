@@ -1637,7 +1637,9 @@ done
 # without it the game could make a user namespace of its own, and with it every
 # capability that namespace confers. It needs --unshare-user outright, where
 # --unshare-all only tries, and bwrap confirms the door is shut before starting.
-BWRAP=( "${SCOPE[@]}" bwrap
+# bwrap itself starts with no environment: --clearenv empties only the game's,
+# and the sandbox's pid 1 would otherwise hold all of ours in /proc/1/environ.
+BWRAP=( "${SCOPE[@]}" env -i "$(command -v bwrap)"
     --unshare-all --unshare-user --disable-userns --seccomp 9
     --die-with-parent --new-session
     "${BASE_ENV[@]}"
