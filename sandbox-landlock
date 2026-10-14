@@ -49,6 +49,7 @@ ptrace one in a different Landlock domain, and ptrace is Cheat Engine's job.
 import ctypes
 import fcntl
 import os
+import signal
 import stat
 import sys
 
@@ -94,6 +95,14 @@ def fail(what):
     sys.exit(f"sandbox-landlock: {what}: {os.strerror(err)}")
 
 
+def execute(cmd):
+    # Python ignores SIGPIPE and SIGXFSZ, and an ignored signal stays ignored
+    # across exec: the game would never be stopped by writing to a closed pipe.
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+        signal.signal(sig, signal.SIG_DFL)
+    os.execvp(cmd[0], cmd)
+
+
 def main():
     args = sys.argv[1:]
     libc = ctypes.CDLL(None, use_errno=True)
@@ -130,7 +139,7 @@ def main():
 
     if abi < 1:
         print("sandbox-landlock: warning: no Landlock in this kernel; running without it", file=sys.stderr)
-        os.execvp(cmd[0], cmd)
+        execute(cmd)
 
     handled = ABI_FS[min(abi, 5)]
     if unix and has_unix:
@@ -199,7 +208,7 @@ def main():
                     ctypes.c_uint32(0)) < 0:
         fail("restricting")
     os.close(ruleset)
-    os.execvp(cmd[0], cmd)
+    execute(cmd)
 
 
 if __name__ == "__main__":

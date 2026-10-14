@@ -354,6 +354,12 @@ class SecurityTests(unittest.TestCase):
                                 "--env", "EXPLICIT=yes")
         self.assertEqual(result.returncode, 0)
 
+    def test_game_starts_with_no_signals_ignored(self):
+        # sandbox-landlock is Python, which ignores SIGPIPE and SIGXFSZ; an
+        # ignored signal stays ignored across exec.
+        result = self.run_guest("grep '^SigIgn:' /proc/self/status")
+        self.assertEqual(result.stdout.split(), ["SigIgn:", "0" * 16])
+
     def test_landlock_helper_runs_no_code_from_the_game_home(self):
         # sandbox-landlock is Python and runs before it restricts itself, with
         # the capture home as $HOME. A .pth file the game left in its user
