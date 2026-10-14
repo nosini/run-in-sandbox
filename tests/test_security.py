@@ -147,6 +147,10 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                     allowance = next(r for r in rules if "priority 95" in r)
                     self.assertLess(int(host.split()[3]), int(allowance.split()[3]))
                     self.assertLess(rules.index(host), rules.index(allowance))
+                # pasta answers only DNS at its address and passes the rest on.
+                self.assertEqual([r for r in batches["-4"] if " to 169.254.1.1 " in r],
+                                 [f"rule add priority 90 to 169.254.1.1 ipproto {p} dport 53"
+                                  " lookup main" for p in ("udp", "tcp")])
                 if whole_lan == "0":
                     self.assertIn("rule add priority 100 to 198.51.100.0/24 prohibit", batches["-4"])
                     self.assertIn("rule add priority 100 to 2001:db8:2::/64 prohibit", batches["-6"])
@@ -1281,6 +1285,7 @@ print(json.dumps({{
     "resolv": open("/etc/resolv.conf").read(),
     "own": tcp({own[0]!r}, {port}),
     "gateway": tcp({gateway!r}, {port}),
+    "dns_other_port": tcp("169.254.1.1", {port}),
     "internet": tcp("example.com", 443) if {online} else "skipped",
     "https": https() if {online} else "skipped",
     "unlock": subprocess.run([ip, "rule", "del", "priority", "100"],
@@ -1304,6 +1309,10 @@ print(json.dumps({{
         # EACCES is the rule refusing it; ECONNREFUSED or a timeout would only
         # mean nothing answered there, which proves nothing about the LAN.
         self.assertEqual(seen["gateway"], "EACCES", "the LAN was not refused")
+        # pasta answers only DNS at its address; the rest would go to
+        # whatever really has that address, on this machine or the LAN.
+        self.assertEqual(seen["dns_other_port"], "EACCES",
+                         "the DNS address was open beyond DNS")
         self.assertNotEqual(seen["unlock"], 0, "the game could remove the LAN block")
         # The rules act at routing. Raw packets skip routing, and pasta passes
         # on whatever reaches it, so the LAN block holds only as long as the

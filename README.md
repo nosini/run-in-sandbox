@@ -746,7 +746,8 @@ LAN](#letting-a-game-reach-the-lan):
 - The CA certificates are mounted too, wherever the distribution keeps them,
   so HTTPS can be verified.
 - DNS goes to `169.254.1.1`, which `pasta` forwards to your usual resolver —
-  whether that is `127.0.0.53` or the router.
+  whether that is `127.0.0.53` or the router. Only DNS gets through to that
+  address.
 - The sandbox waits for all of that before the game starts, and if any step
   fails the game does not start at all.
 

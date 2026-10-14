@@ -1563,7 +1563,10 @@ for ver, nets in block.items():
         continue
     # Rules, not routes: they are consulted before any route, so the on-link
     # route pasta copies from the host cannot outrank them.
-    rules = [f"rule add priority 90 to {dns} lookup main"] if ver == 4 else []
+    # Only DNS itself: pasta answers just that at this address, and passes
+    # anything else on to whatever really has it, on this machine or the LAN.
+    rules = [f"rule add priority 90 to {dns} ipproto {p} dport 53 lookup main"
+             for p in ("udp", "tcp")] if ver == 4 else []
     # Host addresses stay refused even when an allowance includes them. Pasta
     # copies only its selected interface address, so other host addresses
     # could otherwise reach host services through its sockets.
