@@ -227,7 +227,13 @@ stop_sandboxes() {                    # $1 = NAME, empty for all
         [ -n "$p" ] || break
         sleep 0.1
     done
-    kill -KILL "${pids[@]}" 2>/dev/null || true
+    # Only the ones still there, and still those sandboxes' bwrap: a PID
+    # that went on TERM may already belong to some other process.
+    local left=()
+    while read -r p n; do
+        [ -n "$p" ] && [[ " ${pids[*]} " == *" $p "* ]] && left+=( "$p" )
+    done <<<"$(outer_bwraps "$1")"
+    [ "${#left[@]}" -eq 0 ] || kill -KILL "${left[@]}" 2>/dev/null || true
     printf 'stopped %s\n' "${names[@]}" | sort -u
 }
 

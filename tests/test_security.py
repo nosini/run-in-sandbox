@@ -327,6 +327,21 @@ class SecurityTests(unittest.TestCase):
                                 "--env", "EXPLICIT=yes")
         self.assertEqual(result.returncode, 0)
 
+    def test_landlock_helper_runs_no_code_from_the_game_home(self):
+        # sandbox-landlock is Python and runs before it restricts itself, with
+        # the capture home as $HOME. A .pth file the game left in its user
+        # site-packages would run there, outside Landlock, at the next launch.
+        self.run_guest("true")
+        version = "python%d.%d" % sys.version_info[:2]
+        site = (self.home / "game-sandboxes" / "game" / "home" / ".local" / "lib"
+                / version / "site-packages")
+        site.mkdir(parents=True)
+        (site / "planted.pth").write_text(
+            "import os; open(os.path.expanduser('~/planted-ran'), 'w').close()\n")
+        self.run_guest("true")
+        self.assertFalse((site.parents[3] / "planted-ran").exists(),
+                         "sandbox-landlock ran a .pth file from the game's home")
+
     def test_command_reaches_the_game_as_written(self):
         # systemd-run expands ${VAR} in its command line unless told not to,
         # which blanked `b=${f##*/}` in the NW.js launch script.
@@ -1456,6 +1471,30 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual(self.cli("--stop-all").stdout.strip(), "stopped game-2")
         second.wait(timeout=10)
         self.assertEqual(second.returncode, 0)
+
+    def test_stop_kills_only_sandboxes_still_running(self):
+        # Stand-ins for outer bwraps. "stuck" ignores TERM, so after the wait
+        # --stop has to kill it. "reused" goes on TERM and its PID becomes
+        # some other program: the stand-in turns into one, so that PID is
+        # still alive but no longer a sandbox, and must be left alone.
+        script = ("import os, signal, sys, time\n"
+                  "if sys.argv[1] == 'stuck': signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                  "else: signal.signal(signal.SIGTERM, lambda *_: "
+                  "os.execv('/bin/sleep', ['sleep', '60']))\n"
+                  "print(flush=True); time.sleep(60)\n")
+        procs = {}
+        for name in ("stuck", "reused"):
+            home = self.home / "game-sandboxes" / name / "home"
+            home.mkdir(parents=True)
+            procs[name] = subprocess.Popen(
+                ["/bin/bash", "-c", 'exec -a bwrap python3 -c "$0" "$1" --bind "$2" "$3"',
+                 script, name, str(home), str(self.home)], stdout=subprocess.PIPE, text=True)
+            self.addCleanup(procs[name].kill)
+            procs[name].stdout.readline()             # signal handling set up
+        self.assertEqual(self.cli("--stop-all").stdout.split(), ["stopped", "reused",
+                                                                 "stopped", "stuck"])
+        self.assertEqual(procs["stuck"].wait(timeout=5), -9)
+        self.assertIsNone(procs["reused"].poll(), "a PID no longer a sandbox's was killed")
 
     def test_list_reset_install_and_delete(self):
         (self.game / "www").mkdir()
