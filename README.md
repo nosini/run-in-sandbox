@@ -850,20 +850,24 @@ has none; `module-native-protocol-tcp` would open the sound server to the LAN.
   Everything connecting to it gets an access class of its own,
   `sandbox-game`. The game gets this socket alone, where Pulse clients look
   for one, and no PipeWire socket.
-- **Nothing to record.** WirePlumber hides every source and microphone, the
-  monitor ports of every sink and the link factory from `sandbox-game`
-  clients. Hiding alone would not do: WirePlumber links a recording stream to
-  the default source on the client's behalf, with its own rights. So a hook
+- **Nothing to record, nothing of others to see.** A game sees the outputs,
+  the default-device setting and its own streams, and nothing else: no source
+  or microphone, no monitor of a sink, no link factory, and none of other
+  applications' streams and clients, whose titles (browser tabs, videos),
+  program names and PIDs it could otherwise list. A script
+  (`sandbox-access.lua`) sets that up, since a game's own objects need a
+  callback that the configuration cannot express. Hiding alone would not do:
+  WirePlumber links a recording stream to the default source on the client's
+  behalf, with its own rights. So a hook
   (`deny-restricted-capture.lua`) refuses a game's recording streams outright,
-  failing them at once as if there were no microphone. It is loaded as
-  required: if it ever fails to load, WirePlumber does not start, rather than
-  games quietly regaining the microphone.
+  failing them at once as if there were no microphone. Both scripts are
+  loaded as required: if one ever fails to load, WirePlumber does not start,
+  rather than games quietly regaining the microphone.
 
 Playback is unaffected for anything that speaks Pulse: SDL, OpenAL (mkxp-z),
 Wine and Proton, Chromium (NW.js), FMOD. A game that talks to ALSA and nothing
 else stays silent — ALSA's default goes through the PipeWire socket, and
-openSUSE's `alsa-plugins-pulse` conflicts with `pipewire-alsa`. Other apps'
-playback streams stay visible by name, though not recordable. Nothing else is
+openSUSE's `alsa-plugins-pulse` conflicts with `pipewire-alsa`. Nothing else is
 affected: the rules match the `sandbox-game` class alone, and what WirePlumber
 allows any other client — the stock `restricted` class included — is left as
 it was.
@@ -879,9 +883,10 @@ application name alone.
 
 What goes where: `~/.config/pipewire/sandbox-pulse.conf`,
 `~/.config/systemd/user/sandbox-pulse.service`,
-`~/.config/wireplumber/wireplumber.conf.d/60-sandbox-audio.conf` and
-`~/.local/share/wireplumber/scripts/sandbox-game/deny-restricted-capture.lua`,
-all from `audio/` in this repository. Without the server running, games fall
+`~/.config/wireplumber/wireplumber.conf.d/60-sandbox-audio.conf`, and
+`deny-restricted-capture.lua` and `sandbox-access.lua` in
+`~/.local/share/wireplumber/scripts/sandbox-game/`, all from `audio/` in this
+repository. Without the server running, games fall
 back to the desktop's sockets, with a warning in the launch log.
 
 ## Kernel attack surface and resource limits

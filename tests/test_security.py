@@ -2330,7 +2330,8 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         # Something else playing, outside the sandbox, silently: a stream the
         # game could try to record on its own.
         other = subprocess.Popen(["pacat", "--playback", "--volume=0",
-                                  "--client-name=sandbox-test-other", "/dev/zero"],
+                                  "--client-name=sandbox-test-other",
+                                  "--stream-name=sandbox-test-title", "/dev/zero"],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(other.wait)
         self.addCleanup(other.terminate)
@@ -2347,6 +2348,8 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                 printf '%s:%s' "$(wc -c < /tmp/recorded)" "$rc"
             }
             other=$(pactl list short sink-inputs 2>/dev/null | head -n1 | cut -f1)
+            printf 'seen=%s\n' "$(pactl list sink-inputs clients 2>/dev/null | grep -c sandbox-test)"
+            printf 'clients=%s\n' "$(pactl list short clients 2>/dev/null | wc -l)"
             printf 'play=%s\n' "$(head -c 96000 /dev/zero | timeout 5 pacat --playback --raw \
                                    >/dev/null 2>&1; echo $?)"
             printf 'module=%s\n' "$(pactl load-module module-null-sink >/dev/null 2>&1; echo $?)"
@@ -2357,6 +2360,10 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         seen = dict(line.split("=", 1) for line in result.stdout.split())
         self.assertEqual(seen["play"], "0", "playback failed")
         self.assertNotEqual(seen["module"], "0", "the game could load a sound server module")
+        # Other applications' streams and clients: titles, programs, PIDs.
+        # The one client left is the game's own pactl.
+        self.assertEqual(seen["seen"], "0", "the game could see another application's stream")
+        self.assertEqual(seen["clients"], "1", "the game could see other clients")
         for what, label in (("mic", "the microphone"), ("monitor", "what is playing"),
                             ("other", "another app's stream")):
             if seen[what] == "none":

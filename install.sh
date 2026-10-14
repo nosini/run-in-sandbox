@@ -69,6 +69,7 @@ each_audio() {
     "$@" 644 sandbox-pulse.service       "$CONF/systemd/user"
     "$@" 644 60-sandbox-audio.conf       "$CONF/wireplumber/wireplumber.conf.d"
     "$@" 644 deny-restricted-capture.lua "$DATA/wireplumber/scripts/sandbox-game"
+    "$@" 644 sandbox-access.lua          "$DATA/wireplumber/scripts/sandbox-game"
 }
 
 say()  { printf '%s\n' "$*"; }
