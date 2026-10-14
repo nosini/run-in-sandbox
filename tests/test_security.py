@@ -123,6 +123,22 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
         addresses = ["192.0.2.5", "198.51.100.5", "2001:db8:1::5", "2001:db8:2::5"]
         links = [{"link_type": "ether", "addr_info": [
                     {"local": a, "prefixlen": 24 if ":" not in a else 64}]} for a in addresses]
+        # A DHCPv6 address is a /128; its network comes as an on-link route.
+        links.append({"ifname": "eth1", "link_type": "ether", "addr_info": [
+                        {"local": "2001:db8:3::5", "prefixlen": 128}]})
+        links.append({"ifname": "tun0", "link_type": "none", "addr_info": [
+                        {"local": "fdfe:dcba:9876::1", "prefixlen": 126}]})
+        routes = {"-4": [{"dst": "default", "gateway": "192.0.2.1", "dev": "eth1"},
+                         {"dst": "203.0.113.0/24", "dev": "eth1"},
+                         {"dst": "198.18.0.0/15", "dev": "tun0"},
+                         {"dst": "1.1.1.1", "gateway": "192.0.2.1", "dev": "eth1"},
+                         {"dst": "192.0.2.5", "dev": "eth1", "table": "local",
+                          "type": "local"}],
+                  "-6": [{"dst": "2001:db8:3::/64", "dev": "eth1"},
+                         {"dst": "fd10:0:7::/48", "gateway": "fe80::1", "dev": "eth1"},
+                         {"dst": "2001:db8:4::/64", "gateway": "fe80::1", "dev": "eth1"},
+                         {"dst": "fdfe:dcba:9876::/64", "dev": "tun0"},
+                         {"dst": "default", "dev": "tun0", "table": "2022"}]}
         allowed = [["192.0.2.0/24", "", ""], ["198.51.100.0/24", "", ""],
                    ["2001:db8::/32", "tcp", "443"]]
         for whole_lan in ("0", "1"):
@@ -130,6 +146,8 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
             def run(args, **kwargs):
                 if args[1:3] == ["-j", "addr"]:
                     return subprocess.CompletedProcess(args, 0, stdout=json.dumps(links))
+                if args[3:4] == ["route"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(routes[args[2]]))
                 if "-batch" in args:
                     batches[args[1]] = kwargs["input"].splitlines()
                 return subprocess.CompletedProcess(args, 0)
@@ -151,9 +169,18 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                 self.assertEqual([r for r in batches["-4"] if " to 169.254.1.1 " in r],
                                  [f"rule add priority 90 to 169.254.1.1 ipproto {p} dport 53"
                                   " lookup main" for p in ("udp", "tcp")])
+                refused = {v: {r.split()[5] for r in batches[v] if "priority 100" in r}
+                           for v in ("-4", "-6")}
                 if whole_lan == "0":
-                    self.assertIn("rule add priority 100 to 198.51.100.0/24 prohibit", batches["-4"])
-                    self.assertIn("rule add priority 100 to 2001:db8:2::/64 prohibit", batches["-6"])
+                    self.assertLessEqual({"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4",
+                                          "255.255.255.255/32"}, refused["-4"])
+                    self.assertLessEqual({"2001:db8:2::/64", "2001:db8:3::/64", "fd10:0:7::/48",
+                                          "ff00::/8"}, refused["-6"])
+                # Not the internet behind a router or a tunnel, fake-IP ranges included.
+                self.assertFalse({"1.1.1.1/32", "198.18.0.0/15"} & refused["-4"])
+                self.assertFalse({"2001:db8:4::/64", "fdfe:dcba:9876::/64"} & refused["-6"])
+                if whole_lan == "1":
+                    self.assertEqual(refused, {"-4": {"0.0.0.0/8"}, "-6": set()})
 
 
 class SecurityTests(unittest.TestCase):
@@ -1354,6 +1381,15 @@ def https():
         return urllib.request.urlopen("https://example.com", timeout=10).status
     except OSError as e:
         return str(e)
+def udp_send(host, port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.sendto(b"M-SEARCH", (host, port))
+        return "sent"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e))
+    finally:
+        s.close()
 def refused(make):
     try:
         make().close()
@@ -1370,6 +1406,7 @@ print(json.dumps({{
     "own": tcp({own[0]!r}, {port}),
     "gateway": tcp({gateway!r}, {port}),
     "dns_other_port": tcp("169.254.1.1", {port}),
+    "multicast": udp_send("239.255.255.250", 1900),
     "internet": tcp("example.com", 443) if {online} else "skipped",
     "https": https() if {online} else "skipped",
     "unlock": subprocess.run([ip, "rule", "del", "priority", "100"],
@@ -1397,6 +1434,8 @@ print(json.dumps({{
         # whatever really has that address, on this machine or the LAN.
         self.assertEqual(seen["dns_other_port"], "EACCES",
                          "the DNS address was open beyond DNS")
+        # Discovery goes out to the LAN by multicast.
+        self.assertEqual(seen["multicast"], "EACCES", "multicast reached the LAN")
         self.assertNotEqual(seen["unlock"], 0, "the game could remove the LAN block")
         # The rules act at routing. Raw packets skip routing, and pasta passes
         # on whatever reaches it, so the LAN block holds only as long as the

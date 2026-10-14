@@ -743,9 +743,12 @@ LAN](#letting-a-game-reach-the-lan):
   from outside, through ordinary sockets of yours; no port on this machine is
   forwarded in, and nothing comes in from outside.
 - Routing rules refuse IPv4's private, shared and link-local space, IPv6's
-  link-local space, every address this machine has, and the whole network
-  behind each network card, IPv6 prefixes included. So neither the LAN, the
-  router's admin page nor a service listening on this machine is reachable.
+  link-local space, multicast and broadcast, every address this machine has,
+  and the whole network behind each network card, IPv6 prefixes included:
+  each card's own networks, those it has a route to directly, and private
+  IPv6 (`fc00::/7`) networks routed through a router on it. So neither the
+  LAN, the router's admin page nor a service listening on this machine is
+  reachable.
   The game cannot lift them: they sit in a namespace it has no privileges
   over. Tunnels (a VPN, a proxy in tun mode such as mihomo) are left open
   beyond this machine's own address on them, since what lies behind one is
