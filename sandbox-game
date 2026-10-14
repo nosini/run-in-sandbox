@@ -1689,6 +1689,14 @@ BWRAP=( "${SCOPE[@]}" bwrap
 LANDLOCK="$(helper sandbox-landlock)"
 [ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found; run install.sh" >&2; exit 1; }
 LL_ARGS=( --ls / --ro /run/sandbox-landlock )
+# The same walk collects the environment bwrap gives the game, for
+# sandbox-attach: see "$CAP/.attach-env" below.
+GAME_ENV=()
+unset_game_env() {
+    local kept=() kv
+    for kv in ${GAME_ENV[@]+"${GAME_ENV[@]}"}; do [ "${kv%%=*}" = "$1" ] || kept+=( "$kv" ); done
+    GAME_ENV=( ${kept[@]+"${kept[@]}"} )
+}
 i=0
 while [ "$i" -lt "${#BWRAP[@]}" ]; do
     case "${BWRAP[i]}" in
@@ -1716,14 +1724,23 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
                                 i=$((i + 2)) ;;
         --overlay)              LL_ARGS+=( --rw "${BWRAP[i+3]}" ); i=$((i + 4)) ;;
         --tmp-overlay)          LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
+        --clearenv)             GAME_ENV=(); i=$((i + 1)) ;;
+        --setenv)               unset_game_env "${BWRAP[i+1]}"
+                                GAME_ENV+=( "${BWRAP[i+1]}=${BWRAP[i+2]}" ); i=$((i + 3)) ;;
+        --unsetenv)             unset_game_env "${BWRAP[i+1]}"; i=$((i + 2)) ;;
         # Everything else that takes arguments, so none is read as an option.
-        --setenv|--symlink)     i=$((i + 3)) ;;
+        --symlink)              i=$((i + 3)) ;;
         --seccomp|--perms|--info-fd|--block-fd|--chdir|--dir|--overlay-src|\
-        --hostname|--remount-ro|--unsetenv)
+        --hostname|--remount-ro)
                                 i=$((i + 2)) ;;
         *)                      i=$((i + 1)) ;;
     esac
 done
+# What a program sandbox-attach brings in starts from: the game's own
+# environment as given here, never one read from a process in the sandbox,
+# which the game can start with whatever it likes. The capture folder itself
+# is not mounted in the sandbox, so the game cannot change this file.
+printf '%s\0' ${GAME_ENV[@]+"${GAME_ENV[@]}"} > "$CAP/.attach-env"
 BWRAP+=( --ro-bind "$LANDLOCK" /run/sandbox-landlock )
 if [ "$GS" = 1 ]; then
     # gamescope in the outer domain, the game in one of its own inside it:

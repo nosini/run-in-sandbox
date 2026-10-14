@@ -173,30 +173,36 @@ done
 
 # ---- what to run once inside ----------------------------------------------
 # nsenter carries our own environment in, which is the file manager's or the
-# shell's -- not the sandbox's. Rebuild it from a process already inside:
-# wineserver knows the prefix, the display and Proton's library paths, and is
-# there for exactly as long as the Wine session we are joining.
+# shell's -- not the sandbox's. What goes in instead is the game's own, as
+# sandbox-game gave it to bwrap and recorded where the game cannot touch it.
+# Nothing is taken from a process inside for a shell or a native command: the
+# game decides what those have in their environment. Nor does the shell read
+# rc files, which are in the game's $HOME.
+#
+# A Windows program takes Proton's run-time settings -- library and DLL
+# paths, the display under gamescope -- from wineserver, since Proton works
+# them out only once it runs. That trusts the game, but no more than running
+# a program in its Wine session does anyway: wineserver is the game's to
+# replace, and the prefix the program loads DLLs and settings from is the
+# game's to write.
 INNER='
 set -e
 mode="$1"; shift
-donor="$(pgrep -x wineserver 2>/dev/null | head -n1 || true)"
-if [ -z "$donor" ]; then
-    read -r donor _ < /proc/1/task/1/children 2>/dev/null || donor=1
+if [ "$mode" = wine ]; then
+    donor="$(pgrep -x wineserver 2>/dev/null | head -n1 || true)"
+    [ -z "$donor" ] || while IFS= read -r -d "" kv; do
+        case "${kv%%=*}" in
+            PATH|DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|\
+            WINE*|PROTON*|STEAM_COMPAT_*|LD_LIBRARY_PATH|\
+            PULSE_*|SDL_*|DXVK_*|VKD3D_*|MESA_*|__*) export "$kv" ;;
+        esac
+    done < "/proc/$donor/environ"
 fi
-[ -n "$donor" ] && [ -r "/proc/$donor/environ" ] || donor=1
-while IFS= read -r -d "" kv; do
-    case "${kv%%=*}" in
-        HOME|USER|LOGNAME|PATH|TERM|LANG|LC_*|\
-        DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|\
-        WINE*|PROTON*|STEAM_COMPAT_*|LD_LIBRARY_PATH|\
-        PULSE_*|SDL_*|DXVK_*|VKD3D_*|MESA_*|__*) export "$kv" ;;
-    esac
-done < "/proc/$donor/environ"
 : "${HOME:=/home/$(id -un)}"; export HOME
 : "${PATH:=/usr/bin:/bin}"; export PATH
 export WINEPREFIX="${WINEPREFIX:-/compat/pfx}"
 case "$mode" in
-    shell) exec /bin/bash -i ;;
+    shell) exec /bin/bash --norc --noprofile -i ;;
     exec)  exec "$@" ;;
     wine)
         [ -x /proton/files/bin/wine ] || {
@@ -204,6 +210,12 @@ case "$mode" in
         exec /proton/files/bin/wine "$@" ;;
 esac
 '
+GAME_ENV=()
+{ mapfile -d '' -t GAME_ENV < "$HOME/game-sandboxes/$TNAME/.attach-env"; } 2>/dev/null || {
+    echo "$SELF: '$TNAME' was started by an older sandbox-game; restart it to attach" >&2
+    exit 1; }
+# The terminal this runs in is ours, not the game's.
+[ -z "${TERM:-}" ] || GAME_ENV+=( "TERM=$TERM" )
 
 # -U -m -p are what make the game visible: its user, mount and pid namespaces.
 # -n -i -u come along so the attached program stays as confined as the game --
@@ -249,4 +261,4 @@ esac
 # Enter both the target root and a directory inside it. Keeping the host cwd
 # would leave a filesystem reference outside the sandbox even after chroot.
 exec "$SECCOMP" nsenter -t "$TARGET" "${NS[@]}" --root --wdns=/ --preserve-credentials -- \
-     env -i /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}
+     env -i -- ${GAME_ENV[@]+"${GAME_ENV[@]}"} /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}

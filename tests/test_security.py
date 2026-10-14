@@ -679,6 +679,38 @@ class SecurityTests(unittest.TestCase):
             env=self.env, capture_output=True, text=True, pass_fds=(secret,), timeout=15)
         self.assertNotIn("private", leak.stdout)
 
+    def test_attached_programs_take_nothing_from_the_game(self):
+        # What is attached runs outside the game's Landlock domain, so the game
+        # must not get to choose what it runs: no rc file from the game's
+        # $HOME for the shell, no PATH from a process the game started --
+        # here a "wineserver" of its own -- for a native command.
+        name = "env-" + self.base.name
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", name, str(self.game),
+             "/bin/sh", "-c",
+             'mkdir "$HOME/evil"; printf "#!/bin/sh\\ntouch \\"\\$HOME/planted-ran\\"\\n" '
+             '> "$HOME/evil/true"; chmod +x "$HOME/evil/true"; '
+             'echo "touch \\"\\$HOME/planted-ran\\"" > "$HOME/.bashrc"; '
+             'cp /bin/sleep "$HOME/wineserver"; '
+             'PATH="$HOME/evil:/usr/bin:/bin" "$HOME/wineserver" 30 & '
+             'sleep 0.3; echo ready; exec sleep 30'],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop():
+            if proc.poll() is None:
+                proc.terminate()
+            proc.communicate(timeout=10)
+        self.addCleanup(stop)
+        self.assertEqual(proc.stdout.readline().strip(), "ready")
+        home = self.home / "game-sandboxes" / name / "home"
+        for mode in (["--exec", "--", "true"], ["--shell"]):
+            result = subprocess.run(
+                [str(ROOT / "sandbox-attach"), "--name", name, *mode], env=self.env,
+                input='test "$PATH" = /usr/bin:/bin && echo clean\n',
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((home / "planted-ran").exists(), f"{mode[0]} ran the game's code")
+        self.assertIn("clean", result.stdout)
+
     def test_attach_cannot_be_steered_into_another_sandbox(self):
         # A process that names another sandbox's capture home on its command
         # line, the way that sandbox's bwrap does, and that comes first in

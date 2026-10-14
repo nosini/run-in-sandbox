@@ -613,6 +613,14 @@ practice it exits silently without starting anything.
 The attached program is as confined as the game: it joins the sandbox's network
 namespace too, so it has loopback and nothing else.
 
+It starts with the environment the game was launched with, which
+`sandbox-game` records outside the game's reach, not one read from a process
+in the sandbox. The `--shell` reads no `.bashrc` or profile, since those
+would be in the game's home. A Windows program also takes Proton's
+run-time settings from the game's `wineserver`. Running in the game's Wine
+session means trusting it anyway: the game can replace its `wineserver`, and
+it can write to the prefix the program loads DLLs and settings from.
+
 CE's kernel-mode features — DBVM, the driver — do not work under Wine;
 scanning, pointer maps and speedhack do.
 
