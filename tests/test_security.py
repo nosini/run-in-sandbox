@@ -174,9 +174,9 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                 if whole_lan == "0":
                     self.assertLessEqual({"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4",
                                           "255.255.255.255/32"}, refused["-4"])
-                    self.assertLessEqual({"2001:db8:2::/64", "2001:db8:3::/64", "fd10:0:7::/48",
+                    self.assertLessEqual({"2001:db8:2::/64", "2001:db8:3::/64", "fc00::/7",
                                           "ff00::/8"}, refused["-6"])
-                # Not the internet behind a router or a tunnel, fake-IP ranges included.
+                # Not the internet behind a router or a tunnel.
                 self.assertFalse({"1.1.1.1/32", "198.18.0.0/15"} & refused["-4"])
                 self.assertFalse({"2001:db8:4::/64", "fdfe:dcba:9876::/64"} & refused["-6"])
                 if whole_lan == "1":

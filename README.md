@@ -745,17 +745,17 @@ LAN](#letting-a-game-reach-the-lan):
   from outside, through ordinary sockets of yours; no port on this machine is
   forwarded in, and nothing comes in from outside.
 - Routing rules refuse IPv4's private, shared and link-local space, IPv6's
-  link-local space, multicast and broadcast, every address this machine has,
-  and the whole network behind each network card, IPv6 prefixes included:
-  each card's own networks, those it has a route to directly, and private
-  IPv6 (`fc00::/7`) networks routed through a router on it. So neither the
-  LAN, the router's admin page nor a service listening on this machine is
-  reachable.
+  private (`fc00::/7`) and link-local space, multicast and broadcast, every
+  address this machine has, and the whole network behind each network card,
+  IPv6 prefixes included: each card's own networks and those it has a route
+  to directly. So neither the LAN, the router's admin page nor a service
+  listening on this machine is reachable.
   The game cannot lift them: they sit in a namespace it has no privileges
   over. Tunnels (a VPN, a proxy in tun mode such as mihomo) are left open
   beyond this machine's own address on them, since what lies behind one is
-  the internet, and a fake-IP proxy hands out private IPv6 addresses for
-  ordinary sites.
+  the internet. A fake-IP proxy that hands out private IPv6 addresses for
+  ordinary sites (mihomo's `fake-ip-range6`) needs that range let through:
+  `--allow-lan fdfe:dcba:9876::/64`, say, or the same in the preferences.
 - The CA certificates are mounted too, wherever the distribution keeps them,
   so HTTPS can be verified.
 - DNS goes to `169.254.1.1`, which `pasta` forwards to your usual resolver —
