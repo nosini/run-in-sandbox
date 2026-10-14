@@ -2156,6 +2156,24 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertTrue("--expand-environment=no" in launch.split(),
                         "the scope was started without --expand-environment=no")
 
+    def test_hardware_identifiers_are_covered(self):
+        # World-readable, and each enough to tell this machine apart: monitor
+        # EDIDs, disk serials in SCSI VPD pages, LUKS and LVM UUIDs, and
+        # Thunderbolt device IDs. Checked against what this machine has.
+        import glob
+        patterns = ("/sys/class/drm/card*-*/edid", "/sys/bus/thunderbolt/devices/*/unique_id",
+                    "/sys/bus/scsi/devices/*/vpd_pg80", "/sys/bus/scsi/devices/*/vpd_pg83",
+                    "/sys/block/*/dm/uuid")
+        present = {os.path.realpath(f) for p in patterns for f in glob.glob(p)
+                   if os.access(f, os.R_OK)}
+        if not present:
+            self.skipTest("none of these identifiers on this machine")
+        args = self.recorded_args()
+        empty = str(self.home / "game-sandboxes" / "game" / ".empty")
+        covered = {args[i + 2] for i, a in enumerate(args)
+                   if a == "--ro-bind-try" and args[i + 1] == empty}
+        self.assertEqual(present - covered, set())
+
     def test_title_bars_get_the_desktops_button_layout(self):
         # GTK-drawn title bars read their buttons from GNOME's settings, which
         # are not in the sandbox: that one value goes in, read-only, through

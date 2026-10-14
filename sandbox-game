@@ -1422,8 +1422,12 @@ exec 7<<<localhost
 exec 8< <(cat /proc/sys/kernel/random/uuid)
 ID_ARGS+=( --ro-bind-data 8 /proc/sys/kernel/random/boot_id )
 # Each covered with an empty file. Only what any user can read is worth
-# hiding; the rest (DMI serials, most VPD pages) is root-only already. A real
-# file, not /dev/null: /sys is mounted nodev, where a device node will not open.
+# hiding; the rest (DMI serials, most VPD pages) is root-only already. Among
+# what is not: a monitor's EDID carries its serial number, SCSI and SATA
+# disks give theirs in VPD pages 0x80 and 0x83, and device-mapper names a
+# LUKS or LVM volume by its UUID. Wine and SDL take a monitor's details from
+# the display server, not from here. A real file, not /dev/null: /sys is
+# mounted nodev, where a device node will not open.
 # The kernel command line too, which tends to name the root filesystem by
 # UUID, and /proc/modules, the driver list /sys/module is hidden for.
 : > "$CAP/.empty"
@@ -1438,6 +1442,9 @@ for f in /etc/fstab /etc/crypttab /etc/hostid /proc/cmdline /proc/modules \
          /sys/bus/usb/devices/*/serial /sys/bus/mmc/devices/*/serial \
          /sys/bus/mmc/devices/*/cid /sys/class/power_supply/*/serial_number \
          /sys/class/drm/card*/device/unique_id /sys/class/drm/card*/device/serial_number \
+         /sys/class/drm/card*-*/edid /sys/bus/thunderbolt/devices/*/unique_id \
+         /sys/bus/scsi/devices/*/vpd_pg80 /sys/bus/scsi/devices/*/vpd_pg83 \
+         /sys/block/*/dm/uuid \
          /sys/class/dmi/id/product_uuid /sys/class/dmi/id/*_serial; do
     [ -f "$f" ] && [ -r "$f" ] || continue
     # -try: a device can go between this and bwrap -- a wireless mouse or
