@@ -107,6 +107,10 @@ chosen() {
     if [ "${RESULT[$1]+set}" ]; then printf '%s\n' "${RESULT[$1]}"
     else kept "$1" "$2"; fi
 }
+# Shown in the window, or already in the file. A hidden key the file lacks
+# is not written: a game's file would then override the defaults with the
+# built-in value, from then on, for a setting the user never saw.
+saved_key() { [ "${RESULT[$1]+set}" ] || file_get "$TARGET" "$1" >/dev/null; }
 
 # Parse the destination's arguments, then replace only the exposed controls.
 # A game without its own arguments inherits the defaults; saving defaults
@@ -155,6 +159,7 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
 {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
     for key in wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton \
                dotnet lan private_hosts hosts_writable; do
+        saved_key "$key" || continue
         case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
         printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
     done
@@ -164,6 +169,7 @@ mkdir -p "$(dirname "$TARGET")" || die "Cannot create $(dirname "$TARGET")"
     # Values that may be empty: written when there is one, or when the
     # defaults have one that this game's empty value turns off.
     for key in with_proton lan_allow hosts; do
+        saved_key "$key" || continue
         value="$(chosen "$key" '')"
         if [ -n "$value" ] || { [ "$TARGET" != "$CFGDIR/defaults" ] \
                 && [ -n "$(file_get "$CFGDIR/defaults" "$key" || true)" ]; }; then

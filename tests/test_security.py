@@ -1977,6 +1977,24 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         _, saved = self.preferences([])                  # cancelled: still as before
         self.assertEqual(saved["lan_allow"], "10.0.50.105:443")
 
+    def test_game_settings_leave_hidden_defaults_alone(self):
+        # Hidden behind the Internet switch, the LAN settings are not the
+        # game's to save: written with built-in values, they would override
+        # the defaults for that game from then on.
+        (self.game / "run.sh").write_text("#!/bin/sh\n")
+        config = self.home / ".config" / "sandbox-game"
+        config.mkdir(parents=True)
+        (config / "defaults").write_text("lan=1\nlan_allow=10.0.50.105\nhosts_writable=1\n")
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertEqual(saved["net"], "0")
+        for key in ("lan", "lan_allow", "hosts_writable"):
+            self.assertNotIn(key, saved)
+        # What the game's own file already has is kept, hidden or not.
+        settings = config / "games" / self.cli("--print-name", self.game).stdout.strip()
+        settings.write_text(settings.read_text() + "lan=0\n")
+        _, saved = self.preferences(["Native Wayland", "Off", "Off", "This game only"])
+        self.assertEqual(saved["lan"], "0")
+
     def test_preferences_save_hosts_entries(self):
         (self.game / "run.sh").write_text("#!/bin/sh\n")
         self.env["TEST_VALUES"] = json.dumps({
