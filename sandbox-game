@@ -375,7 +375,9 @@ probe_limits() {
     # do, and blanks what it cannot parse: `b=${f##*/}` in the NW.js launch
     # script arrived as `b=`. The command line is ours, not a unit's; hand it
     # over as written. Older versions neither expand nor know the switch.
-    systemd-run --help 2>/dev/null | grep -q -- --expand-environment \
+    # Not piped into grep -q: under pipefail, grep leaving at the first match
+    # can kill systemd-run with SIGPIPE, and the switch would be left out.
+    [[ "$(systemd-run --help 2>/dev/null)" == *--expand-environment* ]] \
         && SCOPE+=( --expand-environment=no )
     command -v systemd-run >/dev/null \
         && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
@@ -1358,7 +1360,7 @@ fuse_overlay() {                     # lower, upper, work, mountpoint
     fuse-overlayfs -o lowerdir=/proc/self/fd/14,upperdir=/proc/self/fd/15,workdir=/proc/self/fd/16 \
         "$4" 14<"$1" 15<"$2" 16<"$3"
 }
-if bwrap --help 2>&1 | grep -q -- --overlay; then
+if [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
     [ -z "$PROTON" ] || OVERLAY_ARGS+=( --overlay-src "$PROTON" --tmp-overlay /proton )
 else

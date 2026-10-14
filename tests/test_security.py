@@ -1969,6 +1969,28 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.env["DISPLAY"] = ":123"
         return json.loads(self.cli(*options, self.game, "/bin/true").stdout)
 
+    def test_expand_environment_detection_survives_sigpipe(self):
+        # The switch is named early in a long help text. Piped into grep -q,
+        # which leaves at the first match, systemd-run died of SIGPIPE on its
+        # next write, pipefail failed the test and the switch was left out.
+        self.recorded_args()                          # sets up PATH and bin/
+        log = self.base / "systemd-run.log"
+        systemd_run = self.base / "bin" / "systemd-run"
+        systemd_run.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = --help ]; then\n'
+            '    printf -- "--expand-environment=BOOL\\n"; sleep 0.3\n'
+            '    i=0; while [ $i -lt 2000 ]; do printf "%064d\\n" 0; i=$((i+1)); done\n'
+            '    exit 0\n'
+            'fi\n'
+            f'printf "%s\\n" "$*" >> {str(log)!r}\n'
+            'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n')
+        systemd_run.chmod(0o755)
+        self.recorded_args()
+        launch = log.read_text().splitlines()[-1]
+        self.assertTrue("--expand-environment=no" in launch.split(),
+                        "the scope was started without --expand-environment=no")
+
     def test_title_bars_get_the_desktops_button_layout(self):
         # GTK-drawn title bars read their buttons from GNOME's settings, which
         # are not in the sandbox: that one value goes in, read-only, through

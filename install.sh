@@ -173,7 +173,7 @@ fi
 # launcher names what is missing when it gets there anyway.
 if ! command -v bwrap >/dev/null; then
     warn "bwrap not found -- install bubblewrap; nothing runs without it"
-elif ! bwrap --help 2>&1 | grep -q -- --disable-userns; then
+elif [[ "$(bwrap --help 2>&1)" != *--disable-userns* ]]; then   # grep -q can SIGPIPE bwrap
     warn "bwrap is older than 0.8 (no --disable-userns); sandbox-game will refuse to start"
 fi
 # The real test of python3 and libseccomp is building the filter.
