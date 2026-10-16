@@ -1573,11 +1573,13 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
     def test_check_names_what_32_bit_wine_cannot_find(self):
         # Proton runs on the system's libraries: a 32-bit Wine driver that
         # links one the system has no 32-bit copy of is named, while Wine's
-        # own modules beside the driver are not.
+        # own modules beside the driver are not. Each library comes with the
+        # Protons that want it, once each, however many times one is found.
         gcc = shutil.which("gcc")
         if not gcc or not os.path.exists("/usr/lib/ld-linux.so.2"):
             self.skipTest("needs gcc and a 32-bit glibc")
-        proton = self.base / "Proton-Test"
+        tools = self.home / ".local/share/Steam/compatibilitytools.d"
+        proton, other = tools / "Proton Test", tools / "Other-Proton"
         drivers = proton / "files" / "lib" / "wine" / "i386-unix"
         stubs = self.base / "stubs"
         for folder in (drivers, stubs):
@@ -1597,6 +1599,8 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         build(stubs / "libsandbox-gone.so.1")
         build(drivers / "winex11.so", "-L", str(drivers), "-l:ntdll.so",
               "-L", str(stubs), "-l:libsandbox-gone.so.1")
+        shutil.copytree(proton, other)
+        build(other / "files/lib/wine/i386-unix/winepulse.so", "-L", str(stubs), "-l:libsandbox-gone.so.1")
         shutil.rmtree(stubs)
         self.env["PROTON_DIR"] = str(proton)
 
@@ -1606,9 +1610,11 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
 
         found = line()
         self.assertEqual(found.split()[0], "!!", found)
-        self.assertIn("libsandbox-gone.so.1", found)
+        self.assertIn("lack libsandbox-gone.so.1 (Proton Test, Other-Proton): install", found)
         self.assertNotIn("ntdll.so", found)
         build(drivers / "winex11.so", "-L", str(drivers), "-l:ntdll.so")
+        self.assertIn("lack libsandbox-gone.so.1 (Other-Proton): install", line())
+        shutil.rmtree(other)
         self.assertNotIn("libsandbox-gone.so.1", line())
         # A WoW64 build has no 32-bit drivers, and needs no 32-bit libraries.
         shutil.rmtree(proton / "files")

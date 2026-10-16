@@ -395,10 +395,11 @@ probe_limits() {
 # 32-bit loader, and its display and sound drivers link or open 32-bit system
 # libraries. Without them an installer dies at once, or runs and never opens a
 # window. Sets W32_PROTONS and W32_DRIVERS, counts of what was found, and
-# W32_MISSING, the libraries any of those drivers cannot find.
+# W32_MISSING, the libraries any of those drivers cannot find, each with the
+# Protons whose drivers want it, or alone when it is missing for them all.
 wine32_status() {
-    local dirs=() d f root lib arrow rest cache re ld=/usr/lib/ld-linux.so.2
-    local -A missing=()
+    local dirs=() d f root lib arrow rest cache re names ld=/usr/lib/ld-linux.so.2
+    local -A missing=()                 # library -> the Protons wanting it, a line each
     W32_PROTONS=0; W32_DRIVERS=0; W32_MISSING=()
     [ -z "${PROTON_DIR:-}" ] || dirs+=( "${PROTON_DIR%/}" )
     while IFS= read -r root; do
@@ -416,7 +417,9 @@ wine32_status() {
             # Wine's own modules beside the driver are found by Wine itself.
             while read -r lib arrow rest; do
                 [ "$arrow $rest" = "=> not found" ] || continue
-                [ -e "${f%/*}/$lib" ] || missing[$lib]=1
+                [ ! -e "${f%/*}/$lib" ] || continue
+                [[ $'\n'"${missing[$lib]:-}" == *$'\n'"${d##*/}"$'\n'* ]] \
+                    || missing[$lib]+="${d##*/}"$'\n'
             done < <(LD_TRACE_LOADED_OBJECTS=1 LD_LIBRARY_PATH="$d/files/lib/i386-linux-gnu:$d/files/lib" \
                      "$ld" "$f" 2>/dev/null || true)
         done
@@ -428,10 +431,14 @@ wine32_status() {
         && cache="$({ ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null)"; then
         for lib in libfreetype.so.6 libfontconfig.so.1 libgnutls.so.30 libvulkan.so.1 libEGL.so.1; do
             re=$'(^|\n)\t'"${lib//./\\.}"' \(libc6(\)|, )'
-            [[ "$cache" =~ $re ]] || missing[$lib]=1
+            [[ "$cache" =~ $re ]] || missing[$lib]=""
         done
     fi
-    [ "${#missing[@]}" = 0 ] || mapfile -t W32_MISSING < <(printf '%s\n' "${!missing[@]}" | sort)
+    while IFS= read -r lib; do
+        [ -n "$lib" ] || continue
+        names="${missing[$lib]%$'\n'}"
+        W32_MISSING+=( "$lib${names:+ (${names//$'\n'/, })}" )
+    done < <(printf '%s\n' "${!missing[@]}" | sort)
 }
 
 # sandbox-game --check: what of all this holds on this machine, one line
@@ -529,7 +536,8 @@ check_host() {
     elif [ ! -x /usr/lib/ld-linux.so.2 ]; then
         _check_line '!!' 32-bit "no 32-bit glibc (/usr/lib/ld-linux.so.2): Proton cannot start 32-bit programs, many installers and launchers among them"
     elif [ "${#W32_MISSING[@]}" -gt 0 ]; then
-        _check_line '!!' 32-bit "32-bit programs under Proton lack ${W32_MISSING[*]}: install their 32-bit packages"
+        out="$(printf '%s; ' "${W32_MISSING[@]}")"
+        _check_line '!!' 32-bit "32-bit programs under Proton lack ${out%; }: install their 32-bit packages"
     else
         _check_line ok 32-bit "Proton's 32-bit Wine finds the system libraries it needs"
     fi
