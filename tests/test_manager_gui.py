@@ -19,7 +19,7 @@ class ManagerGuiTests(unittest.TestCase):
         except (ImportError, ValueError):
             self.skipTest("GTK 4 and libadwaita are not installed")
         script = r'''
-import os, runpy, subprocess, sys, traceback
+import json, os, runpy, subprocess, sys, traceback
 from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
@@ -161,6 +161,67 @@ def tick():
             assert not manager.rows[manager.selected["name"]].get_child_visible()
             manager.search.set_text("")
             manager.listbox.invalidate_filter()
+            root = Path.home() / "External Games"
+            for parent in ("Native", "Copies/one", "Copies/two"):
+                folder = root / parent / ("Moved Game" if parent == "Native" else "Duplicate Game")
+                folder.mkdir(parents=True)
+                (folder / "play.sh").write_text("#!/bin/sh\n")
+            for sandbox in ("moved-game", "duplicate-game"):
+                manager.library.capture(sandbox).mkdir()
+            manager.game_folders()
+            dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Game folders")
+            location = next(w for w in children(dialog) if isinstance(w, Gtk.Entry) and
+                            w.get_placeholder_text() == "Folder path")
+            location.set_text("relative/path")
+            button(dialog, "Add").emit("clicked")
+            assert not manager.library.game_folders()
+            location.set_text(str(root))
+            # Saving also adds a path that has been typed but not yet added.
+            button(dialog, "Save and search").emit("clicked")
+            assert manager.library.game_folders() == [root]
+        elif stage == 4:
+            if len(manager.entries) != 3:
+                return True
+            moved = next(e for e in manager.entries if e["name"] == "moved-game")
+            assert moved["directory"] == str(Path.home() / "External Games/Native/Moved Game")
+            assert moved["title"] == "Moved Game"
+            ambiguous = next(e for e in manager.entries if e["name"] == "duplicate-game")
+            assert not ambiguous["directory"]
+            manager.locate(ambiguous)
+        elif stage == 5:
+            dialogs = [w for w in Gtk.Window.get_toplevels() if w.get_title() == "Matching game folders"]
+            if not dialogs:
+                return True
+            chosen = str(Path.home() / "External Games/Copies/two/Duplicate Game")
+            button(dialogs[0], chosen).emit("clicked")
+        elif stage == 6:
+            entry = next(e for e in manager.entries if e["name"] == "duplicate-game")
+            if not entry["directory"]:
+                return True
+            chosen = str(Path.home() / "External Games/Copies/two/Duplicate Game")
+            assert entry["directory"] == chosen
+            assert entry["title"] == "Duplicate Game"
+            saved = json.loads((manager.library.capture(entry["name"]) / "manager.json").read_text())
+            assert saved["directory"] == chosen
+            display_name = next(w for w in children(manager.overview) if isinstance(w, Gtk.Entry) and
+                                w.get_placeholder_text() == "Display name")
+            display_name.set_text(entry["name"])
+            button(manager.overview, "Save game details").emit("clicked")
+            saved = json.loads((manager.library.capture(entry["name"]) / "manager.json").read_text())
+            assert saved["title_custom"] is True
+            assert saved["title"] == entry["name"]
+            assert next(e for e in manager.library.entries() if e["name"] == entry["name"])["title"] == entry["name"]
+            manager.game_folders()
+            dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Game folders")
+            button(dialog, "Remove").emit("clicked")
+            button(dialog, "Cancel").emit("clicked")
+            assert len(manager.library.game_folders()) == 1
+            manager.game_folders()
+            dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Game folders")
+            button(dialog, "Remove").emit("clicked")
+            button(dialog, "Save and search").emit("clicked")
+            assert not manager.library.game_folders()
+        elif stage == 7:
             manager.window.close()
             print("GUI lifecycle passed", flush=True)
             return False

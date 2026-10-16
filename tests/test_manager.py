@@ -86,6 +86,193 @@ class LibraryTests(unittest.TestCase):
         (Path(entry["directory"]) / "icon.ico").symlink_to(original)
         self.assertEqual(self.library.icon_sources(entry), [])
 
+    def native_game(self, path):
+        path.mkdir(parents=True)
+        (path / "play.sh").write_text("#!/bin/sh\n")
+        return path
+
+    def test_search_locations_persist_deduplicate_and_allow_unmounted_drives(self):
+        drive = self.home / "unmounted drive"
+        self.library.save_game_folders([drive, drive / "."])
+        self.assertEqual(self.library.game_folders(), [drive])
+        self.assertFalse(drive.exists())
+        other = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game",
+                             home=self.home, config=self.library.config)
+        self.assertEqual(other.game_folders(), [drive])
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            self.library.save_game_folders(["relative/games"])
+        self.assertEqual(self.library.game_folders(), [drive])
+        self.library.save_game_folders([])
+        self.assertEqual(self.library.game_folders(), [])
+
+    def test_refresh_finds_legacy_capture_by_folder_name_without_using_display_title(self):
+        capture = self.library.capture("original-game")
+        capture.mkdir(parents=True)
+        core.atomic_write(capture / "manager.json", json.dumps({"title": "My custom title"}))
+        location = self.home / "Games"
+        game = self.native_game(location / "Native" / "Original -- Game")
+        self.library.save_game_folders([location])
+        entry, = self.library.refresh()
+        self.assertEqual(entry["name"], "original-game")
+        self.assertEqual(entry["title"], "My custom title")
+        self.assertEqual(entry["directory"], str(game))
+        self.assertEqual(self.library.entries(), [entry])
+
+    def test_manual_and_automatic_locate_replace_the_fallback_display_name(self):
+        root = self.home / "Games"
+        for name, folder in (("manual-game", "Manual Game"), ("automatic-game", "Automatic Game")):
+            self.library.capture(name).mkdir(parents=True)
+            self.native_game(root / folder)
+        manual = next(e for e in self.library.entries() if e["name"] == "manual-game")
+        updated = self.library.reconnect(manual, root / "Manual Game")
+        self.assertEqual(updated["title"], "Manual Game")
+        self.library.save_game_folders([root])
+        entries = {e["name"]: e for e in self.library.refresh()}
+        self.assertEqual(entries["automatic-game"]["title"], "Automatic Game")
+        self.assertEqual(entries["manual-game"]["title"], "Manual Game")
+        for name, entry in entries.items():
+            saved = core.read_json(self.library.capture(name) / "manager.json")
+            self.assertEqual(saved["title"], entry["title"])
+            self.assertEqual(entry["name"], name)
+
+    def test_refresh_repairs_display_names_for_previously_located_games(self):
+        game = self.native_game(self.home / "Games/Original Game")
+        entry = dict(name="original-game", title="original-game", kind="existing",
+                     directory=str(game), selection=str(game), program="", arguments="")
+        self.library.save_entry(entry)
+        with patch.object(self.library, "describe", side_effect=AssertionError("Already located")):
+            updated, = self.library.refresh()
+        self.assertEqual(updated["title"], "Original Game")
+        self.assertEqual(updated["directory"], str(game))
+
+    def test_explicit_display_name_equal_to_sandbox_name_is_preserved(self):
+        self.library.capture("original-game").mkdir(parents=True)
+        entry, = self.library.entries()
+        entry.update(title_custom=True)
+        self.library.save_entry(entry)
+        game = self.native_game(self.home / "Games/Original Game")
+        self.library.save_game_folders([game.parent])
+        updated, = self.library.refresh()
+        self.assertEqual(updated["title"], "original-game")
+        self.assertEqual(self.library.entries()[0]["title"], "original-game")
+        self.assertEqual(self.library.add_existing(game, entry["name"])["title"], "original-game")
+
+    def test_managed_install_titles_do_not_use_the_internal_game_folder_name(self):
+        entry = self.library.create("managed-game")
+        updated, = self.library.refresh()
+        self.assertEqual(updated["title"], entry["title"])
+
+    def test_moved_launcher_reconnect_keeps_metadata_settings_and_saves(self):
+        old = self.native_game(self.home / "old" / "Original game")
+        entry = self.library.add_existing(old / "play.sh")
+        entry.update(title="Renamed title", arguments="--test", custom="keep")
+        self.library.save_entry(entry)
+        self.library.update_settings(entry["name"], {"net": "1"})
+        save = self.library.capture(entry["name"]) / "home/save.dat"
+        save.parent.mkdir()
+        save.write_text("progress")
+        root = self.home / "new"
+        root.mkdir()
+        moved = root / old.name
+        old.rename(moved)
+        self.library.save_game_folders([root])
+        updated, = self.library.refresh()
+        self.assertEqual(updated["selection"], str(moved / "play.sh"))
+        self.assertEqual(updated["directory"], str(moved))
+        for key in ("name", "title", "program", "arguments", "custom"):
+            self.assertEqual(updated[key], entry[key])
+        self.assertEqual(self.library.settings(entry["name"])["net"], "1")
+        self.assertEqual(save.read_text(), "progress")
+
+    def test_ambiguous_matches_need_a_choice_and_manual_reconnect_preserves_details(self):
+        capture = self.library.capture("same-game")
+        capture.mkdir(parents=True)
+        entry, = self.library.entries()
+        entry.update(title="Custom title", arguments="--keep")
+        self.library.save_entry(entry)
+        games = [self.native_game(self.home / parent / "Same Game") for parent in ("one", "two")]
+        self.library.save_game_folders([self.home / "one", self.home / "two", self.home / "one"])
+        self.assertEqual(self.library.find_game_folders([entry])[entry["name"]], sorted(map(str, games)))
+        self.assertEqual(self.library.refresh(), [entry])
+        chosen = self.library.reconnect(entry, games[1])
+        self.assertEqual(chosen["directory"], str(games[1]))
+        self.assertEqual(chosen["title"], "Custom title")
+        self.assertEqual(chosen["arguments"], "--keep")
+
+    def test_search_leaves_valid_internal_and_unavailable_games_alone(self):
+        internal = self.library.create("Managed")
+        outside = self.native_game(self.home / "original" / "External")
+        external = self.library.add_existing(outside)
+        root = self.home / "other"
+        self.native_game(root / "External")
+        self.native_game(root / "Managed")
+        self.library.save_game_folders([root, self.home / "unmounted"])
+        self.assertEqual(self.library.refresh(), sorted([internal, external], key=lambda e: e["title"].casefold()))
+        outside.rename(outside.with_name("renamed"))
+        self.library.save_game_folders([self.home / "unmounted"])
+        self.assertEqual(self.library.refresh(), self.library.entries())
+
+    def test_search_skips_symlinks_sandbox_contents_and_deep_folders(self):
+        capture = self.library.capture("find-me")
+        capture.mkdir(parents=True)
+        entry, = self.library.entries()
+        root = self.home / "search"
+        root.mkdir()
+        outside = self.native_game(self.home / "private" / "Find Me")
+        (root / "Find Me").symlink_to(outside, target_is_directory=True)
+        self.native_game(root / "one/two/three/Find Me")
+        self.native_game(capture / "game/Find Me")
+        self.library.save_game_folders([root, capture])
+        self.assertEqual(self.library.find_game_folders([entry]), {entry["name"]: []})
+        # The configured root itself and the third level are included.
+        allowed = self.native_game(root / "one/two/Find Me")
+        self.assertEqual(self.library.find_game_folders([entry]), {entry["name"]: [str(allowed)]})
+
+    def test_matching_requires_a_supported_game_and_confined_selected_launcher(self):
+        old = self.native_game(self.home / "old" / "Original game")
+        entry = self.library.add_existing(old / "play.sh")
+        root = self.home / "new"
+        candidate = root / old.name
+        candidate.mkdir(parents=True)
+        (candidate / "play.sh").symlink_to(old / "play.sh")
+        self.library.save_game_folders([root])
+        self.assertEqual(self.library.find_game_folders([entry]), {entry["name"]: []})
+        (candidate / "play.sh").unlink()
+        entry.update(selection=str(self.home / "absent/Original game"), directory=str(self.home / "absent/Original game"))
+        self.assertEqual(self.library.find_game_folders([entry]), {entry["name"]: []})
+
+    def test_overlapping_search_roots_each_get_their_full_search_depth(self):
+        self.library.capture("find-me").mkdir(parents=True)
+        entry, = self.library.entries()
+        root = self.home / "search"
+        nested = root / "one/two"
+        game = self.native_game(nested / "three/four/Find Me")
+        for locations in ([nested, root], [root, nested]):
+            self.library.save_game_folders(locations)
+            self.assertEqual(self.library.find_game_folders([entry]), {entry["name"]: [str(game)]})
+
+    def test_reconnect_keeps_details_edited_while_search_was_running(self):
+        self.library.capture("game").mkdir(parents=True)
+        entry, = self.library.entries()
+        edited = {**entry, "title": "New title", "arguments": "--keep"}
+        self.library.save_entry(edited)
+        game = self.native_game(self.home / "games/Game")
+        updated = self.library.reconnect(entry, game)
+        self.assertEqual(updated["title"], edited["title"])
+        self.assertEqual(updated["arguments"], edited["arguments"])
+
+    def test_refresh_does_not_overwrite_a_location_changed_during_search(self):
+        self.library.capture("game").mkdir(parents=True)
+        entry, = self.library.entries()
+        automatic = self.native_game(self.home / "automatic/Game")
+        manual = self.native_game(self.home / "manual/Game")
+        def search(entries):
+            self.library.reconnect(entry, manual)
+            return {entry["name"]: [str(automatic)]}
+        with patch.object(self.library, "find_game_folders", side_effect=search):
+            updated, = self.library.refresh()
+        self.assertEqual(updated["directory"], str(manual))
+
     def icon_library(self):
         """A library whose icon helper never runs: subprocess.run is patched in each test."""
         helpers = self.home / "helpers"

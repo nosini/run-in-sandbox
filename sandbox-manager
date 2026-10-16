@@ -149,6 +149,7 @@ def main():
             header.pack_start(add)
             menu = Gio.Menu()
             for label, action in (("Add game", "add"), ("Refresh library", "refresh"),
+                                  ("Game folders…", "game-folders"),
                                   ("Check system", "check"), ("Quit", "quit")):
                 menu.append(label, "app." + action)
             header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
@@ -244,6 +245,7 @@ def main():
             threading.Thread(target=self.icon_worker, daemon=True).start()
             for name, callback in (("add", lambda *_: self.add_game()),
                                     ("refresh", lambda *_: self.reload(rescan=True)),
+                                    ("game-folders", lambda *_: self.game_folders()),
                                     ("check", lambda *_: self.check_system()),
                                     ("quit", lambda *_: self.window.close())):
                 action = Gio.SimpleAction.new(name, None)
@@ -319,16 +321,22 @@ def main():
 
         def reload(self, select=None, rescan=False):
             selected_name = select or (self.selected or {}).get("name")
+            request = object()
+            self.reload_request = request
             self.descriptions, self.program_lists = {}, {}
             if rescan:
                 with self.proton_lock:
                     self.proton_list = None
+            self.count.set_label("Refreshing library…")
             def refresh():
                 # Where each game lives, found here once rather than on every keystroke.
-                entries = self.library.entries()
+                entries = self.library.refresh()
                 return [(entry, self.library.installation(entry)) for entry in entries]
             def loaded(located, error):
+                if self.reload_request is not request:
+                    return
                 if error:
+                    self.count.set_label("Could not refresh library")
                     return
                 entries = [entry for entry, _ in located]
                 self.entries = entries
@@ -440,7 +448,8 @@ def main():
             args.set_visible(entry["kind"] == "windows")
             self.overview.append(args)
             def save(*_):
-                updated = {**entry, "title": name.get_text().strip(), "arguments": args.get_text()}
+                updated = {**entry, "title": name.get_text().strip(), "title_custom": True,
+                           "arguments": args.get_text()}
                 try:
                     self.library.save_entry(updated)
                     self.reload(entry["name"])
@@ -457,6 +466,11 @@ def main():
             self.button(files, "Open sandbox folder", lambda *_: self.open_path(self.library.capture(entry["name"])))
             self.button(files, "Locate game", lambda *_: self.locate(entry))
             self.overview.append(files)
+            if entry["kind"] == "existing":
+                self.button(self.overview, "Game folders…", lambda *_: self.game_folders())
+                if not entry.get("selection") or not Path(entry["selection"]).exists():
+                    self.label(self.overview, "Game folder missing. Add its parent location in Game folders to "
+                               "search automatically, or use Locate game to choose a match.", "dim-label")
             self.label(self.overview, str(self.library.capture(entry["name"])), "dim-label")
             row = self.rows.get(entry["name"])
             location = row.location if row and row.entry is entry else self.library.installation(entry)
@@ -661,8 +675,8 @@ def main():
                 self.poll(True)
             self.work(lambda: self.library.start(entry, **kwargs), started)
 
-        def choose_file(self, title, callback, folder=False, windows=False):
-            chooser = Gtk.FileChooserNative.new(title, self.window,
+        def choose_file(self, title, callback, folder=False, windows=False, parent=None):
+            chooser = Gtk.FileChooserNative.new(title, parent or self.window,
                 Gtk.FileChooserAction.SELECT_FOLDER if folder else Gtk.FileChooserAction.OPEN,
                 "Select", "Cancel")
             if windows:
@@ -693,9 +707,117 @@ def main():
                 self.open_path(drive)
                 return
             def selected(path):
-                self.work(lambda: self.library.add_existing(path, entry["name"]),
+                self.work(lambda: self.library.reconnect(entry, path),
                           lambda value, error: self.reload(entry["name"]) if not error else None)
-            self.choose_file("Locate game folder", selected, folder=True)
+            def browse(*_):
+                self.choose_file("Locate game folder", selected, folder=True)
+            if entry.get("selection") and Path(entry["selection"]).exists():
+                browse()
+                return
+            def found(matches, error):
+                if error:
+                    return
+                paths = matches[entry["name"]]
+                if not paths:
+                    browse()
+                elif len(paths) == 1:
+                    selected(paths[0])
+                else:
+                    window = Gtk.Window(title="Matching game folders", transient_for=self.window, modal=True,
+                                        default_width=600, default_height=360)
+                    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+                    for side in ("top", "bottom", "start", "end"):
+                        getattr(box, "set_margin_" + side)(24)
+                    self.label(box, "Choose a folder for " + entry["title"], "title-3")
+                    self.label(box, "Several folders match this sandbox. Choose the installation to use.")
+                    choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                    def use(path):
+                        window.close()
+                        selected(path)
+                    for path in paths:
+                        self.button(choices, path, lambda *_, path=path: use(path))
+                    scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=120)
+                    scroll.set_child(choices)
+                    box.append(scroll)
+                    footer = Gtk.Box(spacing=8)
+                    self.button(footer, "Choose another folder…", lambda *_: (window.close(), browse()))
+                    self.button(footer, "Cancel", lambda *_: window.close())
+                    box.append(footer)
+                    window.set_child(box)
+                    window.present()
+            self.work(lambda: self.library.find_game_folders([entry]), found)
+
+        def game_folders(self):
+            window = Gtk.Window(title="Game folders", transient_for=self.window, modal=True,
+                                default_width=640, default_height=470)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            for side in ("top", "bottom", "start", "end"):
+                getattr(box, "set_margin_" + side)(24)
+            window.set_child(box)
+            self.label(box, "Default locations for external games", "title-3")
+            self.label(box, "Search these locations and up to three folder levels below them when the library "
+                       "opens or refreshes. Missing games are matched by their original folder or sandbox name. "
+                       "Display names and saves stay as they are. If several folders match, use Locate game.")
+            paths = [str(path) for path in self.library.game_folders()]
+            rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=100)
+            scroll.set_child(rows)
+            box.append(scroll)
+            def rebuild():
+                self.clear(rows)
+                if not paths:
+                    self.label(rows, "No search locations added.", "dim-label")
+                for path in paths:
+                    row = Gtk.Box(spacing=8)
+                    label = Gtk.Label(label=path, xalign=0, wrap=True, selectable=True, hexpand=True)
+                    row.append(label)
+                    def remove(*_, path=path):
+                        paths.remove(path)
+                        rebuild()
+                    self.button(row, "Remove", remove)
+                    rows.append(row)
+            rebuild()
+            add_row = Gtk.Box(spacing=8)
+            location = Gtk.Entry(placeholder_text="Folder path", hexpand=True)
+            add_row.append(location)
+            note = Gtk.Label(xalign=0, wrap=True)
+            note.add_css_class("error")
+            def add(path):
+                try:
+                    path = Path(str(path).strip()).expanduser()
+                    if not path.is_absolute():
+                        raise ValueError("Enter an absolute folder path.")
+                    value = str(path.resolve())
+                except (OSError, RuntimeError, ValueError) as error:
+                    note.set_label(str(error))
+                    return False
+                if value not in paths:
+                    paths.append(value)
+                location.set_text("")
+                note.set_label("")
+                rebuild()
+                return True
+            self.button(add_row, "Add", lambda *_: add(location.get_text()))
+            self.button(add_row, "Browse…", lambda *_: self.choose_file(
+                "Choose game location", add, folder=True, parent=window))
+            location.connect("activate", lambda *_: add(location.get_text()))
+            box.append(add_row)
+            box.append(note)
+            footer = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+            self.button(footer, "Cancel", lambda *_: window.close())
+            def save(*_):
+                if location.get_text().strip() and not add(location.get_text()):
+                    return
+                try:
+                    self.library.save_game_folders(paths)
+                except (OSError, ValueError) as error:
+                    note.set_label(str(error))
+                    return
+                window.close()
+                self.reload()
+            self.button(footer, "Save and search", save, "suggested-action")
+            box.append(footer)
+            window.present()
 
         def open_path(self, path):
             try:

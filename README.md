@@ -120,6 +120,18 @@ are captured in its sandbox. Games launched through the file manager or CLI
 also appear in the library. For sandboxes created before the manager recorded
 game locations, **Locate game** reconnects the original folder to its saves.
 
+Open **Game folders…** in the manager menu to set default search locations for
+external games, then choose **Save and search**. On startup and library refresh,
+the manager searches those locations and up to three folder levels below them
+for missing games. It matches the original folder name, or the sandbox name
+for older entries without a recorded location. A unique match reconnects to the
+existing sandbox, keeping custom display names, settings and saves. Entries
+still showing the sandbox name take their display name from the game folder.
+If several folders match, **Locate game** lets you choose. Symbolic links inside search
+locations are skipped; unavailable drives keep their saved locations. These
+locations reconnect games already in your library; use **Add game** to import
+another game.
+
 To install a Windows game:
 
 1. Choose **Add game → Install a Windows game** and give it a name.
