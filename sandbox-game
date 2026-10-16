@@ -1470,6 +1470,14 @@ if [ "$WAYLAND_X11" = 1 ]; then
     # would prevent the launcher's X11 fallback even with DISPLAY available.
     VIDEO_ENV+=( --setenv WINE_GRAPHICS_DRIVER wayland
                  --setenv WINE_USE_EGL 1 --setenv WINE_DISABLE_FULLSCREEN_HACK 1 )
+    # Gamescope enables its Vulkan WSI layer in everything it starts. With the
+    # desktop's socket as WAYLAND_DISPLAY (see "landlock") the layer rightly
+    # decides it is not under gamescope and hooks nothing -- but then asks, in
+    # a dialog, whether to "power through" every swapchain it did not hook:
+    # the game's and an X11 launcher's alike. It can do nothing else here. Set
+    # for the whole sandbox, so what sandbox-attach starts goes without it too;
+    # the layer leaves gamescope's own Vulkan alone either way.
+    VIDEO_ENV+=( --setenv DISABLE_GAMESCOPE_WSI 1 )
     [ -z "$X11_EXE" ] || VIDEO_ENV+=( --setenv PROTON_USE_X11_EXCLUSIVE "$X11_EXE" )
 elif [ "$WAYLAND" = 1 ]; then
     if [ -n "$PROTON" ]; then
@@ -1977,12 +1985,7 @@ if [ "$GS" = 1 ]; then
         # for its X11 children unless --expose-wayland was requested.
         # Connecting to that one socket, nothing else in gamescope's folder.
         INNER_DISPLAY_RULES=( --unix-connect "$HOST_WL" )
-        # Gamescope enables its Vulkan WSI layer in everything it starts. With
-        # the desktop's socket as WAYLAND_DISPLAY the layer rightly decides it
-        # is not under gamescope and hooks nothing -- but then asks, in a
-        # dialog, whether to "power through" every swapchain it did not hook:
-        # the game's and an X11 launcher's alike. It can do nothing else here.
-        INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" DISABLE_GAMESCOPE_WSI=1 )
+        INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
     fi
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach -- "${GS_CMD[@]}" -- \
         /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" --unix-connect-where-writable \
