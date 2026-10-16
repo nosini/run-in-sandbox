@@ -325,6 +325,18 @@ benefit of CPU-bound games. It is a young driver, one more within a game's
 reach, so no other engine gets it. `sandbox-game --check` says whether it is
 there and yours to open.
 
+Proton runs on your system's libraries, not Steam's runtime. Many Windows
+installers and launchers are still 32-bit programs, and most Proton builds
+run those with a 32-bit Wine, which needs your distribution's 32-bit glibc
+and the 32-bit libraries its display, font and sound drivers use: X11 and
+Wayland client libraries, xkbcommon, EGL and OpenGL, FreeType, Vulkan and
+GnuTLS. Without the 32-bit glibc such a program fails at once with
+`/lib/ld-linux.so.2: could not open`. Without the others it may start and
+never open a window. These packages are usually named with a `-32bit`,
+`lib32-`, `.i686` or `:i386` suffix or prefix, depending on the distribution.
+`sandbox-game --check` names any library the Proton builds it finds cannot
+load.
+
 ##### Native Wayland with X11 launcher windows
 
 Some Proton builds can select the graphics driver per process: the game uses
@@ -611,7 +623,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
-| `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, `--net`, NTSYNC. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
+| `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, `--net`, NTSYNC, and the 32-bit libraries Proton needs. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
 | `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
 | `--stop-all` | the same, for every running sandbox |
 | `--list` | every sandbox: size, time played, when last played, whether running |

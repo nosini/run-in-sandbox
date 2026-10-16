@@ -1561,7 +1561,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         lines = result.stdout.splitlines()
         marks = {line.split()[1]: line.split()[0] for line in lines}
         self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
-                                       "gpu", "gamescope", "network", "ntsync"], result.stdout)
+                                       "gpu", "gamescope", "network", "ntsync", "32-bit"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:
         # here at least the playback-only server, the test runtime dir having none.
@@ -1569,6 +1569,50 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(result.returncode, 1)
         filtered = load_seccomp().socketcall_closable() or os.uname().machine != "x86_64"
         self.assertEqual(marks["seccomp"], "ok" if filtered else "--")
+
+    def test_check_names_what_32_bit_wine_cannot_find(self):
+        # Proton runs on the system's libraries: a 32-bit Wine driver that
+        # links one the system has no 32-bit copy of is named, while Wine's
+        # own modules beside the driver are not.
+        gcc = shutil.which("gcc")
+        if not gcc or not os.path.exists("/usr/lib/ld-linux.so.2"):
+            self.skipTest("needs gcc and a 32-bit glibc")
+        proton = self.base / "Proton-Test"
+        drivers = proton / "files" / "lib" / "wine" / "i386-unix"
+        stubs = self.base / "stubs"
+        for folder in (drivers, stubs):
+            folder.mkdir(parents=True)
+        (proton / "proton").write_text("#!/bin/sh\n")
+        (proton / "proton").chmod(0o755)
+        source = self.base / "empty.c"
+        source.write_text("int sandbox_test;\n")
+
+        def build(path, *links):
+            built = subprocess.run([gcc, "-m32", "-shared", "-nostdlib", f"-Wl,-soname,{path.name}",
+                                    "-o", str(path), str(source), *links], capture_output=True, text=True)
+            if built.returncode:
+                self.skipTest("cannot build 32-bit libraries: " + built.stderr)
+
+        build(drivers / "ntdll.so")
+        build(stubs / "libsandbox-gone.so.1")
+        build(drivers / "winex11.so", "-L", str(drivers), "-l:ntdll.so",
+              "-L", str(stubs), "-l:libsandbox-gone.so.1")
+        shutil.rmtree(stubs)
+        self.env["PROTON_DIR"] = str(proton)
+
+        def line():
+            result = self.cli("--check", check=False)
+            return next(l for l in result.stdout.splitlines() if l.split()[1] == "32-bit")
+
+        found = line()
+        self.assertEqual(found.split()[0], "!!", found)
+        self.assertIn("libsandbox-gone.so.1", found)
+        self.assertNotIn("ntdll.so", found)
+        build(drivers / "winex11.so", "-L", str(drivers), "-l:ntdll.so")
+        self.assertNotIn("libsandbox-gone.so.1", line())
+        # A WoW64 build has no 32-bit drivers, and needs no 32-bit libraries.
+        shutil.rmtree(proton / "files")
+        self.assertEqual(line().split()[0], "--")
 
     def test_proton_under_gamescope_uses_its_xwayland(self):
         # Wine's Wayland driver needs protocols gamescope's server lacks, and

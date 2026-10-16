@@ -389,6 +389,51 @@ probe_limits() {
     UNLIMITED="${UNLIMITED% }"
 }
 
+# Proton runs on this system's libraries, not Steam's runtime. A build with a
+# 32-bit Wine of its own (the i386-unix drivers) starts 32-bit Windows
+# programs, as many installers and launchers still are, through the system's
+# 32-bit loader, and its display and sound drivers link or open 32-bit system
+# libraries. Without them an installer dies at once, or runs and never opens a
+# window. Sets W32_PROTONS and W32_DRIVERS, counts of what was found, and
+# W32_MISSING, the libraries any of those drivers cannot find.
+wine32_status() {
+    local dirs=() d f root lib arrow rest cache re ld=/usr/lib/ld-linux.so.2
+    local -A missing=()
+    W32_PROTONS=0; W32_DRIVERS=0; W32_MISSING=()
+    [ -z "${PROTON_DIR:-}" ] || dirs+=( "${PROTON_DIR%/}" )
+    while IFS= read -r root; do
+        for d in "$root"/*/; do dirs+=( "${d%/}" ); done
+    done < <(proton_roots)
+    for d in "${dirs[@]}"; do
+        [ -x "$d/proton" ] || continue
+        W32_PROTONS=$((W32_PROTONS + 1))
+        for f in "$d"/files/lib/wine/i386-unix/{winex11,winewayland,winepulse}.so; do
+            [ -f "$f" ] || continue
+            W32_DRIVERS=$((W32_DRIVERS + 1))
+            [ -x "$ld" ] || continue
+            # The loader's own answer, with the library folders proton adds,
+            # traced as ldd does: --list stops at the first library missing.
+            # Wine's own modules beside the driver are found by Wine itself.
+            while read -r lib arrow rest; do
+                [ "$arrow $rest" = "=> not found" ] || continue
+                [ -e "${f%/*}/$lib" ] || missing[$lib]=1
+            done < <(LD_TRACE_LOADED_OBJECTS=1 LD_LIBRARY_PATH="$d/files/lib/i386-linux-gnu:$d/files/lib" \
+                     "$ld" "$f" 2>/dev/null || true)
+        done
+    done
+    # Fonts, TLS, Vulkan and EGL are opened at run time, so --list cannot see
+    # them; the loader's cache marks 32-bit x86 entries "(libc6)" or
+    # "(libc6, OS ABI: ...)". No cache to read, no verdict on these.
+    if [ "$W32_DRIVERS" -gt 0 ] && [ -x "$ld" ] \
+        && cache="$({ ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null)"; then
+        for lib in libfreetype.so.6 libfontconfig.so.1 libgnutls.so.30 libvulkan.so.1 libEGL.so.1; do
+            re=$'(^|\n)\t'"${lib//./\\.}"' \(libc6(\)|, )'
+            [[ "$cache" =~ $re ]] || missing[$lib]=1
+        done
+    fi
+    [ "${#missing[@]}" = 0 ] || mapfile -t W32_MISSING < <(printf '%s\n' "${!missing[@]}" | sort)
+}
+
 # sandbox-game --check: what of all this holds on this machine, one line
 # each. "!!" is something a sandbox here goes without that it would normally
 # have, and makes the exit status 1; "--" something optional or not
@@ -474,6 +519,19 @@ check_host() {
         _check_line -- ntsync "/dev/ntsync is there but not yours to open (mode $(stat -c %a /dev/ntsync))"
     else
         _check_line -- ntsync "no /dev/ntsync: kernel older than 6.14, or the module not loaded"
+    fi
+
+    wine32_status
+    if [ "$W32_PROTONS" = 0 ]; then
+        _check_line -- 32-bit "no Proton found: nothing to check"
+    elif [ "$W32_DRIVERS" = 0 ]; then
+        _check_line -- 32-bit "no separate 32-bit Wine in the Protons found (WoW64 builds need none)"
+    elif [ ! -x /usr/lib/ld-linux.so.2 ]; then
+        _check_line '!!' 32-bit "no 32-bit glibc (/usr/lib/ld-linux.so.2): Proton cannot start 32-bit programs, many installers and launchers among them"
+    elif [ "${#W32_MISSING[@]}" -gt 0 ]; then
+        _check_line '!!' 32-bit "32-bit programs under Proton lack ${W32_MISSING[*]}: install their 32-bit packages"
+    else
+        _check_line ok 32-bit "Proton's 32-bit Wine finds the system libraries it needs"
     fi
     return "$failed"
 }
