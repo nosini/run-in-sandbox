@@ -500,6 +500,61 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No supported game"):
             self.library.add_existing(game)
 
+    def native_binaries(self, game):
+        result = subprocess.run(["bash", "-c", '. "$1/sandbox-game-lib" && native_binaries "$2"', "test",
+                                 str(ROOT), str(game)], capture_output=True, text=True, check=True)
+        return [Path(line).name for line in result.stdout.splitlines()]
+
+    @staticmethod
+    def elf(path, machine=None, size=0):
+        data = bytearray(Path("/bin/true").read_bytes()) + bytes(size)
+        if machine is not None:
+            data[18:20] = machine.to_bytes(2, "little")
+        path.write_bytes(data)
+        path.chmod(0o644)
+
+    def test_a_linux_helper_does_not_take_over_other_engines(self):
+        # An mkxp-z unpacked into an RPG Maker XP game: still mkxp.
+        rgss = self.home / "Games/Rgss"
+        rgss.mkdir(parents=True)
+        (rgss / "Game.ini").write_text("[Game]\nLibrary=RGSS104E.dll\n")
+        self.elf(rgss / "mkxp-z.x86_64")
+        self.assertEqual(self.library.describe(rgss, "t")["engine"], "mkxp")
+        # A Windows game shipping a Linux server: still Proton.
+        windows = self.home / "Games/Windows"
+        windows.mkdir()
+        (windows / "Game.exe").write_bytes(b"MZ")
+        self.elf(windows / "Server.x86_64")
+        self.assertEqual(self.library.describe(windows, "t")["engine"], "proton")
+        # The same game's Linux build beside its Windows one: native.
+        self.elf(windows / "Game.x86_64")
+        self.assertEqual(self.library.describe(windows, "t")["engine"], "native")
+        self.assertEqual(self.native_binaries(windows), ["Game.x86_64"])
+
+    def test_native_binaries_skip_other_architectures_and_helpers_and_rank_the_game_first(self):
+        game = self.home / "Games/Foo"
+        game.mkdir(parents=True)
+        other = 183 if os.uname().machine == "x86_64" else 62
+        self.elf(game / "Foo.arm64", machine=other)
+        self.elf(game / "createdump", size=4096)
+        self.elf(game / "chrome_crashpad_handler")
+        self.elf(game / "Foo_s.debug")
+        self.elf(game / "Bigger", size=8192)
+        self.elf(game / "Foo.x86_64")
+        self.assertEqual(self.native_binaries(game), ["Foo.x86_64", "Bigger"])
+        # Helpers alone, or another machine's program, are no native game.
+        helpers = self.home / "Games/Helpers"
+        helpers.mkdir()
+        self.elf(helpers / "createdump")
+        self.elf(helpers / "Game.arm64", machine=other)
+        self.assertEqual(self.native_binaries(helpers), [])
+        self.assertEqual(self.library.describe(helpers, "t")["engine"], "")
+        if os.uname().machine == "x86_64":
+            # 32-bit x86 only where nothing 64-bit is there.
+            self.elf(helpers / "Game.x86", machine=3)
+            self.assertEqual(self.native_binaries(helpers), ["Game.x86"])
+            self.assertEqual(self.native_binaries(game), ["Foo.x86_64", "Bigger"])
+
     def test_settings_keep_unknown_keys_and_defaults_separate(self):
         entry = self.library.create("game")
         name = entry["name"]

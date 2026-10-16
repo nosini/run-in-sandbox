@@ -60,33 +60,6 @@ SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 SEL="$(realpath "$SEL")"
 [ -e "$SEL" ] || die "Selection not found:\n$SEL"
 
-# Windows games ship a heap of .exe beside the real one; drop the usual
-# installers and helpers, but only while something else is left to run.
-EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet|redist|crashhandler|crashreport|crashsender|touchup|nwjc|notification_helper|python'
-
-find_exes() {                                  # $1 = dir -> best guess first
-    local dir="$1" d list="" keep=""
-    # Top level first, then deeper -- but only stopping at a level with a
-    # candidate that is not junk: an uninstaller alone at the top, with the
-    # game in bin/, would otherwise be the one picked, and run.
-    for d in 1 5; do
-        list="$(find "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null)"
-        keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*\.exe$" <<<"$list")"
-        [ -n "$keep" ] && break
-    done
-    # Nothing but junk anywhere: offer that rather than nothing.
-    [ -n "$keep" ] && list="$keep"
-    [ -n "$list" ] || return 0
-    # Rank: filename echoing the folder name first, then biggest -- the real
-    # binary is rarely the small one. awk keeps the folder name literal, so a
-    # game called "S.T.A.L.K.E.R." is not read as a regex.
-    awk -F'\t' -v b="${dir##*/}" '
-        BEGIN { b = tolower(b) }
-        { n = $2; sub(/.*\//, "", n)
-          print (index(tolower(n), b) ? 0 : 1) "\t" $0 }' <<<"$list" \
-        | sort -t"$(printf '\t')" -k1,1n -k2,2rn | cut -f3
-}
-
 pick() {                                       # $1 = dir to strip, $@ = paths
     local dir="$1" rel; shift
     [ "$#" -eq 1 ] && { printf '%s\n' "$1"; return; }
@@ -225,12 +198,17 @@ EOF
     ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
 else
     # ----- native, else PGMMV/RGSS, else Windows (.exe) via Proton ------------
-    # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
+    # A .sh launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
     # in the same folder, and running the Linux build beats emulating the other.
-    # Recognised PGMMV/RGSS games use their native replacement players.
+    # Recognised PGMMV/RGSS games use their native replacement players, ahead
+    # of a Linux program, such as an mkxp-z unpacked into an RPG Maker game.
+    # The order game_engine in sandbox-game-lib goes by.
     LAUNCHER=""; GAMEDIR="$R_GAMEDIR"
     if [ -d "$SEL" ]; then
-        mapfile -t natives < <(native_launchers "$GAMEDIR")
+        mapfile -t natives < <(native_scripts "$GAMEDIR")
+        if [ "${#natives[@]}" -eq 0 ] && ! is_pgmmv "$GAMEDIR" && ! is_rgss "$GAMEDIR"; then
+            mapfile -t natives < <(native_binaries "$GAMEDIR")
+        fi
         if [ "${#natives[@]}" -gt 0 ]; then
             LAUNCHER="$(pick "$GAMEDIR" "${natives[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
@@ -259,12 +237,8 @@ else
         CMD=()            # the runtime is the program, so there is no launcher
     else
         REL="${LAUNCHER#"$GAMEDIR"/}"
+        # One that lost its executable bit is sandbox-game's to run; see there.
         CMD=( /game/"$REL" )
-        if [ "$PROTON" = 0 ] && [[ "$LAUNCHER" != *.sh ]] && [ ! -x "$LAUNCHER" ]; then
-            # Archives sometimes lose the Linux executable bit. Change the
-            # sandbox's overlay copy, keeping the original install untouched.
-            CMD=( sh -c 'chmod u+x -- "$1" && exec "$@"' _ "/game/$REL" )
-        fi
     fi
 fi
 

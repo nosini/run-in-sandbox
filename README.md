@@ -120,8 +120,15 @@ are captured in its sandbox. Games launched through the file manager or CLI
 also appear in the library. For sandboxes created before the manager recorded
 game locations, **Locate game** reconnects the original folder to its saves.
 Native Linux exports, including Godot games with a standalone `.x86_64` or
-extensionless executable, can be selected by their folder or executable. If an
-archive lost a binary's executable bit, launching restores it inside the sandbox.
+extensionless executable, can be selected by their folder or executable. A
+Linux program beside Windows ones only counts when it is named like one of them
+(`Game.x86_64` beside `Game.exe`), so a Windows game's Linux server or helper
+does not decide how it runs. If an archive lost a launcher's executable bit, it
+still runs, and the install stays as it is. A script runs through its
+interpreter. A program runs from a copy in the sandbox's install changes; on
+Btrfs or XFS, with the game on the same filesystem as the sandbox, that copy
+takes no extra space. The copy is replaced when the game is updated, and removed
+once the original is executable again.
 
 Open **Game folders…** in the manager menu to set default search locations for
 external games, then choose **Save and search**. On startup and library refresh,

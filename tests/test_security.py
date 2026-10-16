@@ -2257,7 +2257,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         game = self.base / "games" / "Epinelps"
         (game / "launcher").mkdir(parents=True)
         (game / "start.sh").write_text("#!/bin/sh\nexec /game/launcher/App\n")
-        (game / "launcher" / "App").write_bytes(b"\x7fELF" + bytes(60))
+        shutil.copyfile("/bin/true", game / "launcher" / "App")   # a real ELF program, as .NET's starter is
         (game / "launcher" / "App.runtimeconfig.json").write_text(
             '{"runtimeOptions": {"framework": {"name": "Microsoft.NETCore.App", "version": "10.0.0"}}}')
         (game / "launcher" / "Utility.exe").write_text("x")
@@ -2293,14 +2293,56 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         binary.chmod(0o644)
         args = self.launch_with(recorded, self.game, "")
         command = args[args.index(str(self.game)) + 1:]
-        self.assertEqual(command[:2], ["sh", "-c"])
-        result = self.cli("--headless", self.game, *command)
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(command, ["/game/" + binary.name])
+        # The backend repairs it, whoever starts it.
+        self.assertEqual(self.cli("--headless", self.game, *command).returncode, 0)
         self.assertEqual(binary.stat().st_mode & 0o111, 0)
         captured = self.home / "game-sandboxes/game/rw" / binary.name
         self.assertTrue(captured.stat().st_mode & 0o100)
         self.assertFalse((self.game / "unexpected").exists())
         self.assertFalse((self.home / "game-sandboxes/game/rw/unexpected").exists())
+        # An update replaces the copy rather than hiding behind it.
+        update = self.base / "update"
+        shutil.copyfile("/bin/false", update)
+        update.chmod(0o644)
+        os.utime(update, (1, 1))
+        update.replace(binary)
+        self.assertEqual(self.cli("--headless", self.game, *command, check=False).returncode, 1)
+        self.assertEqual(captured.read_bytes(), Path("/bin/false").read_bytes())
+        # With its bit back, the install shows through again.
+        binary.chmod(0o755)
+        self.assertEqual(self.cli("--headless", self.game, *command, check=False).returncode, 1)
+        self.assertFalse(captured.exists())
+
+    def test_data_files_are_never_run_and_scripts_run_through_their_interpreter(self):
+        data = self.game / "readme.txt"
+        data.write_text("echo SCRIPT-RAN\n")
+        result = self.cli("--headless", self.game, "/game/readme.txt", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SCRIPT-RAN", result.stdout)
+        self.assertFalse((self.home / "game-sandboxes/game/rw/readme.txt").exists())
+        recorded = self.stub_launcher()
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(data)
+        subprocess.run([str(ROOT / "Sandbox game")], env=self.env, capture_output=True, timeout=15)
+        self.assertEqual(recorded.read_text().splitlines()[-1], "/game/readme.txt")
+        (self.game / "Game.sh").write_text("#!/bin/sh -e\r\necho \"ran $0\"\n")
+        (self.game / "plain.sh").write_text("echo \"plain $0\"\n")
+        for script in ("Game.sh", "plain.sh"):
+            with self.subTest(script=script):
+                result = self.cli("--headless", self.game, "/game/" + script)
+                self.assertTrue(result.stdout.endswith(f" /game/{script}\n"), result.stdout)
+                self.assertFalse((self.home / "game-sandboxes/game/rw" / script).exists())
+
+    def test_executable_copy_never_follows_links_the_game_left_in_rw(self):
+        (self.game / "bin").mkdir()
+        shutil.copyfile("/bin/true", self.game / "bin/Game")
+        outside = self.base / "outside"
+        outside.mkdir()
+        rw = self.home / "game-sandboxes/game/rw"
+        rw.mkdir(parents=True)
+        (rw / "bin").symlink_to(outside, target_is_directory=True)
+        self.cli("--headless", self.game, "/game/bin/Game", check=False)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def launch_with(self, recorded, game, prefs):
         """Launch GAME from Nautilus with these per-game preferences; the arguments passed on."""

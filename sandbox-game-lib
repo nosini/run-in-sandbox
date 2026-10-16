@@ -92,49 +92,116 @@ derive_names() {
 
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
-# Native exports can be standalone ELF programs (for example .x86_64 or
-# extensionless launchers), with or without their executable bit preserved.
-# Inspect only headers, never run a program to identify it. Shared libraries
-# normally have no entry point and must not become launcher choices.
-native_launchers() {
-    python3 - "$1" <<'PY'
+# Programs among the files given, for this machine: ELF executables or PIE
+# programs for its architecture, going by their headers alone, never by
+# running them. Shared libraries have no entry point and do not count; nor do
+# symbolic links. With --compat first, 32-bit x86 ones on x86_64 instead: for
+# when nothing 64-bit is there. Prints "SIZE<TAB>PATH" for each, as
+# rank_launchers takes them.
+elf_programs() {
+    [ "$#" -gt 0 ] || return 0
+    python3 - "$@" <<'PY'
 import os, sys
-from pathlib import Path
-
-scripts, binaries = [], []
-root = Path(sys.argv[1])
-try:
-    with os.scandir(root) as entries:
-        for entry in entries:
-            try:
-                if not entry.is_file(follow_symlinks=False) or "\n" in entry.name:
-                    continue
-                if entry.name.endswith(".sh"):
-                    scripts.append(entry.path)
-                    continue
-                if ".so" in Path(entry.name).suffixes:
-                    continue
-                fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as stream:
-                    header = stream.read(64)
-                if len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2) \
-                        or header[5] not in (1, 2) or header[6] != 1:
-                    continue
-                width = 4 if header[4] == 1 else 8
-                if width == 8 and len(header) < 64:
-                    continue
-                order = "little" if header[5] == 1 else "big"
-                kind = int.from_bytes(header[16:18], order)
-                address = int.from_bytes(header[24:24 + width], order)
-                if kind in (2, 3) and address:
-                    binaries.append(entry.path)
-            except OSError:
+MACHINES = {"x86_64": 62, "aarch64": 183, "riscv64": 243, "ppc64le": 21, "i686": 3, "i386": 3}
+host = MACHINES.get(os.uname().machine)
+paths = sys.argv[1:]
+if paths[0] == "--compat":
+    paths, host = paths[1:], 3 if host == 62 else None
+found = []
+for path in paths:
+    if "\n" in path or "\t" in path:
+        continue
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not os.path.isfile(f"/proc/self/fd/{stream.fileno()}"):
                 continue
-except OSError:
-    pass
-for path in sorted(scripts or binaries):
-    print(path)
+            size = os.fstat(stream.fileno()).st_size
+            header = stream.read(64)
+    except OSError:
+        continue
+    if len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2) \
+            or header[5] not in (1, 2) or header[6] != 1:
+        continue
+    width = 4 if header[4] == 1 else 8
+    if width == 8 and len(header) < 64:
+        continue
+    order = "little" if header[5] == 1 else "big"
+    kind = int.from_bytes(header[16:18], order)
+    machine = int.from_bytes(header[18:20], order)
+    if kind not in (2, 3) or not int.from_bytes(header[24:24 + width], order):
+        continue
+    if host is not None and machine == host:
+        found.append(f"{size}\t{path}")
+print("\n".join(found))
 PY
+}
+
+# Best guess first, from "SIZE<TAB>PATH" lines on stdin. Names matching JUNK,
+# an extended regex, only when nothing else is left (with $3 = strict, never);
+# then a file name echoing the folder's, then the biggest -- the real program
+# is rarely the small one. awk keeps the folder name literal, so a game called
+# "S.T.A.L.K.E.R." is not read as a regex.
+rank_launchers() {                             # $1 = dir, $2 = junk, $3 = strict
+    local dir="$1" list keep
+    list="$(grep . || true)"
+    keep="$(grep -Eiv "/[^/]*(${2})[^/]*$" <<<"$list" || true)"
+    [ -n "$keep" ] || [ "${3:-}" = strict ] || keep="$list"
+    [ -n "$keep" ] || return 0
+    awk -F'\t' -v b="${dir##*/}" '
+        BEGIN { b = tolower(b) }
+        { n = $2; sub(/.*\//, "", n)
+          print (index(tolower(n), b) ? 0 : 1) "\t" $0 }' <<<"$keep" \
+        | sort -t"$(printf '\t')" -k1,1n -k2,2rn | cut -f3
+}
+
+# Windows games ship a heap of .exe beside the real one; drop the usual
+# installers and helpers, but only while something else is left to run.
+EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet|redist|crashhandler|crashreport|crashsender|touchup|nwjc|notification_helper|python'
+# And Linux ones: .NET's crash dumper, Chromium/CEF helpers, Unity's crash
+# handler and debug symbol files. Never offered on their own.
+NATIVE_JUNK='createdump|crashpad|chrome-sandbox|chrome_sandbox|crashhandler|crashreport|\.debug$|uninstall'
+
+find_exes() {                                  # $1 = dir -> best guess first
+    local dir="$1" d list="" keep=""
+    # Top level first, then deeper -- but only stopping at a level with a
+    # candidate that is not junk: an uninstaller alone at the top, with the
+    # game in bin/, would otherwise be the one picked, and run.
+    for d in 1 5; do
+        list="$(find "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null)"
+        keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*$" <<<"$list" || true)"
+        [ -n "$keep" ] && break
+    done
+    rank_launchers "$dir" "$EXE_JUNK" <<<"$list"
+}
+
+# A native game's .sh launchers, at the top of its folder.
+native_scripts() {                             # $1 = dir
+    find "$1" -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort
+}
+
+# Standalone Linux programs at the top of a game folder (a Godot .x86_64,
+# an extensionless binary), best guess first, with or without their
+# executable bit. Beside Windows programs, only one named as one of them is
+# (Game.x86_64 beside Game.exe): a Windows game's Linux server or helper must
+# not turn it into a native game.
+native_binaries() {                            # $1 = dir
+    local dir="$1" files=() list exes compat
+    mapfile -d '' files < <(find "$dir" -maxdepth 1 -type f ! -name '*.sh' ! -iname '*.exe' \
+        ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null)
+    [ "${#files[@]}" -gt 0 ] || return 0
+    for compat in "" --compat; do
+        list="$(elf_programs ${compat:+"$compat"} "${files[@]}" | grep -Eiv "/[^/]*(${NATIVE_JUNK})[^/]*$" || true)"
+        [ -z "$list" ] || break
+    done
+    [ -n "$list" ] || return 0
+    exes="$(find "$dir" -maxdepth 1 -type f -iname '*.exe' -printf '%f\n' 2>/dev/null)"
+    if [ -n "$exes" ]; then
+        list="$(awk -F'\t' 'NR == FNR { s[tolower(substr($0, 1, length($0) - 4))]; next }
+            { n = $2; sub(/.*\//, "", n); n = tolower(n); m = n; sub(/\.[^.]*$/, "", m)
+              if ((n in s) || (m in s)) print }' <(printf '%s\n' "$exes") - <<<"$list")"
+    fi
+    rank_launchers "$dir" "$NATIVE_JUNK" strict <<<"$list"
 }
 
 # Map a Nautilus selection onto the game. RPG Maker MV/MZ is the awkward one:
@@ -190,7 +257,7 @@ is_dotnet() {                                  # $1 = game dir
     local f
     while IFS= read -r -d '' f; do
         [ -f "${f%.runtimeconfig.json}" ] \
-            && cmp -s -n 4 "${f%.runtimeconfig.json}" <(printf '\177ELF') \
+            && [ -n "$(elf_programs "${f%.runtimeconfig.json}")" ] \
             && grep -qE '"frameworks?"[[:space:]]*:' "$f" && return 0
     done < <(find "$1" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null)
     return 1
@@ -211,8 +278,8 @@ is_rgss() {
 }
 
 # What "Sandbox game" will run a selection with, in the order it goes by: an
-# NW.js app, a native launcher, a PGMMV or RGSS game, a Windows .exe under
-# Proton. For the preferences, which offer only what that engine can do.
+# NW.js app, a .sh launcher, a PGMMV or RGSS game, a Linux program, a Windows
+# .exe under Proton. For the preferences, which offer only what that engine can do.
 # Sets R_ENGINE to nwjs, native, pgmmv, mkxp, proton, or empty when nothing is found.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
 game_engine() {                                # $1 = selection, $2 = optional launch_with override
@@ -224,12 +291,16 @@ game_engine() {                                # $1 = selection, $2 = optional l
     if [ -n "$R_APPDIR" ]; then
         R_ENGINE=nwjs
     elif [ -d "$1" ]; then
-        if [ -n "$(native_launchers "$R_GAMEDIR")" ]; then
+        # The order "Sandbox game" goes by: cheap checks first, the binaries'
+        # headers only when they are what is left to tell.
+        if [ -n "$(native_scripts "$R_GAMEDIR")" ]; then
             R_ENGINE=native
         elif is_pgmmv "$R_GAMEDIR"; then
             R_ENGINE=pgmmv
         elif is_rgss "$R_GAMEDIR"; then
             R_ENGINE=mkxp
+        elif [ -n "$(native_binaries "$R_GAMEDIR")" ]; then
+            R_ENGINE=native
         elif has_windows_exe "$R_GAMEDIR"; then
             R_ENGINE=proton
         fi

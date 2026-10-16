@@ -775,6 +775,83 @@ os.replace(temporary, path)
 PY
 rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
 
+# ---- a launcher without its executable bit ---------------------------------
+# Archives, zip above all, often drop it. A script is run by the interpreter
+# its first line names (sh for a .sh without one), with nothing copied. A
+# program needs the bit on the file itself: it gets a copy in rw/, the
+# overlay's upper layer, as chmod inside the sandbox would make too -- but
+# made here, as a reflink where the filesystem has them (Btrfs, XFS: no
+# second copy on disk), and stamped, so an update to the install replaces it
+# and an install with the bit back shows through again. The install itself is
+# never changed. Running it through the dynamic loader would need no copy, but
+# /proc/self/exe would name the loader, and Godot finds its .pck from there.
+# Anything else -- a data file selected by mistake -- is left to fail.
+exec_bit() {                          # $1 = the command's /game/... path
+    local rel="${1#/game/}" host copy stamp dir part parts visible tmp line interp="" arg="" ours=0
+    [[ "/$rel/" != *//* && "/$rel/" != */./* && "/$rel/" != */../* ]] || return 0
+    host="$GAMEDIR/$rel"; copy="$CAP/rw/$rel"
+    stamp="$CAP/exec-copies/$(printf '%s' "$rel" | sha256sum | cut -c1-32)"
+    [ -f "$host" ] && [ ! -L "$host" ] && [[ "$(realpath -- "$host")" == "$GAMEDIR/"* ]] || return 0
+    if [ -f "$stamp" ] && [ -f "$copy" ] && [ ! -L "$copy" ] \
+       && [ "$(stat -c '%s %Y' -- "$copy")" = "$(cat -- "$stamp")" ]; then ours=1; fi
+    if [ "$ours" = 1 ]; then
+        # Still the install's current program, still without its bit.
+        [ -x "$host" ] || [ "$(stat -c '%s %Y' -- "$host")" != "$(cat -- "$stamp")" ] || return 0
+        rm -f -- "$copy"              # gone stale: updated, or has its bit back
+    fi
+    rm -f -- "$stamp"                 # a copy the game has changed since is its own
+    # What the game sees: the install, or its own changed copy in rw/. A link
+    # or a deletion there is the game's business.
+    if [ -e "$copy" ] || [ -L "$copy" ]; then
+        [ -f "$copy" ] && [ ! -L "$copy" ] || return 0
+        visible="$copy"
+    else
+        visible="$host"
+    fi
+    [ ! -x "$visible" ] || return 0
+    if [ "$(head -c 2 -- "$visible")" = '#!' ] || [[ "$rel" == *.sh ]]; then
+        IFS= read -r line < "$visible" || true
+        line="${line%$'\r'}"
+        if [[ "$line" == '#!'* ]]; then
+            line="${line#'#!'}"; line="${line#"${line%%[![:space:]]*}"}"
+            interp="${line%%[[:space:]]*}"
+            arg="${line#"$interp"}"; arg="${arg#"${arg%%[![:space:]]*}"}"; arg="${arg%"${arg##*[![:space:]]}"}"
+        fi
+        EXEC_PREFIX=( "${interp:-sh}" ${arg:+"$arg"} )
+        return 0
+    fi
+    [ -n "$(elf_programs "$visible")" ] || return 0
+    if [ "$visible" = "$copy" ]; then
+        chmod u+x -- "$copy" || true  # the game's own copy, already in rw/
+        return 0
+    fi
+    # rw/ is the game's to write in: never follow a link it put on the way.
+    # (It is not running: the lock above is held.)
+    dir="$CAP/rw"
+    if [ "$rel" != "${rel##*/}" ]; then
+        IFS=/ read -r -a parts <<<"${rel%/*}"
+        for part in "${parts[@]}"; do
+            dir="$dir/$part"
+            [ ! -L "$dir" ] || return 0
+            [ -d "$dir" ] || mkdir -- "$dir" 2>/dev/null || return 0
+        done
+    fi
+    tmp="$(mktemp -p "$dir" .sandbox-exec.XXXXXX)" || return 0
+    if cp --reflink=auto -- "$host" "$tmp" && chmod --reference="$host" -- "$tmp" && chmod u+x -- "$tmp" \
+       && touch -r "$host" -- "$tmp" && mv -fT -- "$tmp" "$copy"; then
+        mkdir -p -- "$CAP/exec-copies"
+        stat -c '%s %Y' -- "$copy" > "$stamp"
+    else
+        rm -f -- "$tmp"
+        echo "sandbox-game: cannot make an executable copy of $rel" >&2
+    fi
+}
+EXEC_PREFIX=()
+if [ -z "$PROTON_SPEC$MKXP_SPEC$PGMMV_SPEC" ] && [[ "${1:-}" == /game/?* ]]; then
+    exec_bit "$1"
+    set -- "${EXEC_PREFIX[@]}" "$@"
+fi
+
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 WL="${WAYLAND_DISPLAY:-wayland-0}"
 HOST_WL=/run/host-wayland/wayland-0   # under gamescope, the desktop's socket in here
