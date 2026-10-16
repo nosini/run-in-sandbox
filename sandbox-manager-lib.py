@@ -679,6 +679,9 @@ PY
                 "SANDBOX_BACKEND": str(self.backend),
                 "SANDBOX_GAME_NAME": entry["name"]}
         flags = self.flags(entry)
+        # Proton's steam.exe waits only for a command ending in .exe; anything
+        # else it hands to ShellExecute and returns at once, and Proton, then
+        # the sandbox, exits with the program barely started.
         if installer is not None:
             installer = Path(installer).resolve(strict=True)
             if not installer.is_file() or installer.suffix.lower() not in (".exe", ".msi"):
@@ -686,11 +689,13 @@ PY
             # Installer media stay read-only; all installed files go into this sandbox.
             flags += self.installer_binds(installer)
             target = "/installer/" + installer.name
-            command = ["msiexec", "/i", target] if installer.suffix.lower() == ".msi" else [target]
+            command = ["msiexec.exe", "/i", target] if installer.suffix.lower() == ".msi" else [target]
         elif tool:
             if tool not in ("winecfg", "regedit", "cmd"):
                 raise ValueError("Unknown Wine tool")
-            command = [tool]
+            # cmd would inherit steam.exe's console, which is the launch log
+            # with nothing to read; wineconsole gives it a window and waits.
+            command = ["wineconsole.exe", "cmd.exe"] if tool == "cmd" else [tool + ".exe"]
         else:
             target = program or entry.get("program", "")
             if not target:

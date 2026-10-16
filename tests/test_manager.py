@@ -52,8 +52,17 @@ class LibraryTests(unittest.TestCase):
         installer = self.home / "a; touch bad.msi"
         installer.touch()
         command, _ = self.library.command(entry, installer=installer)
-        self.assertEqual(command[-3:], ["msiexec", "/i", "/installer/a; touch bad.msi"])
+        self.assertEqual(command[-3:], ["msiexec.exe", "/i", "/installer/a; touch bad.msi"])
         self.assertFalse((self.home / "bad").exists())
+
+    def test_wine_tools_are_named_so_proton_waits_for_them(self):
+        # Proton's steam.exe waits only for a command ending in .exe; without
+        # it the sandbox closed under winecfg as soon as it was started.
+        entry = self.library.create("Tools game")
+        for tool, expected in (("winecfg", ["winecfg.exe"]), ("regedit", ["regedit.exe"]),
+                               ("cmd", ["wineconsole.exe", "cmd.exe"])):
+            command, _ = self.library.command(entry, tool=tool)
+            self.assertEqual(command[command.index("--") + 2:], expected)
 
     def test_existing_captures_are_discovered_without_fabricating_a_launcher(self):
         capture = self.library.root / "old-game"
