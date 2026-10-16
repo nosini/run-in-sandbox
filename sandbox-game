@@ -1977,7 +1977,12 @@ if [ "$GS" = 1 ]; then
         # for its X11 children unless --expose-wayland was requested.
         # Connecting to that one socket, nothing else in gamescope's folder.
         INNER_DISPLAY_RULES=( --unix-connect "$HOST_WL" )
-        INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
+        # Gamescope enables its Vulkan WSI layer in everything it starts. With
+        # the desktop's socket as WAYLAND_DISPLAY the layer rightly decides it
+        # is not under gamescope and hooks nothing -- but then asks, in a
+        # dialog, whether to "power through" every swapchain it did not hook:
+        # the game's and an X11 launcher's alike. It can do nothing else here.
+        INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" DISABLE_GAMESCOPE_WSI=1 )
     fi
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach -- "${GS_CMD[@]}" -- \
         /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" --unix-connect-where-writable \

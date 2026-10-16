@@ -1656,6 +1656,10 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertFalse([r for k, r in enumerate(rules[1:]) if rules[k] == "--rw"
                           and r.startswith("/run/host-wayland")])
         self.assertIn("WAYLAND_DISPLAY=/run/host-wayland/wayland-0", args[inner:])
+        # Gamescope's WSI layer hooks nothing beside the desktop's socket, and
+        # would only ask about every swapchain: it stays out of the game.
+        self.assertIn("DISABLE_GAMESCOPE_WSI=1", args[inner:])
+        self.assertNotIn("DISABLE_GAMESCOPE_WSI=1", self.recorded_args("--gamescope", "--proton=" + str(proton)))
         # Split display is its own: an added --wayland asks nothing of gamescope.
         both = self.recorded_args("--wayland", "--wayland-x11", "--proton=" + str(proton))
         self.assertNotIn("--expose-wayland", both)
