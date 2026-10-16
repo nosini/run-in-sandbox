@@ -178,10 +178,10 @@ def tick():
             location.set_text(str(root))
             # Saving also adds a path that has been typed but not yet added.
             button(dialog, "Save and search").emit("clicked")
-            assert manager.library.game_folders() == [root]
         elif stage == 4:
             if len(manager.entries) != 3:
                 return True
+            assert manager.library.game_folders() == [Path.home() / "External Games"]
             moved = next(e for e in manager.entries if e["name"] == "moved-game")
             assert moved["directory"] == str(Path.home() / "External Games/Native/Moved Game")
             assert moved["title"] == "Moved Game"
@@ -203,6 +203,10 @@ def tick():
             assert entry["title"] == "Duplicate Game"
             saved = json.loads((manager.library.capture(entry["name"]) / "manager.json").read_text())
             assert saved["directory"] == chosen
+            # Saved as shown: the name is not pinned, and may follow the folder.
+            button(manager.overview, "Save game details").emit("clicked")
+            saved = json.loads((manager.library.capture(entry["name"]) / "manager.json").read_text())
+            assert "title_custom" not in saved
             display_name = next(w for w in children(manager.overview) if isinstance(w, Gtk.Entry) and
                                 w.get_placeholder_text() == "Display name")
             display_name.set_text(entry["name"])
@@ -211,6 +215,21 @@ def tick():
             assert saved["title_custom"] is True
             assert saved["title"] == entry["name"]
             assert next(e for e in manager.library.entries() if e["name"] == entry["name"])["title"] == entry["name"]
+            # One match is offered, never taken unasked.
+            single = Path.home() / "External Games/Native/Single Game"
+            single.mkdir()
+            (single / "play.sh").write_text("#!/bin/sh\n")
+            manager.library.capture("single-game").mkdir()
+            manager.locate(manager.library.entry("single-game"))
+        elif stage == 7:
+            dialogs = [w for w in Gtk.Window.get_toplevels()
+                       if w.get_title() == "Matching game folders" and w.get_visible()]
+            if not dialogs:
+                return True
+            single = str(Path.home() / "External Games/Native/Single Game")
+            assert button(dialogs[0], single)
+            button(dialogs[0], "Cancel").emit("clicked")
+            assert manager.library.entry("single-game")["directory"] == ""
             manager.game_folders()
             dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Game folders")
             button(dialog, "Remove").emit("clicked")
@@ -220,8 +239,9 @@ def tick():
             dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Game folders")
             button(dialog, "Remove").emit("clicked")
             button(dialog, "Save and search").emit("clicked")
-            assert not manager.library.game_folders()
-        elif stage == 7:
+        elif stage == 8:
+            if manager.library.game_folders():
+                return True
             manager.window.close()
             print("GUI lifecycle passed", flush=True)
             return False

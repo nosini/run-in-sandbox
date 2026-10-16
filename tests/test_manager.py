@@ -268,10 +268,104 @@ class LibraryTests(unittest.TestCase):
         manual = self.native_game(self.home / "manual/Game")
         def search(entries):
             self.library.reconnect(entry, manual)
-            return {entry["name"]: [str(automatic)]}
-        with patch.object(self.library, "find_game_folders", side_effect=search):
+            return {entry["name"]: {str(automatic): str(automatic)}}
+        with patch.object(self.library, "search_game_folders", side_effect=search):
             updated, = self.library.refresh()
         self.assertEqual(updated["directory"], str(manual))
+
+    def test_game_on_an_unplugged_drive_keeps_its_location(self):
+        drive = self.home / "drive"
+        entry = self.library.add_existing(self.native_game(drive / "Games/Foo"))
+        copy = self.native_game(self.home / "Games/Foo")
+        self.library.save_game_folders([self.home / "Games", drive / "Games"])
+        # Recorded on a drive that is now gone: its mount point is not mounted.
+        self.library.update_entry(entry["name"], volume=str(drive))
+        shutil.rmtree(drive)
+        self.assertEqual(self.library.folder_state(self.library.entry(entry["name"])), "unavailable")
+        updated, = self.library.refresh()
+        self.assertEqual(updated["directory"], str(drive / "Games/Foo"))
+        # On a volume still mounted, the game itself is gone: search for it.
+        self.library.update_entry(entry["name"], volume="/")
+        updated, = self.library.refresh()
+        self.assertEqual(updated["directory"], str(copy))
+
+    def test_unplugged_drive_without_recorded_volume_is_not_missing(self):
+        self.library.capture("foo").mkdir(parents=True)
+        self.library.update_entry("foo", selection=str(self.home / "drive/Games/Foo"),
+                                  directory=str(self.home / "drive/Games/Foo"))
+        self.native_game(self.home / "Games/Foo")
+        self.library.save_game_folders([self.home / "Games"])
+        with patch.object(core, "fstab_mount_points", return_value=[self.home / "drive"]):
+            self.assertEqual(self.library.refresh()[0]["directory"], str(self.home / "drive/Games/Foo"))
+        with patch.object(core, "fstab_mount_points", return_value=[]), \
+                patch.object(core, "REMOVABLE_ROOTS", (self.home / "drive",)):
+            self.assertEqual(self.library.refresh()[0]["directory"], str(self.home / "drive/Games/Foo"))
+        with patch.object(core, "fstab_mount_points", return_value=[]):
+            self.assertEqual(self.library.refresh()[0]["directory"], str(self.home / "Games/Foo"))
+
+    def test_a_folder_several_sandboxes_match_is_left_to_locate(self):
+        for name in ("foo", "foo-2"):
+            self.library.capture(name).mkdir(parents=True)
+            self.library.update_entry(name, selection=str(self.home / name / "Foo"),
+                                      directory=str(self.home / name / "Foo"), volume="/")
+        self.native_game(self.home / "Games/Foo")
+        self.library.save_game_folders([self.home / "Games"])
+        self.assertEqual(sorted(e["directory"] for e in self.library.refresh()),
+                         sorted([str(self.home / "foo/Foo"), str(self.home / "foo-2/Foo")]))
+
+    def test_a_folder_another_sandbox_uses_is_not_taken(self):
+        game = self.native_game(self.home / "Games/Foo")
+        present = self.library.add_existing(game)
+        self.library.capture("other").mkdir(parents=True)
+        self.library.update_entry("other", selection=str(self.home / "old/Foo"),
+                                  directory=str(self.home / "old/Foo"), volume="/")
+        self.library.save_game_folders([self.home / "Games"])
+        entries = {e["name"]: e for e in self.library.refresh()}
+        self.assertEqual(entries["other"]["directory"], str(self.home / "old/Foo"))
+        self.assertEqual(entries[present["name"]]["directory"], str(game))
+
+    def test_name_map_and_sandbox_game_naming_match_legacy_sandboxes(self):
+        helpers = self.home / "helpers"
+        helpers.mkdir()
+        (helpers / "sandbox-game-lib").write_text((ROOT / "sandbox-game-lib").read_text().replace(
+            '    # ["NIKKE"]="nikke"', '    ["Doki Doki"]="mygame"'))
+        library = core.Library(ROOT / "sandbox-game", helpers, ROOT / "Sandbox game",
+                               home=self.home, config=self.home / "config")
+        library.capture("mygame").mkdir(parents=True)
+        game = self.native_game(self.home / "Games/Doki Doki")
+        library.save_game_folders([self.home / "Games"])
+        entry, = library.refresh()
+        self.assertEqual(entry["directory"], str(game))
+
+    def test_refresh_shows_a_concurrently_located_game_with_its_display_title(self):
+        self.library.capture("game").mkdir(parents=True)
+        entry, = self.library.entries()
+        automatic = self.native_game(self.home / "automatic/Game")
+        manual = self.native_game(self.home / "manual/Some Game")
+        def search(entries):
+            self.library.reconnect(entry, manual)
+            # As before the reconnect stored the folder's name.
+            self.library.update_entry(entry["name"], title=entry["name"])
+            return {entry["name"]: {str(automatic): str(automatic)}}
+        with patch.object(self.library, "search_game_folders", side_effect=search):
+            updated, = self.library.refresh()
+        self.assertEqual(updated["title"], "Some Game")
+
+    def test_update_entry_changes_only_the_given_fields(self):
+        self.library.capture("game").mkdir(parents=True)
+        shown, = self.library.entries()
+        game = self.native_game(self.home / "games/Game")
+        self.library.reconnect(shown, game)
+        updated = self.library.update_entry(shown["name"], arguments="--x")
+        self.assertEqual(updated["directory"], str(game))
+        self.assertEqual(updated["arguments"], "--x")
+        self.assertNotIn("title_custom", core.read_json(self.library.capture("game") / "manager.json"))
+
+    def test_search_location_paths_are_checked_without_the_disk(self):
+        self.assertEqual(self.library.game_folder_path(" ~/Games "), Path.home() / "Games")
+        for text in ("", "relative", "/a\0b"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.library.game_folder_path(text)
 
     def icon_library(self):
         """A library whose icon helper never runs: subprocess.run is patched in each test."""

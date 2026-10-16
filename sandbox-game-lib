@@ -62,6 +62,34 @@ cfg_wayland_x11() {
     printf '0\n'
 }
 
+# Nicer sandbox names for directories whose basename is ugly. Key = on-disk
+# basename. Here rather than in sandbox-game, so the manager, matching game
+# folders to sandboxes, names them exactly as sandbox-game does.
+declare -gA NAME_MAP=(
+    # ["Doki Doki Literature Club"]="ddlc"
+    # ["NIKKE"]="nikke"
+)
+
+# The sandbox name for game dir $1, in R_NAME: no subshell, as the manager
+# names whole folder trees at a time (derive_names).
+# shellcheck disable=SC2034  # an output, read by whoever sourced this
+derive_name() {
+    local base="${1%/}"
+    base="${base##*/}"
+    if [ -n "$base" ] && [ -n "${NAME_MAP[$base]:-}" ]; then R_NAME="${NAME_MAP[$base]}"; return; fi
+    base="${base,,}"
+    base="${base//[^a-z0-9._-]/-}"
+    while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
+    base="${base#-}"; base="${base%-}"
+    R_NAME="${base:-game}"
+}
+
+# derive_name for each NUL-terminated folder on stdin, NUL-terminated, in order.
+derive_names() {
+    local dir
+    while IFS= read -r -d '' dir; do derive_name "$dir"; printf '%s\0' "$R_NAME"; done
+}
+
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
 # Native exports can be standalone ELF programs (for example .x86_64 or

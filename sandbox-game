@@ -139,22 +139,6 @@ SHARED_LIB="$(helper sandbox-game-lib)"
 # shellcheck source=sandbox-game-lib
 . "$SHARED_LIB"
 
-# Nicer names for directories whose basename is ugly. Key = on-disk basename.
-declare -A NAME_MAP=(
-    # ["Doki Doki Literature Club"]="ddlc"
-    # ["NIKKE"]="nikke"
-)
-
-derive_name() {
-    local base; base="$(basename "$1")"
-    if [ -n "${NAME_MAP[$base]:-}" ]; then printf '%s\n' "${NAME_MAP[$base]}"; return; fi
-    base="${base,,}"
-    base="${base//[^a-z0-9._-]/-}"
-    while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
-    base="${base#-}"; base="${base%-}"
-    printf '%s\n' "${base:-game}"
-}
-
 # ---- proton discovery ------------------------------------------------------
 # Where Steam keeps compatibility tools, native install and flatpak alike. Kept
 # up here so --list-proton can answer before a game is even named; the menu that
@@ -723,7 +707,7 @@ shift
 # Native replacement players supply their own command.
 [ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ -n "$PGMMV_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }
-NAME="${NAME:-$(derive_name "$GAMEDIR")}"
+[ -n "$NAME" ] || { derive_name "$GAMEDIR"; NAME="$R_NAME"; }
 [[ "$NAME" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$NAME" != . ] && [ "$NAME" != .. ] || {
     echo "invalid sandbox name: use letters, digits, underscores, dots and hyphens (not . or ..)" >&2
     exit 1

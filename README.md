@@ -126,14 +126,17 @@ archive lost a binary's executable bit, launching restores it inside the sandbox
 Open **Game folders…** in the manager menu to set default search locations for
 external games, then choose **Save and search**. On startup and library refresh,
 the manager searches those locations and up to three folder levels below them
-for missing games. It matches the original folder name, or the sandbox name
-for older entries without a recorded location. A unique match reconnects to the
-existing sandbox, keeping custom display names, settings and saves. Entries
-still showing the sandbox name take their display name from the game folder.
-If several folders match, **Locate game** lets you choose. Symbolic links inside search
-locations are skipped; unavailable drives keep their saved locations. These
-locations reconnect games already in your library; use **Add game** to import
-another game.
+for missing games. A folder matches when `sandbox-game` would give it the same
+sandbox name as the game's original folder or, for older entries without a
+recorded location, as the sandbox itself (a sandbox named with `--name` cannot
+be matched this way). A folder that only one missing game matches, and no other
+sandbox uses, reconnects to the existing sandbox, keeping custom display names,
+settings and saves. Entries still showing the sandbox name take their display
+name from the game folder. Otherwise **Locate game** shows the matches to
+choose from, or a folder chooser. Symbolic links inside search locations are
+skipped. A game on a drive that is not connected keeps its saved location until
+the drive is back. These locations reconnect games already in your library; use
+**Add game** to import another game.
 
 To install a Windows game:
 
@@ -1172,8 +1175,8 @@ dialog writes when that is the answer.
 
 The key is the sandbox name, so preferences and captured writes stay in step.
 Two games whose folders have the same name share a sandbox; give one of them
-`--name`, or an entry in `NAME_MAP` at the top of `sandbox-game`, to separate
-them.
+`--name`, or an entry in `NAME_MAP` at the top of `sandbox-game-lib`, to
+separate them.
 
 `host_x11=1` opts into the host X server and overrides the Wayland/gamescope
 choices. `gamescope=0` means automatic: X11 games still use a private gamescope

@@ -12,10 +12,13 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 
 NAME = re.compile(r"[A-Za-z0-9._-]+")
+# Where removable drives are mounted. See Library.folder_state.
+REMOVABLE_ROOTS = (Path("/run/media"), Path("/media"), Path("/mnt"))
 
 
 def valid_name(name):
@@ -46,6 +49,28 @@ def atomic_write(path, text):
             temporary.unlink(missing_ok=True)
 
 
+def mount_point(path):
+    """The mount point holding PATH, or its nearest existing parent."""
+    path = Path(os.path.abspath(path))
+    while not os.path.ismount(path):
+        path = path.parent
+    return path
+
+
+def fstab_mount_points(fstab=Path("/etc/fstab")):
+    try:
+        lines = fstab.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    points = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 2 and not fields[0].startswith("#") and fields[1].startswith("/"):
+            # Blanks in paths are written as octal escapes: \040 for a space.
+            points.append(Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[1])))
+    return points
+
+
 def read_settings(path):
     values = {}
     try:
@@ -67,6 +92,8 @@ class Library:
         self.root = self.home / "game-sandboxes"
         self.config = Path(config) if config is not None else Path(
             os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "sandbox-game"
+        # One folder search or reconnect at a time, each over what the last saved.
+        self.lock = threading.RLock()
 
     def capture(self, name):
         if not valid_name(name):
@@ -79,22 +106,36 @@ class Library:
     def entries(self):
         if not self.root.exists():
             return []
-        entries = []
-        for capture in self.root.iterdir():
-            if not capture.is_dir() or capture.is_symlink() or not valid_name(capture.name):
-                continue
-            entry = read_json(capture / "manager.json")
-            source = read_json(capture / "source.json")
-            # Defaults also make captures created before the manager visible.
-            entry.update(name=capture.name, title=str(entry.get("title", capture.name)))
-            entry.setdefault("kind", "existing")
-            entry.setdefault("selection", source.get("directory", ""))
-            entry.setdefault("directory", source.get("directory", ""))
-            entry.setdefault("program", "")
-            entry.setdefault("arguments", "")
-            entry["title"] = self.display_title(entry)
-            entries.append(entry)
+        entries = [self.load_entry(capture) for capture in self.root.iterdir()
+                   if capture.is_dir() and not capture.is_symlink() and valid_name(capture.name)]
         return sorted(entries, key=lambda entry: entry["title"].casefold())
+
+    def entry(self, name):
+        """One entry as entries() shows it, read afresh."""
+        return self.load_entry(self.capture(name))
+
+    def load_entry(self, capture, display=True):
+        entry = read_json(capture / "manager.json")
+        source = read_json(capture / "source.json")
+        # Defaults also make captures created before the manager visible.
+        entry.update(name=capture.name, title=str(entry.get("title", capture.name)))
+        entry.setdefault("kind", "existing")
+        entry.setdefault("selection", source.get("directory", ""))
+        entry.setdefault("directory", source.get("directory", ""))
+        entry.setdefault("program", "")
+        entry.setdefault("arguments", "")
+        if display:
+            entry["title"] = self.display_title(entry)
+        return entry
+
+    def update_entry(self, name, derive_title=False, **changes):
+        """Change only these fields of the entry as saved now, keeping whatever
+        else changed since it was shown: a game reconnected meanwhile, say."""
+        entry = {**self.load_entry(self.capture(name), display=False), **changes}
+        if derive_title:
+            entry["title"] = self.display_title(entry)
+        self.save_entry(entry)
+        return self.entry(name)
 
     @staticmethod
     def display_title(entry):
@@ -107,7 +148,7 @@ class Library:
     def save_entry(self, entry):
         if entry.get("kind") not in ("windows", "existing"):
             raise ValueError("Unknown sandbox type")
-        for key in ("name", "title", "directory", "selection", "program", "arguments"):
+        for key in ("name", "title", "directory", "selection", "program", "arguments", "volume"):
             if not isinstance(entry.get(key, ""), str) or "\0" in entry.get(key, ""):
                 raise ValueError(f"Invalid {key}")
         if not entry["title"].strip():
@@ -139,41 +180,71 @@ class Library:
         return [Path(folder) for folder in folders
                 if isinstance(folder, str) and "\0" not in folder and Path(folder).is_absolute()]
 
+    @staticmethod
+    def game_folder_path(text):
+        """A search location as typed, checked without touching the disk:
+        unmounted drives are valid settings too."""
+        text = str(text).strip()
+        if not text or "\0" in text:
+            raise ValueError("Enter a folder path")
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            raise ValueError("Game folder locations must be absolute paths")
+        return path
+
     def save_game_folders(self, folders):
         paths = []
         for folder in folders:
-            text = str(folder).strip()
-            if not text or "\0" in text:
-                raise ValueError("Enter a folder path")
-            path = Path(text).expanduser()
-            if not path.is_absolute():
-                raise ValueError("Game folder locations must be absolute paths")
-            # Unmounted drives are valid settings too. Never create these folders.
-            path = str(path.resolve())
+            # Never create these folders.
+            path = str(self.game_folder_path(folder).resolve())
             if path not in paths:
                 paths.append(path)
         atomic_write(self.config / "game-folders.json", json.dumps({"folders": paths}, indent=2) + "\n")
 
-    @staticmethod
-    def folder_key(value):
-        # Same punctuation/case normalization used for sandbox folder names.
-        return re.sub(r"-+", "-", re.sub(r"[^a-z0-9._-]+", "-", value.lower())).strip("-")
+    def folder_state(self, entry):
+        """present; missing, to be searched for; or unavailable: on a drive
+        that is not mounted, which keeps its saved location until it is back."""
+        selection = entry.get("selection", "")
+        if not selection:
+            return "missing"
+        path = Path(selection)
+        try:
+            if path.exists():
+                return "present"
+            volume = entry.get("volume")
+            if volume:
+                return "missing" if os.path.ismount(volume) else "unavailable"
+            # Located before the volume was recorded: a mount point on the way
+            # that is not mounted, from fstab or for a removable drive.
+            for point in fstab_mount_points():
+                if point != Path("/") and path.is_relative_to(point) and not os.path.ismount(point):
+                    return "unavailable"
+            existing = path.parent
+            while not existing.exists():
+                existing = existing.parent
+            if any(path.is_relative_to(root) and not mount_point(existing).is_relative_to(root)
+                   for root in REMOVABLE_ROOTS):
+                return "unavailable"
+        except OSError:
+            return "unavailable"
+        return "missing"
 
-    def find_game_folders(self, entries):
-        """Match known games under configured roots; never execute game launchers."""
-        keys = {}
-        for entry in entries:
-            if entry.get("kind") != "existing" or self.installation(entry) == "sandbox":
-                continue
-            # A renamed display title must not change which files a sandbox uses.
-            directory = entry.get("directory", "")
-            key = self.folder_key(Path(directory).name if directory else entry["name"])
-            if key:
-                keys.setdefault(key, []).append(entry)
-        matches = {entry["name"]: [] for entry in entries}
-        if not keys:
-            return matches
-        visited = {}
+    def sandbox_names(self, folders):
+        """sandbox-game's own names for FOLDERS: derive_name, NAME_MAP and all."""
+        if not folders:
+            return []
+        result = subprocess.run(["bash", "-c", '. "$1/sandbox-game-lib" && derive_names', "names",
+                                 str(self.helpers)], input=b"".join(os.fsencode(f) + b"\0" for f in folders),
+                                capture_output=True, check=True, timeout=60)
+        names = [os.fsdecode(name) for name in result.stdout.split(b"\0")[:-1]]
+        if len(names) != len(folders):
+            raise ValueError("Cannot name game folders")
+        return names
+
+    def walk_game_folders(self):
+        """(folder, resolved) for the game folders and three levels below them:
+        no symbolic links, nothing inside a sandbox."""
+        visited, folders = {}, {}
         captures = self.root.resolve()
         pending = [(folder, 0) for folder in self.game_folders()]
         while pending:
@@ -185,62 +256,107 @@ class Library:
                 if visited.get(resolved, 4) <= depth or resolved.is_relative_to(captures):
                     continue
                 visited[resolved] = depth
-                for entry in keys.get(self.folder_key(folder.name), []):
-                    selection = resolved
-                    if entry.get("directory") and entry.get("selection"):
-                        try:
-                            relative = Path(entry["selection"]).relative_to(entry["directory"])
-                            selection = resolved / relative
-                        except ValueError:
-                            continue
-                    if not selection.exists() or not selection.resolve().is_relative_to(resolved):
-                        continue
-                    try:
-                        info = self.describe(selection, entry["name"])
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        continue
-                    if info.get("engine") and Path(info["directory"]).resolve() == resolved:
-                        matches[entry["name"]].append(str(selection))
+                folders.setdefault(resolved, folder)
                 if depth < 3:
                     with os.scandir(folder) as children:
                         pending.extend((Path(child.path), depth + 1) for child in children
                                        if not child.name.startswith(".") and child.is_dir(follow_symlinks=False))
             except (OSError, RuntimeError):
                 continue  # unavailable drives must not hide the rest of the library
-        return {name: sorted(set(paths)) for name, paths in matches.items()}
+        return [(folder, resolved) for resolved, folder in folders.items()]
+
+    def find_game_folders(self, entries):
+        """Match known games under configured roots; never execute game launchers."""
+        return {name: sorted(matches) for name, matches in self.search_game_folders(entries).items()}
+
+    def search_game_folders(self, entries):
+        """{name: {selection: game folder}} for each of ENTRIES."""
+        found = {entry["name"]: {} for entry in entries}
+        wanted = [entry for entry in entries
+                  if entry.get("kind") == "existing" and self.installation(entry) != "sandbox"]
+        folders = self.walk_game_folders() if wanted else []
+        if not folders:
+            return found
+        # Folders are named as sandbox-game names them. A sandbox goes by its
+        # recorded folder's name or, recorded before folders were, its own; a
+        # renamed display title must not change which files a sandbox uses.
+        recorded = [entry["directory"] for entry in wanted if entry.get("directory")]
+        names = self.sandbox_names([folder for folder, _ in folders] + recorded)
+        recorded_names = iter(names[len(folders):])
+        keys = {}
+        for entry in wanted:
+            keys.setdefault(next(recorded_names) if entry.get("directory") else entry["name"], []).append(entry)
+        for (_, resolved), name in zip(folders, names):
+            for entry in keys.get(name, []):
+                selection = resolved
+                if entry.get("directory") and entry.get("selection"):
+                    try:
+                        selection = resolved / Path(entry["selection"]).relative_to(entry["directory"])
+                    except ValueError:
+                        continue
+                try:
+                    if not selection.exists() or not selection.resolve().is_relative_to(resolved):
+                        continue
+                    info = self.describe(selection, entry["name"])
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                    continue
+                if info.get("engine") and Path(info["directory"]).resolve() == resolved:
+                    found[entry["name"]][str(selection)] = str(resolved)
+        return found
 
     def reconnect(self, entry, selection):
-        selection = Path(selection).resolve(strict=True)
-        info = self.describe(selection, entry["name"])
-        if not info.get("engine"):
-            raise ValueError("No supported game was found. Select its launcher or game folder.")
-        # A background search must keep any details edited since it started.
-        latest = read_json(self.capture(entry["name"]) / "manager.json")
-        updated = {**entry, **latest, "name": entry["name"],
-                   "selection": str(selection), "directory": info["directory"],
-                   "engine": info["engine"]}
-        updated["title"] = self.display_title(updated)
-        self.save_entry(updated)
-        return updated
+        with self.lock:
+            selection = Path(selection).resolve(strict=True)
+            info = self.describe(selection, entry["name"])
+            if not info.get("engine"):
+                raise ValueError("No supported game was found. Select its launcher or game folder.")
+            # Over the entry as saved now: a background search must keep any
+            # details edited since it started.
+            return self.update_entry(entry["name"], derive_title=True, selection=str(selection),
+                                     directory=info["directory"], engine=info["engine"],
+                                     volume=str(mount_point(info["directory"])))
 
     def refresh(self):
-        entries = self.entries()
-        missing = [entry for entry in entries if entry.get("kind") == "existing" and (
-            not entry.get("selection") or not Path(entry["selection"]).exists())]
-        candidates = self.find_game_folders(missing)
-        for index, entry in enumerate(entries):
-            paths = candidates.get(entry["name"], [])
-            if len(paths) == 1:
+        """entries(), once missing games found in the game folders are reconnected."""
+        with self.lock:
+            entries = self.entries()
+            states = {entry["name"]: self.folder_state(entry) for entry in entries
+                      if entry.get("kind") == "existing"}
+            found = self.search_game_folders([entry for entry in entries
+                                              if states.get(entry["name"]) == "missing"])
+            # A folder several sandboxes match, or another one uses, is left to
+            # Locate game: two sandboxes would otherwise share one game folder.
+            claims = {}
+            for matches in found.values():
+                for folder in set(matches.values()):
+                    claims[folder] = claims.get(folder, 0) + 1
+            for entry in entries:
+                if states.get(entry["name"]) != "missing" and entry.get("directory"):
+                    claims[str(Path(entry["directory"]).resolve())] = 2
+            for index, entry in enumerate(entries):
+                matches = found.get(entry["name"], {})
+                if len(matches) != 1:
+                    continue
+                (selection, folder), = matches.items()
+                if claims[folder] > 1:
+                    continue
                 try:
-                    latest = {**entry, **read_json(self.capture(entry["name"]) / "manager.json"),
-                              "name": entry["name"]}
+                    latest = self.entry(entry["name"])
                     if any(latest.get(key) != entry.get(key) for key in ("kind", "directory", "selection")):
-                        entries[index] = latest
+                        entries[index] = latest  # located by hand meanwhile
                         continue
-                    entries[index] = self.reconnect(entry, paths[0])
+                    entries[index] = self.reconnect(entry, selection)
                 except (OSError, ValueError, subprocess.SubprocessError):
                     pass  # a drive may disappear during scanning
-        return sorted(entries, key=lambda entry: entry["title"].casefold())
+            # Which drive each game is on, to tell it missing from unplugged later.
+            for index, entry in enumerate(entries):
+                if states.get(entry["name"]) == "present" and entry.get("directory") and not entry.get("volume"):
+                    try:
+                        entries[index] = self.update_entry(entry["name"],
+                                                           volume=str(mount_point(entry["directory"])))
+                    except (OSError, ValueError):
+                        pass
+            return sorted(entries, key=lambda entry: entry["title"].casefold())
 
     def icon_sources(self, entry):
         """Only the selected executable and nearby files; never search the host."""
@@ -449,7 +565,8 @@ PY
         prior = read_json(capture / "manager.json")
         entry = dict(prior, name=name, title=prior.get("title", Path(info["directory"]).name),
                      kind="existing", selection=str(selection), directory=info["directory"],
-                     program="", arguments="", engine=info["engine"])
+                     program="", arguments="", engine=info["engine"],
+                     volume=str(mount_point(info["directory"])))
         entry["title"] = self.display_title(entry)
         self.save_entry(entry)
         return entry
