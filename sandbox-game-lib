@@ -48,6 +48,51 @@ cfg_get() {                                    # $1 = key, $2 = fallback
 
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
+# Native exports can be standalone ELF programs (for example .x86_64 or
+# extensionless launchers), with or without their executable bit preserved.
+# Inspect only headers, never run a program to identify it. Shared libraries
+# normally have no entry point and must not become launcher choices.
+native_launchers() {
+    python3 - "$1" <<'PY'
+import os, sys
+from pathlib import Path
+
+scripts, binaries = [], []
+root = Path(sys.argv[1])
+try:
+    with os.scandir(root) as entries:
+        for entry in entries:
+            try:
+                if not entry.is_file(follow_symlinks=False) or "\n" in entry.name:
+                    continue
+                if entry.name.endswith(".sh"):
+                    scripts.append(entry.path)
+                    continue
+                if ".so" in Path(entry.name).suffixes:
+                    continue
+                fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as stream:
+                    header = stream.read(64)
+                if len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2) \
+                        or header[5] not in (1, 2) or header[6] != 1:
+                    continue
+                width = 4 if header[4] == 1 else 8
+                if width == 8 and len(header) < 64:
+                    continue
+                order = "little" if header[5] == 1 else "big"
+                kind = int.from_bytes(header[16:18], order)
+                address = int.from_bytes(header[24:24 + width], order)
+                if kind in (2, 3) and address:
+                    binaries.append(entry.path)
+            except OSError:
+                continue
+except OSError:
+    pass
+for path in sorted(scripts or binaries):
+    print(path)
+PY
+}
+
 # Map a Nautilus selection onto the game. RPG Maker MV/MZ is the awkward one:
 # the app lives in "www" but the game -- and so the sandbox, and the settings --
 # is the folder above it, and either may be what got right-clicked.
@@ -122,7 +167,7 @@ is_rgss() {
 }
 
 # What "Sandbox game" will run a selection with, in the order it goes by: an
-# NW.js app, a .sh launcher, a PGMMV or RGSS game, a Windows .exe under
+# NW.js app, a native launcher, a PGMMV or RGSS game, a Windows .exe under
 # Proton. For the preferences, which offer only what that engine can do.
 # Sets R_ENGINE to nwjs, native, pgmmv, mkxp, proton, or empty when nothing is found.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
@@ -135,7 +180,7 @@ game_engine() {                                # $1 = selection, $2 = optional l
     if [ -n "$R_APPDIR" ]; then
         R_ENGINE=nwjs
     elif [ -d "$1" ]; then
-        if [ -n "$(find "$R_GAMEDIR" -maxdepth 1 -type f -name '*.sh' -print -quit 2>/dev/null)" ]; then
+        if [ -n "$(native_launchers "$R_GAMEDIR")" ]; then
             R_ENGINE=native
         elif is_pgmmv "$R_GAMEDIR"; then
             R_ENGINE=pgmmv

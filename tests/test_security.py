@@ -2235,6 +2235,45 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         (game / "launcher" / "Utility.exe").write_text("x")
         return game
 
+    def test_standalone_linux_launcher_is_native_and_script_stays_preferred(self):
+        recorded = self.stub_launcher()
+        binary = self.game / "Game.x86_64"
+        shutil.copyfile("/bin/true", binary)
+        binary.chmod(0o755)
+        (self.game / "Game.pck").write_bytes(b"pack")
+        (self.game / "Game.exe").write_bytes(b"windows")
+        for selection in (self.game, binary):
+            self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(selection)
+            result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = recorded.read_text().splitlines()
+            self.assertEqual(args[-2:], [str(self.game), "/game/Game.x86_64"])
+            self.assertFalse(any(arg.startswith("--proton") for arg in args))
+        (self.game / "start.sh").write_text("#!/bin/sh\n")
+        args = self.launch_with(recorded, self.game, "")
+        self.assertEqual(args[-1], "/game/start.sh")
+        # A saved Proton override still selects the Windows build.
+        args = self.launch_with(recorded, self.game, "launch_with=proton\n")
+        self.assertIn("--proton", args)
+        self.assertEqual(args[-1], "/game/Game.exe")
+
+    def test_native_binary_permission_repair_only_changes_the_sandbox_overlay(self):
+        recorded = self.stub_launcher()
+        binary = self.game / "Game ; $(touch unexpected).x86_64"
+        shutil.copyfile("/bin/true", binary)
+        binary.chmod(0o644)
+        args = self.launch_with(recorded, self.game, "")
+        command = args[args.index(str(self.game)) + 1:]
+        self.assertEqual(command[:2], ["sh", "-c"])
+        result = self.cli("--headless", self.game, *command)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(binary.stat().st_mode & 0o111, 0)
+        captured = self.home / "game-sandboxes/game/rw" / binary.name
+        self.assertTrue(captured.stat().st_mode & 0o100)
+        self.assertFalse((self.game / "unexpected").exists())
+        self.assertFalse((self.home / "game-sandboxes/game/rw/unexpected").exists())
+
     def launch_with(self, recorded, game, prefs):
         """Launch GAME from Nautilus with these per-game preferences; the arguments passed on."""
         config = self.home / ".config" / "sandbox-game" / "games"

@@ -367,6 +367,45 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(env["SANDBOX_BACKEND"], str(ROOT / "sandbox-game"))
         self.assertEqual(env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"], str(game))
 
+    def test_native_binary_exports_can_be_imported_and_automatically_located(self):
+        root = self.home / "Games"
+        for filename, name in (("Game.x86_64", "godot-export"), ("Game", "native-export")):
+            game = root / name
+            game.mkdir(parents=True)
+            binary = game / filename
+            shutil.copyfile("/bin/true", binary)
+            binary.chmod(0o644)
+            (game / "Game.pck").write_bytes(b"pack")
+            for selection in (game, binary):
+                with self.subTest(selection=selection):
+                    entry = self.library.add_existing(selection)
+                    self.assertEqual(entry["engine"], "native")
+                    self.assertEqual(entry["directory"], str(game))
+            # Simulate a legacy capture with no recorded install location.
+            (self.library.capture(entry["name"]) / "manager.json").unlink()
+        self.library.save_game_folders([root])
+        for entry in self.library.refresh():
+            self.assertEqual(entry["engine"], "native")
+            self.assertTrue(Path(entry["directory"]).is_dir())
+            command, env = self.library.command(entry)
+            self.assertEqual(command, [str(ROOT / "Sandbox game")])
+            self.assertEqual(env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"], entry["directory"])
+
+    def test_shared_libraries_data_and_external_symlinks_are_not_native_launchers(self):
+        game = self.home / "Games/Not runnable"
+        game.mkdir(parents=True)
+        (game / "Game.pck").write_bytes(b"pack")
+        # A shared object's ELF header has no program entry point.
+        header = bytearray(Path("/bin/true").read_bytes()[:64])
+        header[24:32] = bytes(8)
+        (game / "library").write_bytes(header)
+        shutil.copyfile("/bin/true", game / "libgame.so")
+        (game / "outside.x86_64").symlink_to("/bin/true")
+        (game / "fake.x86_64").write_bytes(b"\x7fELF")
+        self.assertEqual(self.library.describe(game, "test")["engine"], "")
+        with self.assertRaisesRegex(ValueError, "No supported game"):
+            self.library.add_existing(game)
+
     def test_settings_keep_unknown_keys_and_defaults_separate(self):
         entry = self.library.create("game")
         name = entry["name"]

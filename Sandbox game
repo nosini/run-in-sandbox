@@ -3,7 +3,7 @@
 # preferences allow the internet, home hidden, writes captured under
 # ~/game-sandboxes/<name>/). Auto-detects:
 #   * RPG Maker / NW.js  -> right-click the game folder or its "www" folder
-#   * Ren'Py / native    -> right-click the game folder or its .sh launcher
+#   * Ren'Py / native    -> right-click the game folder, .sh or Linux binary
 #   * RPG Maker XP/VX/VX Ace -> native via mkxp-z, no Wine (folder or Game.exe)
 #   * Pixel Game Maker MV -> native Linux player (folder or player.exe)
 #   * Windows / Proton   -> right-click the game folder or the .exe itself
@@ -224,15 +224,15 @@ EOF
         exec "$d/$name" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
     ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
 else
-    # ----- native (.sh), else PGMMV/RGSS, else Windows (.exe) via Proton ------
+    # ----- native, else PGMMV/RGSS, else Windows (.exe) via Proton ------------
     # A native launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
     # in the same folder, and running the Linux build beats emulating the other.
     # Recognised PGMMV/RGSS games use their native replacement players.
     LAUNCHER=""; GAMEDIR="$R_GAMEDIR"
     if [ -d "$SEL" ]; then
-        mapfile -t shs < <(find "$GAMEDIR" -maxdepth 1 -type f -name '*.sh' | sort)
-        if [ "${#shs[@]}" -gt 0 ]; then
-            LAUNCHER="$(pick "$GAMEDIR" "${shs[@]}")"
+        mapfile -t natives < <(native_launchers "$GAMEDIR")
+        if [ "${#natives[@]}" -gt 0 ]; then
+            LAUNCHER="$(pick "$GAMEDIR" "${natives[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
         elif is_pgmmv "$GAMEDIR"; then
             PGMMV=1
@@ -241,7 +241,7 @@ else
         else
             mapfile -t exes < <(find_exes "$GAMEDIR")
             [ "${#exes[@]}" -gt 0 ] \
-                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a PGMMV or RGSS game, a .sh launcher and a .exe."
+                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a PGMMV or RGSS game, a native Linux launcher and a .exe."
             LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
             PROTON=1
@@ -260,6 +260,11 @@ else
     else
         REL="${LAUNCHER#"$GAMEDIR"/}"
         CMD=( /game/"$REL" )
+        if [ "$PROTON" = 0 ] && [[ "$LAUNCHER" != *.sh ]] && [ ! -x "$LAUNCHER" ]; then
+            # Archives sometimes lose the Linux executable bit. Change the
+            # sandbox's overlay copy, keeping the original install untouched.
+            CMD=( sh -c 'chmod u+x -- "$1" && exec "$@"' _ "/game/$REL" )
+        fi
     fi
 fi
 

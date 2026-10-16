@@ -119,6 +119,9 @@ folder or launcher; its original files stay in place, and saves and changes
 are captured in its sandbox. Games launched through the file manager or CLI
 also appear in the library. For sandboxes created before the manager recorded
 game locations, **Locate game** reconnects the original folder to its saves.
+Native Linux exports, including Godot games with a standalone `.x86_64` or
+extensionless executable, can be selected by their folder or executable. If an
+archive lost a binary's executable bit, launching restores it inside the sandbox.
 
 Open **Game folders…** in the manager menu to set default search locations for
 external games, then choose **Save and search**. On startup and library refresh,
