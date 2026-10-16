@@ -452,6 +452,46 @@ class LibraryTests(unittest.TestCase):
         self.library.update_settings(entry["name"], {"wayland": "0"})
         self.assertNotIn("--wayland-x11", self.library.flags(entry))
 
+    def pref_flags(self, entry, proton):
+        result = self.library.shared(entry["name"], f'GAMEDIR="$1" APPDIR="" PROTON={proton} MKXP=0 PGMMV=0 '
+                                     'ALLOW_MANGOHUD=1\npref_flags\nprintf "%s\\0" "${FLAG[@]}"\n',
+                                     entry["directory"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split("\0")[:-1]
+
+    def test_split_display_in_the_defaults_leaves_a_game_with_its_own_display(self):
+        entry = self.library.create("game")
+        self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1", "gamescope": "1",
+                                                     "gamescope_args": "-W 1920 -H 1080"}, defaults=True)
+        # Saved before split display existed: its own file chose plain Wayland.
+        (self.library.config / "games" / entry["name"]).write_text("wayland=1\ngamescope=0\n")
+        flags = self.pref_flags(entry, 1)
+        self.assertIn("--wayland", flags)
+        self.assertNotIn("--wayland-x11", flags)
+        self.assertFalse([f for f in flags if f.startswith("--gamescope")])
+        self.assertNotIn("wayland_x11", self.library.settings(entry["name"]))
+        # A game file saying nothing about its display takes split display.
+        (self.library.config / "games" / entry["name"]).write_text("net=1\n")
+        self.assertIn("--wayland-x11", self.pref_flags(entry, 1))
+        self.assertEqual(self.library.settings(entry["name"])["wayland_x11"], "1")
+
+    def test_split_display_is_plain_wayland_for_other_engines(self):
+        entry = self.library.create("game")
+        (self.library.config / "games" / entry["name"]).write_text(
+            "wayland=1\nwayland_x11=1\ngamescope=1\ngamescope_args=-W 1920 -H 1080\n")
+        flags = self.pref_flags(entry, 0)
+        self.assertIn("--wayland", flags)
+        self.assertNotIn("--wayland-x11", flags)
+        self.assertFalse([f for f in flags if f.startswith("--gamescope")])
+
+    def test_split_display_keeps_gamescope_arguments_without_gamescope_key(self):
+        entry = self.library.create("game")
+        (self.library.config / "games" / entry["name"]).write_text(
+            "wayland=1\nwayland_x11=1\ngamescope_args=-W 1920 -H 1080\n")
+        flags = self.pref_flags(entry, 1)
+        self.assertIn("--wayland-x11", flags)
+        self.assertIn("--gamescope=-W 1920 -H 1080", flags)
+
     def test_program_selection_refuses_traversal_external_links_and_missing_files(self):
         entry = self.library.create("game")
         game = Path(entry["directory"])

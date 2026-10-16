@@ -178,6 +178,9 @@ class Preferences:
             return ["wayland", "wayland-x11", "x11", "host-x11"]
         if self.engine == "native" and self.request.get("renpy_x11"):
             return ["x11", "host-x11"]
+        if not self.engine:
+            # Unknown, e.g. a folder that is gone: keep whatever was chosen.
+            return list(DISPLAY_CHOICES)
         return ["wayland", "wayland-gamescope", "x11", "host-x11"]
 
     @property
@@ -216,9 +219,15 @@ class Preferences:
             return None
         if self.lan_allow_controls and lan_error(self.values["lan_allow"]):
             return lan_error(self.values["lan_allow"])
-        if self.hosts_controls:
+        if self.hosts_controls and hosts_error(self.values["hosts"]):
             return hosts_error(self.values["hosts"])
+        if self.split_controls and any(c < " " or c == "\x7f" for c in self.values.get("x11_exe", "")):
+            return "The X11 executable cannot contain tabs, line breaks or other control characters."
         return None
+
+    @property
+    def split_controls(self):
+        return self.display == "wayland-x11" and self.proton_controls
 
     @property
     def uses_gamescope(self):
@@ -235,7 +244,7 @@ class Preferences:
         result = {"scope": self.scope,
                   "wayland": "1" if self.display.startswith("wayland") else "0",
                   "wayland_x11": "1" if self.display == "wayland-x11" else "0",
-                  "gamescope": "1" if self.display in ("wayland-gamescope", "wayland-x11") else "0",
+                  "gamescope": "1" if self.display == "wayland-gamescope" else "0",
                   "host_x11": "1" if self.display == "host-x11" else "0",
                   "net": self.values.get("net", "0")}
         if self.request.get("can_proton"):
@@ -243,8 +252,8 @@ class Preferences:
         if self.engine != "nwjs":
             result["mangohud"] = self.values.get("mangohud", "0")
         if self.proton_controls:
-            if self.display == "wayland-x11":
-                result["x11_exe"] = self.values.get("x11_exe", "")
+            if self.split_controls:
+                result["x11_exe"] = self.values.get("x11_exe", "").strip()
             for key, fallback in (("proton", "auto"), ("mod_loaders", "0")):
                 result[key] = self.values.get(key, fallback)
         if self.engine == "nwjs":
@@ -431,7 +440,7 @@ class Dialog:
         self.split_note = Gtk.Label(xalign=0, wrap=True,
             label="Uses the desktop's Wayland compositor for the game and gamescope's private X11 for launcher windows. "
                   "Requires a runner with per-process graphics selection. Leave the executable blank for its built-in selection. "
-                  "Gamescope's resolution and fullscreen settings apply to the X11 windows.")
+                  "Gamescope's window stays open beside the game, windowed; its resolution applies to the X11 windows.")
         self.split_note.add_css_class("dim-label")
         self.body.append(self.split_note)
         self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
@@ -526,14 +535,15 @@ class Dialog:
         self.refresh_visibility()
 
     def refresh_visibility(self):
-        self.rows["x11_exe"].set_visible(self.state.display == "wayland-x11")
-        self.split_note.set_visible(self.state.display == "wayland-x11")
+        self.rows["x11_exe"].set_visible(self.state.split_controls)
+        self.split_note.set_visible(self.state.split_controls)
         self.rows["proton"].set_visible(self.state.proton_controls)
         self.rows["mod_loaders"].set_visible(self.state.proton_controls)
         for key in ("casefold", "webgl"):
             self.rows[key].set_visible(self.state.engine == "nwjs")
-        for key in ("resolution", "fullscreen"):
-            self.rows[key].set_visible(self.state.uses_gamescope)
+        self.rows["resolution"].set_visible(self.state.uses_gamescope)
+        # Split display keeps gamescope windowed (see sandbox-game).
+        self.rows["fullscreen"].set_visible(self.state.uses_gamescope and self.state.display != "wayland-x11")
         self.rows["dotnet"].set_visible(self.state.dotnet_controls)
         self.rows["with_proton"].set_visible(self.state.with_proton_controls)
         self.rows["lan"].set_visible(self.state.lan_controls)

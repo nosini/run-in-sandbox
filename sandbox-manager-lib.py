@@ -455,8 +455,12 @@ PY
         return entry
 
     def settings(self, name):
-        return {**read_settings(self.config / "defaults"),
-                **read_settings(self.config / "games" / name)}
+        defaults = read_settings(self.config / "defaults")
+        own = read_settings(self.config / "games" / name)
+        # As cfg_wayland_x11: split display goes with the file that chose the display.
+        if own.keys() & {"wayland", "gamescope", "host_x11"}:
+            defaults.pop("wayland_x11", None)
+        return {**defaults, **own}
 
     def scope_settings(self, name, defaults=False):
         """One file's own values, for editors that write back to that file."""

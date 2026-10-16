@@ -46,6 +46,22 @@ cfg_get() {                                    # $1 = key, $2 = fallback
     printf '%s\n' "$2"
 }
 
+# wayland_x11 (split display) refines the display that wayland, gamescope and
+# host_x11 choose, so it comes from the first file that sets any of them: a
+# game whose own file chose plain Wayland, saved before split display existed,
+# must not take it from the defaults.
+cfg_wayland_x11() {
+    local f k
+    for f in "$CFGDIR/games/$NAME" "$CFGDIR/defaults"; do
+        for k in wayland_x11 wayland gamescope host_x11; do
+            file_get "$f" "$k" >/dev/null || continue
+            file_get "$f" wayland_x11 || printf '0\n'
+            return
+        done
+    done
+    printf '0\n'
+}
+
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
 # Native exports can be standalone ELF programs (for example .x86_64 or
@@ -224,14 +240,17 @@ renpy_without_wayland() {                      # $1 = game dir
 # WL=1 when native Wayland was chosen; DOTNET_APP=1 for a .NET program.
 # shellcheck disable=SC2034  # outputs, read by whoever sourced this
 pref_flags() {
-    local host_x11 x11_exe lan_allow e wp ga pv
+    local host_x11 split=0 gs=0 x11_exe lan_allow e wp ga pv
     local -a host_entries cfg_env
     FLAG=( --name "$NAME" )
     host_x11="$(cfg_get host_x11 0)"
     [ "$host_x11" = 1 ] && FLAG+=( --host-x11 )
     WL=0
     [ "$host_x11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
-    if [ "$WL" = 1 ] && [ "$PROTON" = 1 ] && [ "$(cfg_get wayland_x11 0)" = 1 ]; then
+    [ "$WL" = 1 ] && [ "$(cfg_wayland_x11)" = 1 ] && split=1
+    # Split display is Proton's. Any other engine takes it as what it is for
+    # the game itself, plain native Wayland, as the preferences window shows.
+    if [ "$split" = 1 ] && [ "$PROTON" = 1 ]; then
         FLAG+=( --wayland-x11 )
         x11_exe="$(cfg_get x11_exe '')"
         [ -z "$x11_exe" ] || FLAG+=( "--x11-exe=$x11_exe" )
@@ -269,8 +288,14 @@ pref_flags() {
         if [ "$wp" = auto ]; then FLAG+=( --with-proton ); elif [ -n "$wp" ]; then FLAG+=( "--with-proton=$wp" ); fi
     fi
     # The X11 choice is stored as gamescope=0, wayland=0: X11 always runs in
-    # gamescope, so its resolution and fullscreen apply there too.
-    if [ "$host_x11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] || [ "$WL" = 0 ]; }; then
+    # gamescope, so its resolution and fullscreen apply there too. Split
+    # display runs gamescope whatever gamescope says.
+    if [ "$host_x11" != 1 ]; then
+        if [ "$WL" = 0 ]; then gs=1
+        elif [ "$split" = 1 ]; then gs="$PROTON"
+        else gs="$(cfg_get gamescope 0)"; fi
+    fi
+    if [ "$gs" = 1 ]; then
         # Empty means gamescope's own defaults.
         ga="$(cfg_get gamescope_args "")"
         if [ -n "$ga" ]; then FLAG+=( "--gamescope=$ga" ); else FLAG+=( --gamescope ); fi

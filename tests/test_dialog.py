@@ -20,7 +20,8 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.display, "wayland-x11")
         self.assertTrue(state.uses_gamescope)
         saved = state.result()
-        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "1"))
+        # gamescope is implied: saved as 0, so no other engine reads gamescope into it.
+        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "0"))
         self.assertEqual(saved["x11_exe"], "Launcher.exe")
         state.display = "wayland"
         self.assertEqual(state.result()["wayland_x11"], "0")
@@ -29,6 +30,27 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(native.display, "wayland")
         x11 = Preferences({"engine": "proton", "values": {**saved, "wayland": "0"}})
         self.assertEqual(x11.display, "x11")
+
+    def test_unknown_engine_keeps_split_display(self):
+        # The manager sends no engine for a game whose folder is gone.
+        state = Preferences({"engine": "", "values": {
+            "wayland": "1", "wayland_x11": "1", "gamescope": "1", "x11_exe": "Launcher.exe"}})
+        self.assertEqual(state.display, "wayland-x11")
+        self.assertEqual(state.result()["wayland_x11"], "1")
+        self.assertEqual(state.result()["x11_exe"], "Launcher.exe")
+        self.assertIn("wayland-gamescope", state.displays)
+
+    def test_split_executable_with_control_characters_is_refused(self):
+        state = Preferences({"engine": "proton", "values": {
+            "wayland": "1", "wayland_x11": "1", "x11_exe": "Launcher.exe\t"}})
+        self.assertIn("X11 executable", state.error())
+        state.values["x11_exe"] = " Vendor Launcher.exe "
+        self.assertIsNone(state.error())
+        self.assertEqual(state.result()["x11_exe"], "Vendor Launcher.exe")
+        # Not shown, not checked.
+        state.values["x11_exe"] = "Launcher.exe\t"
+        state.display = "wayland"
+        self.assertIsNone(state.error())
 
     def test_switching_runtime_preserves_edits_and_omits_hidden_settings(self):
         state = Preferences({"engine": "nwjs", "can_proton": True, "values": {
@@ -226,6 +248,13 @@ class GtkDialogTests(unittest.TestCase):
         dialog.widgets["display"].set_selected(index)
         self.assertTrue(dialog.rows["x11_exe"].get_visible())
         self.assertTrue(dialog.split_note.get_visible())
+        # gamescope stays windowed in split display; its resolution still applies.
+        self.assertTrue(dialog.rows["resolution"].get_visible())
+        self.assertFalse(dialog.rows["fullscreen"].get_visible())
+        dialog.widgets["x11_exe"].set_text("Launcher.exe\t")
+        dialog.save_preferences()
+        self.assertEqual(self.responses, [])
+        self.assertIn("X11 executable", dialog.error_note.get_label())
         dialog.widgets["x11_exe"].set_text("Launcher.exe")
         dialog.save_preferences()
         saved = self.responses[0][1]

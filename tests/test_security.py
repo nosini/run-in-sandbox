@@ -1601,8 +1601,36 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertNotIn(":123", args)  # recorded_args deliberately supplies a host DISPLAY
         inner = args.index("--unix-connect-where-writable")
-        self.assertIn("/run/host-wayland", args[inner - 4:inner])
+        rules = args[args.index("/run/sandbox-landlock", args.index("gamescope")):inner]
+        self.assertEqual(rules[rules.index("--unix-connect") + 1], "/run/host-wayland/wayland-0")
+        self.assertFalse([r for k, r in enumerate(rules[1:]) if rules[k] == "--rw"
+                          and r.startswith("/run/host-wayland")])
         self.assertIn("WAYLAND_DISPLAY=/run/host-wayland/wayland-0", args[inner:])
+        # Split display is its own: an added --wayland asks nothing of gamescope.
+        both = self.recorded_args("--wayland", "--wayland-x11", "--proton=" + str(proton))
+        self.assertNotIn("--expose-wayland", both)
+        self.assertNotIn("STEAM_COMPAT_CONFIG", both)
+        self.assertIn("WINE_GRAPHICS_DRIVER", both)
+
+    def test_split_display_keeps_gamescope_windowed(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--wayland-x11", "--proton=" + str(proton),
+                                  "--gamescope=-f -W 1920 -H 1080 --fullscreen")
+        gs = args.index("gamescope")
+        self.assertEqual(args[gs + 1:args.index("--", gs)], ["-W", "1920", "-H", "1080"])
+        # Not split: fullscreen as asked.
+        args = self.recorded_args("--proton=" + str(proton), "--gamescope=-f -W 1920 -H 1080")
+        self.assertIn("-f", args[args.index("gamescope"):])
+
+    def test_split_executable_option_needs_a_value(self):
+        for options in (["--x11-exe", "--net"], ["--x11-exe", ""]):
+            with self.subTest(options=options):
+                result = self.cli("--proton", "--wayland-x11", *options, self.game, "play.exe", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--x11-exe needs an executable name", result.stderr)
 
     def test_split_display_connects_to_both_sockets_after_gamescope_clears_wayland(self):
         import socket
@@ -2482,7 +2510,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.env["TEST_VALUES"] = json.dumps({"x11_exe": "Vendor Launcher.exe"})
         _, saved = self.preferences(["Native Wayland + private X11 (split)", "Off", "auto", "Off", "Off",
                                      "This game only"])
-        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "1"))
+        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "0"))
         self.assertEqual(saved["x11_exe"], "Vendor Launcher.exe")
         recorded = self.stub_launcher()
         args = self.launch_with(recorded, self.game, "".join(f"{key}={value}\n" for key, value in saved.items()))
@@ -2728,6 +2756,14 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                                capture_output=True, text=True, timeout=15).stdout.split()
         self.assertEqual(outer, ["connected", "connected"])
         self.assertEqual(inner, ["Permission_denied", "connected"])
+        # --unix-connect: that one socket, and nothing else where it is.
+        probe.write_text(probe.read_text() + "try: open(sys.argv[1] + '-new', 'w'); print('created')\n"
+                         "except OSError as e: print(e.strerror.replace(' ', '_'))\n")
+        granted = subprocess.run([landlock, *rules, "--", landlock, *rules, "--unix-connect", servers[0],
+                                  "--unix-connect-where-writable", "--no-abstract-scope", "--",
+                                  sys.executable, str(probe), *servers],
+                                 capture_output=True, text=True, timeout=15).stdout.split()
+        self.assertEqual(granted, ["connected", "connected", "Permission_denied"])
 
     def test_inner_landlock_domain_keeps_out_of_its_parent(self):
         # The layer below gamescope: from inside it, gamescope's descriptors

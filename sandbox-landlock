@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""sandbox-landlock [--rw PATH | --ro PATH | --ls PATH]...
+"""sandbox-landlock [--rw PATH | --ro PATH | --ls PATH | --unix-connect PATH]...
                  [--unix-connect-where-writable] [--no-abstract-scope]
                  [--attach DIR] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
@@ -24,7 +24,7 @@ reopen as far as the descriptors already go (see main).
 --rw   read, write, create, remove, execute, ioctl on devices
 --ro   read and execute
 --ls   list directories only
---unix-connect-where-writable, --no-abstract-scope   see below
+--unix-connect-where-writable, --no-abstract-scope, --unix-connect   see below
 
 Landlock also scopes signals and abstract unix sockets to the game's own
 processes, where the kernel supports that (ABI 6).
@@ -36,7 +36,9 @@ use gamescope's connections to the desktop. With
 --unix-connect-where-writable it may also connect to a Unix socket by path
 only under a --rw rule: the desktop's Wayland socket, mounted read-only for
 gamescope, is then out of its reach. (A kernel without that right gets a
-warning.) That layer does not scope abstract sockets, --no-abstract-scope:
+warning.) --unix-connect PATH grants connecting to the sockets at or under
+PATH and nothing else there: how split display (sandbox-game --wayland-x11)
+hands the game that one socket back. That layer does not scope abstract sockets, --no-abstract-scope:
 gamescope's Xwayland listens on one, and X11 clients do not fall back to its
 socket file when refused.
 
@@ -101,7 +103,7 @@ ABI_FS[2] = ABI_FS[1] | REFER
 ABI_FS[3] = ABI_FS[2] | TRUNCATE
 ABI_FS[4] = ABI_FS[3]
 ABI_FS[5] = ABI_FS[4] | IOCTL_DEV
-FILE_ONLY = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV
+FILE_ONLY = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV | RESOLVE_UNIX
 RO = EXECUTE | READ_FILE | READ_DIR
 
 
@@ -336,7 +338,7 @@ def main():
             abstract = abstract and args[0] != "--no-abstract-scope"
             args = args[1:]
             continue
-        if len(args) < 2 or args[0] not in ("--rw", "--ro", "--ls"):
+        if len(args) < 2 or args[0] not in ("--rw", "--ro", "--ls", "--unix-connect"):
             sys.exit(__doc__.split("\n\n")[0])
         rules.append((args[0], args[1]))
         args = args[2:]
@@ -360,7 +362,8 @@ def main():
         print("sandbox-landlock: warning: this kernel's Landlock cannot restrict connecting to"
               " sockets; under gamescope the game can reach the desktop's compositor",
               file=sys.stderr)
-    access = {"--rw": handled, "--ro": RO & handled, "--ls": READ_DIR}
+    access = {"--rw": handled, "--ro": RO & handled, "--ls": READ_DIR,
+              "--unix-connect": RESOLVE_UNIX & handled}
     attr = RulesetAttr(handled_access_fs=handled)
     size = 8
     if abi >= 6:
@@ -379,6 +382,9 @@ def main():
         allowed = access[kind]
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             allowed &= FILE_ONLY
+        if not allowed:                 # --unix-connect where connecting is not handled
+            os.close(fd)
+            continue
         rule = PathBeneathAttr(allowed_access=allowed, parent_fd=fd)
         if libc.syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset),
                         ctypes.c_int(RULE_PATH_BENEATH), ctypes.byref(rule),

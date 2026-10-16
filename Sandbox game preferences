@@ -40,7 +40,7 @@ OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
 # hand, and all controls keep their values while switching between runtimes.
 REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" "$DOTNET_APP" \
     launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
-    wayland_x11 "$(cfg_get wayland_x11 0)" x11_exe "$(cfg_get x11_exe '')" \
+    wayland_x11 "$(cfg_wayland_x11)" x11_exe "$(cfg_get x11_exe '')" \
     host_x11 "$(cfg_get host_x11 0)" gamescope "$(cfg_get gamescope 0)" \
     mangohud "$(cfg_get mangohud 0)" net "$(cfg_get net 0)" \
     proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" \

@@ -334,9 +334,13 @@ adds an executable basename or Windows path fragment through
 sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Example /game/Launcher.exe
 ```
 
-Gamescope's resolution and fullscreen controls apply to the X11 windows.
-The native Wayland game uses its own window and display settings. MangoHud
-runs with the game in this mode, so it measures the game rather than the launcher.
+Gamescope starts with the game and its window stays open beside the game's
+for the whole session, even if no X11 window ever appears. It stays a window:
+fullscreen, it would cover the game, so the fullscreen setting is ignored in
+this mode. Gamescope's resolution applies to the X11 windows; the native
+Wayland game uses its own window and display settings. MangoHud wraps the
+whole Proton command in this mode, so X11 launcher windows can show the
+overlay too.
 
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
 
@@ -815,8 +819,8 @@ exposes no host X socket or cookie, including for Proton: builds lacking
 winewayland must use gamescope instead.
 `--wayland-x11` explicitly combines direct desktop Wayland access with
 gamescope's private X11. Its inner Landlock domain permits connecting to the
-desktop's Wayland socket, while still preventing access to gamescope's processes
-and descriptors. The host X server remains unavailable.
+desktop's Wayland socket, and nothing else in the folder that holds it, while
+still preventing access to gamescope's processes and descriptors. The host X server remains unavailable.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided. Without it,
 GTK cannot read the desktop's settings, so one is passed in: GNOME's title-bar
@@ -1178,9 +1182,14 @@ else in `gamescope_args`, and all of `env`, is set by hand and carried through
 saves untouched. `env` values cannot contain spaces — the list is split on
 them.
 
-`wayland_x11=1` with `wayland=1` selects split display for Windows games.
-`x11_exe` is optional and only applies to that mode. An empty value uses the
-runner's own built-in selection; names and path fragments may contain spaces.
+`wayland_x11=1` with `wayland=1` selects split display for Windows games;
+`gamescope` does not matter then, and `gamescope_args` always applies. Other
+engines run such a setting as plain native Wayland. `wayland_x11` is read from
+the same file as the rest of the display choice: a game's own file that sets
+`wayland`, `gamescope` or `host_x11` without it does not get split display
+from the defaults. `x11_exe` is optional and only applies to that mode. An
+empty value uses the runner's own built-in selection; names and path
+fragments may contain spaces.
 
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
