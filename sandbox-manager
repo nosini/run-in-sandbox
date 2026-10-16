@@ -1,0 +1,794 @@
+#!/usr/bin/env python3
+"""Manage sandboxed games from a GTK desktop library."""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+def load_module(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+HELPERS = HERE if (HERE / "sandbox-manager-lib.py").exists() else Path.home() / ".local/lib/sandbox-game"
+core = load_module("sandbox_manager_core", HELPERS / "sandbox-manager-lib.py")
+dialogs = load_module("sandbox_manager_dialogs", HELPERS / "sandbox-game-dialog")
+
+
+def main():
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gio, GLib, Gtk
+    except (ImportError, ValueError) as error:
+        print(f"Sandbox Manager needs GTK 4, libadwaita and Python PyGObject: {error}", file=sys.stderr)
+        return 2
+    if not hasattr(Adw, "AlertDialog"):
+        print("Sandbox Manager needs libadwaita 1.5 or newer", file=sys.stderr)
+        return 2
+    if "--check" in sys.argv:
+        return 0
+
+    class PreferencePane(dialogs.Dialog):
+        """The existing preference editor, embedded instead of opening a window."""
+        def __init__(self, manager, request):
+            self.Gtk = Gtk
+            self.appearance = manager.appearance
+            self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+            self.rows, self.widgets, self.choices = {}, {}, {}
+            self.build_preferences(request)
+            self.manager = manager
+            self.name = manager.selected["name"]
+            self.env = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                    top_margin=8, left_margin=8, right_margin=8, bottom_margin=8,
+                                    accepts_tab=False)
+            self.env.set_size_request(-1, 110)
+            # Each file's own list, never the merged view: saving that would copy
+            # the defaults into this game, or this game's list into the defaults.
+            self.env_text = {scope: "\n".join(value.split()) for scope, value in request["env"].items()}
+            self.env_scope = "game"
+            self.env.get_buffer().set_text(self.env_text["game"])
+            self.body.append(Gtk.Label(label="Environment variables for the selected scope (one NAME=value "
+                                       "per line). A game's own list replaces the defaults' list.",
+                                       xalign=0, wrap=True))
+            frame = Gtk.Frame()
+            frame.set_child(self.env)
+            self.body.append(frame)
+            save = Gtk.Button(label="Save settings", halign=Gtk.Align.END)
+            save.add_css_class("suggested-action")
+            save.connect("clicked", self.save)
+            self.body.append(save)
+
+        def scope_changed(self, *_):
+            super().scope_changed()
+            if not hasattr(self, "env"):
+                return
+            buffer = self.env.get_buffer()
+            if self.env_scope != "clear":
+                self.env_text[self.env_scope] = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+            self.env_scope = self.state.scope
+            if self.env_scope != "clear":
+                buffer.set_text(self.env_text[self.env_scope])
+            self.env.set_sensitive(self.env_scope != "clear")
+
+        def save(self, *_):
+            try:
+                error = self.state.error()
+                if error:
+                    raise ValueError(error)
+                result = self.state.result()
+                if result["scope"] != "clear":
+                    buffer = self.env.get_buffer()
+                    lines = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False).splitlines()
+                    for line in lines:
+                        if line and (not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=\S*", line)):
+                            raise ValueError("Use NAME=value on each line, without spaces in values.")
+                    result["env"] = " ".join(line for line in lines if line)
+                self.manager.library.save_preferences(self.name, result)
+                self.appearance.save(self.selected("appearance"))
+                self.error_note.set_visible(False)
+                self.manager.toast("Settings saved")
+            except (OSError, ValueError) as error:
+                self.error_note.set_label(str(error))
+                self.error_note.set_visible(True)
+
+    class Manager:
+        def __init__(self, app):
+            self.app = app
+            backend = HERE / "sandbox-game"
+            if not backend.exists():
+                backend = Path.home() / ".local/bin/sandbox-game"
+            launcher = HERE / "Sandbox game"
+            if not launcher.exists():
+                launcher = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") \
+                    / "nautilus/scripts/Sandbox game"
+            self.library = core.Library(backend, HELPERS, launcher)
+            self.appearance = dialogs.Appearance(Adw)
+            self.entries, self.rows, self.running, self.processes = [], {}, set(), {}
+            # Scans cost a process or a walk of the whole prefix: keep their answers
+            # until the library is refreshed, or an installer may have changed them.
+            self.proton_list, self.descriptions, self.program_lists = None, {}, {}
+            self.proton_lock = threading.Lock()
+            self.installers = set()
+            self.last_poll = 0
+            self.selected = None
+            self.pending = set()
+            self.refreshing = False
+            self.window = Adw.ApplicationWindow(application=app, title="Sandbox Manager")
+            self.window.set_default_size(1120, 760)
+            self.window.set_size_request(740, 500)
+            self.window.connect("close-request", self.close)
+            self.window.connect("notify::is-active", lambda *_: self.window.is_active() and self.poll(True))
+            self.overlay = Adw.ToastOverlay()
+            self.window.set_content(self.overlay)
+            self.split = Adw.NavigationSplitView(min_sidebar_width=250, max_sidebar_width=320,
+                                                 sidebar_width_fraction=0.27)
+            self.overlay.set_child(self.split)
+            sidebar = Adw.ToolbarView()
+            header = Adw.HeaderBar()
+            header.set_title_widget(Gtk.Label(label="Games"))
+            add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add game")
+            add.connect("clicked", lambda *_: self.add_game())
+            header.pack_start(add)
+            menu = Gio.Menu()
+            for label, action in (("Add game", "add"), ("Refresh library", "refresh"),
+                                  ("Check system", "check"), ("Quit", "quit")):
+                menu.append(label, "app." + action)
+            header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
+            sidebar.add_top_bar(header)
+            left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            self.search = Gtk.SearchEntry(placeholder_text="Search games")
+            self.search.set_margin_start(12)
+            self.search.set_margin_end(12)
+            self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+            left.append(self.search)
+            self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+            self.listbox.add_css_class("navigation-sidebar")
+            self.listbox.set_filter_func(lambda row: self.search.get_text().casefold() in row.entry["title"].casefold())
+            self.listbox.connect("row-selected", self.select_row)
+            scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+            scroll.set_child(self.listbox)
+            left.append(scroll)
+            self.count = Gtk.Label(xalign=0)
+            self.count.add_css_class("dim-label")
+            self.count.set_margin_start(18)
+            self.count.set_margin_bottom(12)
+            left.append(self.count)
+            sidebar.set_content(left)
+            self.split.set_sidebar(Adw.NavigationPage.new(sidebar, "Games"))
+
+            content = Adw.ToolbarView()
+            content_header = Adw.HeaderBar()
+            self.window_title = Adw.WindowTitle(title="Sandbox Manager")
+            content_header.set_title_widget(self.window_title)
+            content.add_top_bar(content_header)
+            self.content = Gtk.Stack()
+            empty = Adw.StatusPage(title="Your games, in one place", icon_name="applications-games-symbolic",
+                                  description="Add an existing game or install a Windows game into a new sandbox.")
+            first = Gtk.Button(label="Add game", halign=Gtk.Align.CENTER)
+            first.add_css_class("suggested-action")
+            first.connect("clicked", lambda *_: self.add_game())
+            empty.set_child(first)
+            self.content.add_named(empty, "empty")
+            self.detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+            self.detail.set_margin_start(24)
+            self.detail.set_margin_end(24)
+            self.detail.set_margin_top(12)
+            self.detail.set_margin_bottom(18)
+            hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+            hero.append(Gtk.Image(icon_name="applications-games-symbolic", pixel_size=48))
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True)
+            self.title = Gtk.Label(xalign=0, ellipsize=3)
+            self.title.add_css_class("title-1")
+            self.status = Gtk.Label(xalign=0)
+            self.status.add_css_class("dim-label")
+            labels.append(self.title)
+            labels.append(self.status)
+            hero.append(labels)
+            self.play = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
+            self.play.add_css_class("suggested-action")
+            self.play.connect("clicked", self.play_clicked)
+            hero.append(self.play)
+            self.detail.append(hero)
+            self.tabs = Gtk.Stack(vexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE)
+            self.tabs.connect("notify::visible-child-name", self.tab_changed)
+            switcher = Gtk.StackSwitcher(stack=self.tabs, halign=Gtk.Align.CENTER)
+            self.detail.append(switcher)
+            self.detail.append(self.tabs)
+            self.overview = self.page("overview", "Overview")
+            self.program_page = self.page("programs", "Programs")
+            self.settings_page = self.page("settings", "Settings")
+            self.log_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
+                                         wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=10,
+                                         right_margin=10, top_margin=10, bottom_margin=10)
+            log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            log_buttons = Gtk.Box(spacing=8)
+            self.button(log_buttons, "Refresh log", lambda *_: self.update_log())
+            self.button(log_buttons, "Open log file", lambda *_: self.open_path(
+                self.library.log_path(self.selected["name"])))
+            log_box.append(log_buttons)
+            log_scroll = Gtk.ScrolledWindow(vexpand=True)
+            log_scroll.set_child(self.log_view)
+            log_box.append(log_scroll)
+            self.tabs.add_titled(log_box, "logs", "Logs")
+            self.content.add_named(self.detail, "detail")
+            content.set_content(self.content)
+            self.split.set_content(Adw.NavigationPage.new(content, "Sandbox Manager"))
+            self.closed = False
+            for name, callback in (("add", lambda *_: self.add_game()),
+                                    ("refresh", lambda *_: self.reload(rescan=True)),
+                                    ("check", lambda *_: self.check_system()),
+                                    ("quit", lambda *_: self.window.close())):
+                action = Gio.SimpleAction.new(name, None)
+                action.connect("activate", callback)
+                app.add_action(action)
+            app.set_accels_for_action("app.add", ["<Control>n"])
+            app.set_accels_for_action("app.refresh", ["<Control>r"])
+            app.set_accels_for_action("app.quit", ["<Control>q"])
+            self.reload()
+            GLib.timeout_add_seconds(2, self.poll)
+
+        def close(self, *_):
+            self.closed = True
+            self.appearance.preview(self.appearance.saved_theme)
+            return False
+
+        def work(self, function, done=None):
+            def finish(value, error):
+                if self.closed:
+                    return False
+                if error:
+                    self.toast(str(error))
+                if done:
+                    try:
+                        done(value, error)
+                    except Exception as failure:
+                        self.toast(str(failure))
+                return False
+            def run():
+                try:
+                    value, error = function(), None
+                except Exception as failure:
+                    value, error = None, failure
+                GLib.idle_add(finish, value, error)
+            threading.Thread(target=run, daemon=True).start()
+
+        def toast(self, message):
+            toast = Adw.Toast.new(str(message))
+            toast.set_timeout(6)
+            if hasattr(toast, "set_use_markup"):
+                toast.set_use_markup(False)
+            self.overlay.add_toast(toast)
+
+        def page(self, name, title):
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+            body.set_margin_top(12)
+            body.set_margin_bottom(12)
+            scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+            scroll.set_child(body)
+            self.tabs.add_titled(scroll, name, title)
+            return body
+
+        def clear(self, box):
+            while box.get_first_child():
+                box.remove(box.get_first_child())
+
+        def button(self, box, label, callback, style=None):
+            button = Gtk.Button(label=label)
+            if style:
+                button.add_css_class(style)
+            button.connect("clicked", callback)
+            box.append(button)
+            return button
+
+        def label(self, box, text, style=None):
+            label = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
+            if style:
+                label.add_css_class(style)
+            box.append(label)
+            return label
+
+        def reload(self, select=None, rescan=False):
+            selected_name = select or (self.selected or {}).get("name")
+            self.descriptions, self.program_lists = {}, {}
+            if rescan:
+                with self.proton_lock:
+                    self.proton_list = None
+            def loaded(entries, error):
+                if error:
+                    return
+                self.entries = entries
+                self.clear(self.listbox)
+                self.rows = {}
+                for entry in entries:
+                    row = Gtk.ListBoxRow()
+                    row.entry = entry
+                    box = Gtk.Box(spacing=10)
+                    for side in ("top", "bottom", "start", "end"):
+                        getattr(box, "set_margin_" + side)(10)
+                    box.append(Gtk.Image(icon_name="applications-games-symbolic"))
+                    text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
+                    title = Gtk.Label(label=entry["title"], xalign=0, ellipsize=3)
+                    row.state = Gtk.Label(label="Ready", xalign=0)
+                    row.state.add_css_class("dim-label")
+                    text.append(title)
+                    text.append(row.state)
+                    box.append(text)
+                    row.set_child(box)
+                    self.listbox.append(row)
+                    self.rows[entry["name"]] = row
+                self.count.set_label(f"{len(entries)} sandbox{'es' if len(entries) != 1 else ''}")
+                self.selected = None
+                if entries:
+                    self.listbox.select_row(self.rows.get(selected_name, self.rows[entries[0]["name"]]))
+                else:
+                    self.content.set_visible_child_name("empty")
+                    self.window_title.set_title("Sandbox Manager")
+                self.poll(True)
+            self.work(self.library.entries, loaded)
+
+        def select_row(self, _, row):
+            if row is None:
+                return
+            self.appearance.preview(self.appearance.saved_theme)
+            self.selected = row.entry
+            entry = self.selected
+            self.content.set_visible_child_name("detail")
+            self.title.set_label(entry["title"])
+            self.window_title.set_title(entry["title"])
+            self.window_title.set_subtitle("Windows sandbox" if entry["kind"] == "windows" else "Game sandbox")
+            self.build_overview(entry)
+            self.build_programs(entry)
+            self.build_settings(entry)
+            self.update_log()
+            self.update_state()
+            self.split.set_show_content(True)
+
+        def build_overview(self, entry):
+            self.clear(self.overview)
+            self.label(self.overview, "Game details", "title-3")
+            name = Gtk.Entry(text=entry["title"], placeholder_text="Display name")
+            name_label = self.label(self.overview, "Display name")
+            name_label.set_mnemonic_widget(name)
+            self.overview.append(name)
+            self.label(self.overview, "Shown in the library. Your sandbox folder and saves keep their existing locations.",
+                       "dim-label")
+            self.label(self.overview, "Launch", "title-3")
+            self.label(self.overview, entry.get("program") or entry.get("selection") or
+                       "Locate this game's folder to enable launching.", "dim-label")
+            args = Gtk.Entry(text=entry.get("arguments", ""), placeholder_text="Launch arguments (optional)")
+            args.set_visible(entry["kind"] == "windows")
+            self.overview.append(args)
+            def save(*_):
+                updated = {**entry, "title": name.get_text().strip(), "arguments": args.get_text()}
+                try:
+                    self.library.save_entry(updated)
+                    self.reload(entry["name"])
+                except (OSError, ValueError) as error:
+                    self.toast(error)
+            self.button(self.overview, "Save game details", save)
+            total, last = self.library.stats(entry["name"])
+            played = f"{total // 3600}h {total % 3600 // 60}m" if total else "Not played yet"
+            last_text = datetime.fromtimestamp(last).strftime("%d %b %Y, %H:%M") if last else "Never"
+            self.label(self.overview, "Activity", "title-3")
+            self.activity = self.label(self.overview, f"Time played: {played}\nLast played: {last_text}")
+            self.label(self.overview, "Files", "title-3")
+            files = Gtk.Box(spacing=8)
+            self.button(files, "Open sandbox folder", lambda *_: self.open_path(self.library.capture(entry["name"])))
+            self.button(files, "Locate game", lambda *_: self.locate(entry))
+            self.overview.append(files)
+            self.label(self.overview, str(self.library.capture(entry["name"])), "dim-label")
+            self.size_label = self.label(self.overview, "")
+            self.button(self.overview, "Calculate storage used", lambda *_: self.storage(entry))
+            self.label(self.overview, "Maintenance", "title-3")
+            self.maintenance = Gtk.Box(spacing=8)
+            self.button(self.maintenance, "Reset install changes", lambda *_: self.confirm_operation(entry, "reset-install"))
+            self.button(self.maintenance, "Delete sandbox", lambda *_: self.confirm_operation(entry, "delete"), "destructive-action")
+            self.overview.append(self.maintenance)
+
+        def build_programs(self, entry):
+            self.clear(self.program_page)
+            self.program_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+            self.program_list.add_css_class("boxed-list")
+            self.label(self.program_page, "Installed programs", "title-3")
+            self.label(self.program_page, "Choose the game or launcher to use when you press Play.", "dim-label")
+            buttons = Gtk.Box(spacing=8)
+            self.install_button = self.button(buttons, "Run installer…", lambda *_: self.choose_installer(entry))
+            self.button(buttons, "Refresh programs", lambda *_: self.scan_programs(entry, rescan=True))
+            self.program_page.append(buttons)
+            self.program_page.append(self.program_list)
+            self.tools = Gtk.Box(spacing=8)
+            for title, command in (("Wine configuration", "winecfg"), ("Registry editor", "regedit")):
+                self.button(self.tools, title, lambda *_, tool=command: self.start(entry, tool=tool))
+            self.tools.set_visible(entry["kind"] == "windows" or entry.get("engine") == "proton")
+            self.program_page.append(self.tools)
+            self.scan_programs(entry)
+
+        def protons(self):
+            with self.proton_lock:
+                if self.proton_list is None:
+                    self.proton_list = self.library.protons()
+                return self.proton_list
+
+        def scan_programs(self, entry, rescan=False):
+            if entry["kind"] != "windows":
+                self.clear(self.program_list)
+                self.program_list.append(Gtk.Label(label="Launchers in an existing game are selected when you press Play.",
+                                                  wrap=True, margin_top=14, margin_bottom=14))
+                self.install_button.set_visible(entry.get("engine") == "proton")
+                return
+            def loaded(programs, error):
+                if error:
+                    return
+                self.program_lists[entry["name"]] = programs
+                if not self.selected or self.selected["name"] != entry["name"]:
+                    return
+                self.clear(self.program_list)
+                if not programs:
+                    self.program_list.append(Gtk.Label(label="No programs found yet. Run an installer to get started.",
+                                                      wrap=True, margin_top=18, margin_bottom=18))
+                for target, label in programs:
+                    row = Adw.ActionRow(title=Path(label.replace("\\", "/")).name, subtitle=label,
+                                        use_markup=False)
+                    chosen = target == entry.get("program")
+                    select = Gtk.Button(label="Selected" if chosen else "Use for Play", valign=Gtk.Align.CENTER)
+                    select.set_sensitive(not chosen)
+                    def choose(*_, program=target):
+                        entry["program"] = program
+                        self.library.save_entry(entry)
+                        self.build_overview(entry)
+                        self.scan_programs(entry)
+                        self.update_state()
+                    select.connect("clicked", choose)
+                    row.add_suffix(select)
+                    self.program_list.append(row)
+            if not rescan and entry["name"] in self.program_lists:
+                loaded(self.program_lists[entry["name"]], None)
+                return
+            self.work(lambda: self.library.programs(entry), loaded)
+
+        def build_settings(self, entry):
+            self.clear(self.settings_page)
+            self.label(self.settings_page, "Loading settings…", "dim-label")
+            def load():
+                if entry["kind"] == "windows":
+                    request = dict(engine="proton", can_proton=False, dotnet=False)
+                elif entry.get("selection") and Path(entry["selection"]).exists():
+                    key = (entry["name"], entry["selection"])
+                    if key not in self.descriptions:
+                        self.descriptions[key] = self.library.describe(entry["selection"], entry["name"])
+                    request = dict(self.descriptions[key])
+                else:
+                    request = dict(engine="", can_proton=False)
+                request.update(game=entry["title"], values=self.library.settings(entry["name"]),
+                               env={"game": self.library.scope_settings(entry["name"]).get("env", ""),
+                                    "all": self.library.scope_settings(entry["name"], True).get("env", "")},
+                               protons=self.protons(),
+                               game_settings=(self.library.config / "games" / entry["name"]).exists())
+                return request
+            def loaded(request, error):
+                if not self.selected or self.selected["name"] != entry["name"]:
+                    return
+                self.clear(self.settings_page)
+                if error:
+                    self.label(self.settings_page, str(error))
+                    return
+                self.preferences = PreferencePane(self, request)
+                self.settings_page.append(self.preferences.body)
+                if entry["kind"] == "existing":
+                    entry["engine"] = self.preferences.state.engine
+                    self.install_button.set_visible(entry["engine"] == "proton")
+                    self.tools.set_visible(entry["engine"] == "proton")
+            self.work(load, loaded)
+
+        def tab_changed(self, *_):
+            if self.tabs.get_visible_child_name() == "logs" and self.selected:
+                self.update_log()
+
+        def update_log(self):
+            if self.selected:
+                text = self.library.read_log(self.selected["name"])
+                buffer = self.log_view.get_buffer()
+                old = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+                if old != text:
+                    buffer.set_text(text)
+
+        def update_state(self):
+            live = self.running | {name for name, process in self.processes.items() if process.poll() is None}
+            for name, row in self.rows.items():
+                row.state.set_label("Starting…" if name in self.pending else "Running" if name in live else
+                                    "Choose a launcher" if row.entry["kind"] == "windows" and not row.entry.get("program") else
+                                    "Locate game folder" if not row.entry.get("selection") else "Ready")
+            if not self.selected:
+                return
+            entry = self.selected
+            name = entry["name"]
+            busy = name in live or name in self.pending
+            self.status.set_label(self.rows[name].state.get_label())
+            self.play.set_label("Stop" if name in self.running else "Starting…" if busy else "Play")
+            self.play.set_sensitive(name not in self.pending and (name in self.running or not busy) and
+                                    (busy or bool(entry.get("program") if entry["kind"] == "windows" else entry.get("selection"))))
+            self.maintenance.set_sensitive(not busy)
+            self.install_button.set_sensitive(not busy)
+            self.tools.set_sensitive(not busy)
+
+        def poll(self, force=False):
+            if self.closed:
+                return False
+            if self.refreshing:
+                return True
+            # sandbox-attach scans every process. Every 2 s only while this window
+            # is in use or something it started may still run; else every 10 s.
+            if not force and not self.pending and not self.processes and not self.window.is_active() \
+                    and time.monotonic() - self.last_poll < 10:
+                return True
+            self.last_poll = time.monotonic()
+            self.refreshing = True
+            def loaded(running, error):
+                self.refreshing = False
+                if not error:
+                    self.running = running
+                finished = []
+                for name, process in self.processes.items():
+                    code = process.poll()
+                    if code is not None:
+                        finished.append(name)
+                        if code:
+                            self.toast(f"{self.rows[name].entry['title'] if name in self.rows else name} exited with code {code}. See Logs for details.")
+                        installed = name in self.installers
+                        if installed:
+                            self.program_lists.pop(name, None)
+                        if self.selected and self.selected["name"] == name:
+                            self.build_overview(self.selected)
+                            if installed:
+                                self.scan_programs(self.selected)
+                for name in finished:
+                    del self.processes[name]
+                    self.installers.discard(name)
+                self.update_state()
+                if self.selected and self.tabs.get_visible_child_name() == "logs":
+                    self.update_log()
+            self.work(self.library.running, loaded)
+            return True
+
+        def play_clicked(self, *_):
+            if self.selected["name"] in self.running:
+                self.run_operation(self.selected, "stop")
+            else:
+                self.start(self.selected)
+
+        def start(self, entry, **kwargs):
+            name = entry["name"]
+            if name in self.pending or name in self.running or \
+                    (name in self.processes and self.processes[name].poll() is None):
+                self.toast("This sandbox is already running")
+                return
+            self.pending.add(name)
+            self.update_state()
+            def started(process, error):
+                self.pending.discard(name)
+                if not error:
+                    self.processes[name] = process
+                    if "installer" in kwargs:
+                        self.installers.add(name)
+                self.update_state()
+                self.poll(True)
+            self.work(lambda: self.library.start(entry, **kwargs), started)
+
+        def choose_file(self, title, callback, folder=False, windows=False):
+            chooser = Gtk.FileChooserNative.new(title, self.window,
+                Gtk.FileChooserAction.SELECT_FOLDER if folder else Gtk.FileChooserAction.OPEN,
+                "Select", "Cancel")
+            if windows:
+                file_filter = Gtk.FileFilter()
+                file_filter.set_name("Windows installers (*.exe, *.msi)")
+                for pattern in ("*.exe", "*.EXE", "*.msi", "*.MSI"):
+                    file_filter.add_pattern(pattern)
+                chooser.add_filter(file_filter)
+            def response(dialog, code):
+                file = dialog.get_file()
+                dialog.destroy()
+                if code == Gtk.ResponseType.ACCEPT and file and file.get_path():
+                    callback(Path(file.get_path()))
+            chooser.connect("response", response)
+            chooser.show()
+
+        def choose_installer(self, entry):
+            self.choose_file("Choose Windows installer", lambda path: self.start(entry, installer=path), windows=True)
+
+        def locate(self, entry):
+            if entry["kind"] == "windows":
+                try:
+                    # Never open a game-planted link or file on the host.
+                    drive = self.library.windows_drive(entry["name"])
+                except ValueError as error:
+                    self.toast(error)
+                    return
+                self.open_path(drive)
+                return
+            def selected(path):
+                self.work(lambda: self.library.add_existing(path, entry["name"]),
+                          lambda value, error: self.reload(entry["name"]) if not error else None)
+            self.choose_file("Locate game folder", selected, folder=True)
+
+        def open_path(self, path):
+            try:
+                if not path.exists():
+                    raise ValueError("This file or folder does not exist yet")
+                Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+            except Exception as error:
+                self.toast(error)
+
+        def storage(self, entry):
+            def calculate():
+                result = subprocess.run(["du", "-sh", "--", str(self.library.capture(entry["name"]))],
+                                        capture_output=True, text=True, timeout=60)
+                if not result.stdout.strip():
+                    raise ValueError(result.stderr.strip() or "Cannot calculate storage")
+                return result.stdout.split()[0]
+            self.work(calculate, lambda size, error: self.size_label.set_label(f"Storage used: {size}")
+                      if not error and self.selected and self.selected["name"] == entry["name"] else None)
+
+        def confirm_operation(self, entry, operation):
+            delete = operation == "delete"
+            dialog = Adw.AlertDialog(heading="Delete sandbox?" if delete else "Reset install changes?",
+                body=(f"Delete {entry['title']} and all of its sandbox data, including saves and the Windows prefix? "
+                      "An existing game folder outside the sandbox is kept." if delete else
+                      "Discard changes written to the game folder? Files named like saves and the Windows prefix are kept."))
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("accept", "Delete" if delete else "Reset")
+            dialog.set_response_appearance("accept", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda _, response: self.run_operation(entry, operation) if response == "accept" else None)
+            dialog.present(self.window)
+
+        def run_operation(self, entry, operation):
+            name = entry["name"]
+            self.pending.add(name)
+            self.update_state()
+            def done(value, error):
+                self.pending.discard(name)
+                if not error:
+                    self.toast("Sandbox deleted" if operation == "delete" else "Sandbox stopped" if operation == "stop" else "Install changes reset")
+                    self.reload()
+                self.update_state()
+            self.work(lambda: self.library.operate(name, operation), done)
+
+        def check_system(self):
+            def check():
+                result = subprocess.run([str(self.library.backend), "--check"], capture_output=True,
+                                        text=True, errors="replace", timeout=40)
+                return result.stdout + result.stderr
+            def loaded(text, error):
+                if error:
+                    return
+                window = Gtk.Window(title="System check", transient_for=self.window, modal=True,
+                                    default_width=800, default_height=550)
+                scroll = Gtk.ScrolledWindow()
+                view = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                    left_margin=16, top_margin=16)
+                view.get_buffer().set_text(text)
+                scroll.set_child(view)
+                window.set_child(scroll)
+                window.present()
+            self.work(check, loaded)
+
+        def add_game(self):
+            window = Gtk.Window(title="Add game", transient_for=self.window, modal=True,
+                                default_width=560, default_height=550)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+            for side in ("top", "bottom", "start", "end"):
+                getattr(box, "set_margin_" + side)(24)
+            window.set_child(box)
+            self.label(box, "Add to your library", "title-1")
+            modes = Gtk.DropDown.new_from_strings(["Install a Windows game", "Add an existing game"])
+            box.append(modes)
+            form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            name = Gtk.Entry(placeholder_text="Game name")
+            form.append(name)
+            self.label(form, "Proton runner", "title-4")
+            runners = Gtk.DropDown.new_from_strings(["Newest installed (auto)"])
+            runner_paths = ["auto"]
+            form.append(runners)
+            def set_runners(paths, error):
+                if error:
+                    return
+                runner_paths[:] = ["auto", *paths]
+                runners.set_model(Gtk.StringList.new(["Newest installed (auto)", *[Path(p).name for p in paths]]))
+            self.work(self.protons, set_runners)
+            def custom_runner(path):
+                if not (path / "proton").is_file() or not os.access(path / "proton", os.X_OK):
+                    self.toast("Choose a Proton folder containing an executable proton script")
+                    return
+                runner_paths.append(str(path))
+                runners.get_model().append(path.name)
+                runners.set_selected(len(runner_paths) - 1)
+            self.button(form, "Choose another Proton folder…", lambda *_: self.choose_file(
+                "Choose Proton folder", custom_runner, folder=True))
+            installer = [None]
+            installer_label = self.label(form, "No installer selected. You can install later.", "dim-label")
+            def chosen(path):
+                installer[0] = path
+                installer_label.set_label(path.name)
+                if not name.get_text():
+                    name.set_text(path.stem)
+            self.button(form, "Choose installer…", lambda *_: self.choose_file(
+                "Choose Windows installer", chosen, windows=True))
+            network = Gtk.CheckButton(label="Allow internet access for installation and play")
+            form.append(network)
+            box.append(form)
+            existing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            self.label(existing, "Select an unpacked game folder or its launcher. Its files stay in place; saves and changes go into its sandbox.")
+            selection = [None]
+            selected_label = self.label(existing, "No game selected", "dim-label")
+            def selected(path):
+                selection[0] = path
+                selected_label.set_label(str(path))
+            self.button(existing, "Choose game folder…", lambda *_: self.choose_file("Choose game folder", selected, folder=True))
+            self.button(existing, "Choose launcher…", lambda *_: self.choose_file("Choose game launcher", selected))
+            existing.set_visible(False)
+            box.append(existing)
+            modes.connect("notify::selected", lambda *_: (
+                form.set_visible(modes.get_selected() == 0), existing.set_visible(modes.get_selected() == 1)))
+            note = self.label(box, "", "error")
+            footer = Gtk.Box(spacing=8, halign=Gtk.Align.END, vexpand=True, valign=Gtk.Align.END)
+            self.button(footer, "Cancel", lambda *_: window.close())
+            def create(*_):
+                windows = modes.get_selected() == 0
+                if windows and not name.get_text().strip():
+                    note.set_label("Give the sandbox a name.")
+                    return
+                if not windows and not selection[0]:
+                    note.set_label("Choose a game folder or launcher.")
+                    return
+                create_button.set_sensitive(False)
+                # Read widgets only on the GTK thread.
+                title, runner, internet, media, source = (name.get_text(), runner_paths[runners.get_selected()],
+                    network.get_active(), installer[0], selection[0])
+                def perform():
+                    if windows:
+                        return self.library.create(title, runner, internet)
+                    return self.library.add_existing(source)
+                def done(entry, error):
+                    create_button.set_sensitive(True)
+                    if error:
+                        note.set_label(str(error))
+                        return
+                    window.close()
+                    self.reload(entry["name"])
+                    if windows and media:
+                        self.start(entry, installer=media)
+                self.work(perform, done)
+            create_button = self.button(footer, "Add game", create, "suggested-action")
+            box.append(footer)
+            window.present()
+
+    app = Adw.Application(application_id="eu.nosini.SandboxManager", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+    def activate(application):
+        try:
+            if not hasattr(application, "manager") or application.manager.closed:
+                application.manager = Manager(application)
+            application.manager.window.present()
+        except Exception as error:
+            print(f"Cannot open Sandbox Manager: {error}", file=sys.stderr)
+            application.quit()
+    app.connect("activate", activate)
+    return app.run([sys.argv[0]])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

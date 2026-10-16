@@ -38,14 +38,17 @@ CONF="${XDG_CONFIG_HOME:-$HOME/.config}"
 each() {
     "$@" 755 sandbox-game             "$BIN"
     "$@" 755 sandbox-attach           "$BIN"
+    "$@" 755 sandbox-manager          "$BIN"
     "$@" 755 sandbox-seccomp          "$HELPERS"
     "$@" 755 sandbox-landlock         "$HELPERS"
     "$@" 644 sandbox-game-lib         "$HELPERS"
     "$@" 755 sandbox-game-dialog      "$HELPERS"
+    "$@" 644 sandbox-manager-lib.py   "$HELPERS"
     "$@" 644 nwjs-casefold.js         "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
     "$@" 755 "Stop sandboxed game"      "$SCRIPTS"
+    "$@" 644 eu.nosini.SandboxManager.desktop "$DATA/applications"
 }
 
 # Where the helpers used to go, beside sandbox-game on PATH: cleared on every
@@ -80,6 +83,20 @@ remove_one() {
 }
 install_one() {
     install -Dm"$1" "$SRC/$2" "$3/$2"; say "installed $3/$2"
+    if [ "$2" = eu.nosini.SandboxManager.desktop ]; then
+        # Desktop launchers must also work when ~/.local/bin is not on PATH.
+        python3 - "$3/$2" "$BIN/sandbox-manager" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+value = sys.argv[2].replace("%", "%%")
+for char in ('\\', '"', '`', '$'):
+    value = value.replace(char, '\\' + char)
+# Backslashes are escaped once more by the desktop entry string parser.
+value = value.replace('\\', '\\\\')
+path.write_text(path.read_text().replace('Exec=sandbox-manager', 'Exec="' + value + '"'))
+PY
+    fi
 }
 install_completion() {
     install -Dm"$1" "$SRC/completions/$2" "$3/$2"; say "installed $3/$2"
@@ -186,11 +203,16 @@ command -v systemd-run >/dev/null \
     || warn "systemd-run not found -- games will run without memory and task limits"
 command -v pasta >/dev/null \
     || warn "pasta not found -- games can only be offered internet access with it (package passt)"
+command -v flock >/dev/null \
+    || warn "flock not found -- install util-linux; sandbox launches need it"
 "$HELPERS/sandbox-game-dialog" check >/dev/null 2>&1 \
     || warn "GTK 4 / libadwaita / Python PyGObject not found -- the Nautilus dialogs need them"
+"$BIN/sandbox-manager" --check >/dev/null 2>&1 \
+    || warn "Sandbox Manager needs GTK 4, libadwaita >= 1.5 and Python PyGObject"
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *) warn "$BIN is not on PATH -- the Nautilus scripts find it anyway, but add it to use the commands from a shell" ;;
 esac
 
-say "done. Right-click a game folder in Nautilus -> Scripts -> Sandbox game"
+say "done. Open Sandbox Manager from your applications, or run sandbox-manager."
+say "You can also right-click a game folder in Nautilus -> Scripts -> Sandbox game."

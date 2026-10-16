@@ -38,7 +38,7 @@
 #   ~/game-sandboxes/<name>-lastrun.log
 set -uo pipefail
 
-SANDBOX="$HOME/.local/bin/sandbox-game"
+SANDBOX="${SANDBOX_BACKEND:-$HOME/.local/bin/sandbox-game}"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
 msg() { notify-send "sandbox-game" "$1" 2>/dev/null || true; }
 die() {
@@ -102,7 +102,9 @@ RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; PGMMV=0; ALLOW_MANGOHUD=1
 resolve_selection "$SEL"
 APPDIR="$R_APPDIR"
 GAMEDIR="$R_GAMEDIR"
-NAME="$("$SANDBOX" --print-name "$GAMEDIR" 2>/dev/null)" \
+NAME_ARGS=()
+[ -z "${SANDBOX_GAME_NAME:-}" ] || NAME_ARGS=( --name "$SANDBOX_GAME_NAME" )
+NAME="$("$SANDBOX" --print-name "${NAME_ARGS[@]}" "$GAMEDIR" 2>/dev/null)" \
     || die "Cannot derive a sandbox name for:\n$GAMEDIR"
 
 if [ "$(cfg_get launch_with auto)" = proton ]; then
@@ -266,49 +268,10 @@ BASE="$(basename "$GAMEDIR")"
 # ---- saved preferences -----------------------------------------------------
 # Keyed by the sandbox name so prefs and captured writes stay together. The
 # name was resolved before dispatch so launch_with can choose the runtime.
-FLAG=()
-HOST_X11="$(cfg_get host_x11 0)"
-[ "$HOST_X11" = 1 ] && FLAG+=( --host-x11 )
-WL=0
-[ "$HOST_X11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
-[ "$WL" = 1 ] && FLAG+=( --wayland )
-[ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
-if [ "$(cfg_get net 0)" = 1 ]; then
-    FLAG+=( --net )
-    if [ "$(cfg_get lan 0)" = 1 ]; then
-        FLAG+=( --lan )
-    else
-        LAN_ALLOW="$(cfg_get lan_allow "")"
-        [ -z "$LAN_ALLOW" ] || FLAG+=( "--allow-lan=$LAN_ALLOW" )
-    fi
-fi
-# hosts=ADDR NAME..., ADDR NAME... -- one --add-host each.
-if [ "$(cfg_get private_hosts 0)" = 1 ]; then
-    FLAG+=( --hosts )
-    IFS=, read -r -a HOST_ENTRIES <<<"$(cfg_get hosts "")"
-    for e in ${HOST_ENTRIES[@]+"${HOST_ENTRIES[@]}"}; do
-        e="${e#"${e%%[![:space:]]*}"}"; e="${e%"${e##*[![:space:]]}"}"
-        [ -z "$e" ] || FLAG+=( "--add-host=$e" )
-    done
-    [ "$(cfg_get hosts_writable 0)" = 1 ] && FLAG+=( --hosts-writable )
-fi
-# Native programs only. The .NET runtime is opt-in, and only for a program
-# recognised as needing it.
-DOTNET_APP=0
-if [ -z "$APPDIR" ] && [ "$PROTON" = 0 ] && [ "$MKXP" = 0 ] && [ "$PGMMV" = 0 ]; then
-    is_dotnet "$GAMEDIR" && DOTNET_APP=1
-    [ "$DOTNET_APP" = 1 ] && [ "$(cfg_get dotnet 0)" = 1 ] && FLAG+=( --dotnet )
-    # Proton, for one that starts Wine itself.
-    WP="$(cfg_get with_proton "")"
-    if [ "$WP" = auto ]; then FLAG+=( --with-proton ); elif [ -n "$WP" ]; then FLAG+=( "--with-proton=$WP" ); fi
-fi
+# The same translation the desktop manager uses; see sandbox-game-lib.
+pref_flags
 if [ -n "$APPDIR" ] && [ "$(cfg_get casefold 1)" = 1 ] && [ -f "$CASEFOLD" ]; then
     RO+=( --ro "$CASEFOLD" /nwjs-casefold.js )
-fi
-if [ "$HOST_X11" != 1 ] && { [ "$(cfg_get gamescope 0)" = 1 ] || [ "$WL" = 0 ]; }; then
-    # gamescope_args is hand-edited only; empty means gamescope's own defaults.
-    GA="$(cfg_get gamescope_args "")"
-    if [ -n "$GA" ]; then FLAG+=( "--gamescope=$GA" ); else FLAG+=( --gamescope ); fi
 fi
 # NW.js picks its backend by flag, not from the environment, so tell it what
 # was chosen: native Wayland (the host's, or gamescope's exposed socket), else
@@ -330,23 +293,15 @@ if [ -n "$APPDIR" ]; then
                "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" )
     fi
 fi
-# env=K=V K=V ... -- a game launched from the file manager inherits its
-# environment, not a shell's, so anything the game needs has to be recorded.
-read -r -a CFG_ENV <<<"$(cfg_get env "")"
-for e in ${CFG_ENV[@]+"${CFG_ENV[@]}"}; do FLAG+=( "--env=$e" ); done
 if [ "$PGMMV" = 1 ]; then
     FLAG+=( "--pgmmv${PGMMV_DIR:+=$PGMMV_DIR}" )
 elif [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
-elif [ "$PROTON" = 1 ]; then
-    # An exported PROTON_VER still wins, matching NWJS_DIR/MKXP_DIR/PROTON_DIR.
-    PV="${PROTON_VER:-$(cfg_get proton auto)}"
-    if [ "$PV" = auto ]; then FLAG+=( --proton ); else FLAG+=( "--proton=$PV" ); fi
-    [ "$(cfg_get mod_loaders 0)" = 1 ] && FLAG+=( --mod-loaders )
 fi
 
 mkdir -p "$HOME/game-sandboxes"
-LOG="$HOME/game-sandboxes/${BASE}-lastrun.log"
+# Named after the sandbox, like its capture folder, so the manager finds it.
+LOG="$HOME/game-sandboxes/${NAME}-lastrun.log"
 
 # Withholding --mangohud is not enough to keep the overlay away from NW.js:
 # sandbox-game also opts in from an inherited MANGOHUD=1, and that variable

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sandbox Manager
+Comment=Install, launch and manage sandboxed games
+Exec=sandbox-manager
+Icon=applications-games
+Terminal=false
+Categories=Game;Utility;
+Keywords=Wine;Proton;Games;Sandbox;
+StartupNotify=true

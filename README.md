@@ -1,6 +1,7 @@
 # run-in-sandbox
 
-Run a downloaded game in a bwrap sandbox, from the file manager or the shell.
+Install and manage games in a desktop library, and run them in a bwrap sandbox.
+You can also launch them from the file manager or the shell.
 
 Games from itch.io, a jam page, or a random archive are unpacked and run as your
 user with your whole home directory in reach. This puts one between them and
@@ -72,9 +73,11 @@ What goes where:
 
 | File | Installed to |
 |---|---|
-| `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
+| `sandbox-manager`, `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
 | `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` and `nwjs-casefold.js` (mode 644) | `~/.local/lib/sandbox-game/` |
 | `sandbox-game-dialog` | `~/.local/lib/sandbox-game/` |
+| `sandbox-manager-lib.py` | `~/.local/lib/sandbox-game/` |
+| `eu.nosini.SandboxManager.desktop` | `~/.local/share/applications/` |
 | `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
 | (empty) shared tools folder | `~/.local/share/sandbox-game/tools/` |
 | `completions/sandbox-game`, `completions/sandbox-attach` | `~/.local/share/bash-completion/completions/` |
@@ -88,7 +91,56 @@ Each of them is looked for beside the script using it first, so a checkout
 runs as it is, then there, then on `PATH`. An earlier install kept them in
 `~/.local/bin/`; `install.sh` clears those copies out.
 
-Then right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
+Open **Sandbox Manager** from your applications, or run `sandbox-manager`.
+You can also right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
+
+## Manage your library
+
+The manager lists your sandboxes in a searchable sidebar. Select a game to
+launch or stop it, view its log and playtime, open its files, or change its
+settings. Closing the manager leaves running games open.
+
+To give a game a readable title, edit **Overview → Display name** and choose
+**Save game details**. This updates its name in the library and window while
+keeping the existing sandbox folder, settings and saves in place.
+
+Choose **Add game → Add an existing game** for an unpacked game. Select its
+folder or launcher; its original files stay in place, and saves and changes
+are captured in its sandbox. Games launched through the file manager or CLI
+also appear in the library. For sandboxes created before the manager recorded
+game locations, **Locate game** reconnects the original folder to its saves.
+
+To install a Windows game:
+
+1. Choose **Add game → Install a Windows game** and give it a name.
+2. Select a Proton runner. **Choose another Proton folder** accepts a build
+   such as DWProton unpacked elsewhere.
+3. Choose an `.exe` or `.msi` installer, and enable internet access if it
+   needs to download game files. You can also create the sandbox first and
+   use **Run installer** later.
+4. Complete the installer and close it. Open **Programs**, refresh the list,
+   and choose **Use for Play** beside the installed game or launcher.
+
+The installer and game share one persistent Windows prefix. The installer's
+folder is available read-only while it runs, including any adjacent files it
+needs. An installer saved directly in your home folder, Downloads or another
+standard user folder sees only itself, its split archives (`setup-1.bin`) and,
+for an `.msi`, the `.cab` files beside it. Give an installer that needs other
+files beside it a folder of its own. Files installed into the Windows C: drive
+and changes to the game folder stay in the sandbox. Additional installers run through **Programs →
+Run installer** while the sandbox is stopped. Wine configuration and the
+registry editor are available there too.
+
+**Settings** uses the same preferences as the Nautilus scripts, including
+runner, display, network access, mod loaders and environment variables. The
+environment variables shown are those saved for the selected **Save for**
+choice; a game's own list replaces the defaults' list. Save changes before
+launching; changes apply on the next launch. **Logs** shows
+the latest launch output, with an option to open the full log file.
+
+**Delete sandbox** removes its captured files, saves and Windows prefix after
+confirmation. An existing game folder outside the sandbox is kept. A Windows
+game installed into the sandbox is deleted with it.
 
 ## Dependencies
 
@@ -102,6 +154,7 @@ names below are the common ones. Where a name differs sharply it is called out.
 | `bwrap` ≥ 0.8 | `bubblewrap` | the sandbox itself; 0.8 added `--disable-userns` |
 | `bash` ≥ 4.0 | `bash` | `mapfile`, associative arrays, `${var,,}` |
 | `python3` | `python3` | `sandbox-seccomp` compiles the filter with it |
+| `flock` | `util-linux` | prevents concurrent launches from writing to the same prefix and overlay |
 | `libseccomp.so.2` | `libseccomp2` / `libseccomp` | the filter compiler, loaded through ctypes; every systemd install has it, and the Python bindings are *not* needed |
 | `awk`, `sed`, `find`, `sort`, `realpath` | `gawk`, `sed`, `findutils`, `coreutils` | standard, present everywhere |
 
@@ -115,12 +168,12 @@ unprivileged user namespaces cover what setuid was for. If yours disables them
 (`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on Ubuntu
 24.04+), nothing here will run until that is lifted.
 
-### Required for the Nautilus scripts
+### Required for the desktop app and Nautilus scripts
 
 | Binary | Usual package | Why |
 |---|---|---|
 | `nautilus` | `nautilus` | the scripts are Nautilus scripts |
-| GTK 4, libadwaita and Python PyGObject | see below | preferences, launcher picker, error windows and confirmations |
+| GTK 4, libadwaita and Python PyGObject | see below | desktop manager, preferences, launcher picker, error windows and confirmations; the manager needs libadwaita ≥ 1.5 |
 | `notify-send` | `libnotify` / `libnotify-bin` / `libnotify-tools` | launch and warning notifications; fallback for error messages |
 
 The dialogs use GTK 4 and libadwaita through the system Python bindings.
@@ -216,7 +269,8 @@ Any Proton install, meaning any directory holding an executable `proton`
 script — that test also rejects the plain Wine builds people drop into
 `compatibilitytools.d`. Searched under Steam's `compatibilitytools.d` and
 `steamapps/common`, native and Flatpak, plus
-`/usr/share/steam/compatibilitytools.d`; newest wins, ranked by the timestamp in
+`/usr/share/steam/compatibilitytools.d`, and native and Flatpak Bottles runner
+folders; newest wins, ranked by the timestamp in
 each `version` file. `--proton=VER` matches by name substring or takes a path,
 and `PROTON_DIR=/path` overrides the search entirely. `sandbox-game
 --list-proton` prints what it found.
@@ -399,7 +453,7 @@ level first, then deeper — past a top level with nothing but junk
 (installers, uninstallers, crash handlers, redistributables) in it — and
 several candidates get a picker, with the junk filtered out.
 
-Full output goes to `~/game-sandboxes/<game>-lastrun.log`, and a failure opens
+Full output goes to `~/game-sandboxes/<name>-lastrun.log`, and a failure opens
 the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
@@ -648,6 +702,10 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── hosts       --hosts-writable: the game's /etc/hosts
 └── playtime    one line per launch: when it started, seconds played
 ```
+
+Beside each folder, `<name>-lastrun.log` holds the last launch's output and
+`<name>.run-lock` lets only one launch, `--delete` or `--reset-install` use the
+sandbox at a time. Both stay when the sandbox is deleted.
 
 ### Managing sandboxes
 

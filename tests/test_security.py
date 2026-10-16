@@ -218,6 +218,119 @@ class SecurityTests(unittest.TestCase):
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
 
+    def test_manager_install_then_launch_keeps_one_prefix(self):
+        import runpy
+        Library = runpy.run_path(str(ROOT / "sandbox-manager-lib.py"))["Library"]
+        library = Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
+                          config=self.home / ".config/sandbox-game")
+        proton = self.base / "test-proton"
+        proton.mkdir()
+        (proton / "proton").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        (proton / "proton").chmod(0o755)
+        installer = self.game / "setup.exe"
+        installer.write_text('''#!/bin/sh
+set -e
+test "$STEAM_COMPAT_DATA_PATH" = /compat
+test ! -e /proc/self/fd/18
+mkdir -p /compat/pfx/drive_c/Test
+printf '#!/bin/sh\nprintf played > /compat/pfx/drive_c/Test/played\n' > /compat/pfx/drive_c/Test/play.exe
+chmod +x /compat/pfx/drive_c/Test/play.exe
+''')
+        installer.chmod(0o755)
+        entry = library.create("Installed game", str(proton))
+        def run(**kwargs):
+            command, _ = library.command(entry, **kwargs)
+            self.cli("--headless", *[word for word in command[1:] if not word.startswith("--gamescope")])
+        run(installer=installer)
+        entry["program"] = library.programs(entry)[0][0]
+        run()
+        self.assertEqual((library.capture(entry["name"]) / "compat/pfx/drive_c/Test/played").read_text(), "played")
+        self.assertEqual(json.loads((library.capture(entry["name"]) / "source.json").read_text())["directory"],
+                         entry["directory"])
+
+    def test_same_sandbox_cannot_be_launched_concurrently(self):
+        import fcntl
+        process = subprocess.Popen([str(ROOT / "sandbox-game"), "--headless", "--name", "exclusive",
+                                    str(self.game), "/bin/sleep", "30"], env=self.env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def stop_process():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=8)
+        self.addCleanup(stop_process)
+        lock = self.home / "game-sandboxes/exclusive.run-lock"
+        deadline = time.monotonic() + 8
+        locked = False
+        while time.monotonic() < deadline:
+            try:
+                with lock.open("a") as stream:
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        locked = True
+                        break
+            except FileNotFoundError:
+                pass
+            time.sleep(0.05)
+        self.assertTrue(locked, "first launch never acquired the sandbox lock")
+        result = self.cli("--headless", "--name", "exclusive", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already running", result.stderr)
+        deleting = self.cli("--delete", "exclusive", check=False)
+        self.assertNotEqual(deleting.returncode, 0)
+        self.assertIn("running", deleting.stderr)
+        while time.monotonic() < deadline:
+            running = subprocess.run([str(ROOT / "sandbox-attach"), "--list"], env=self.env,
+                                     capture_output=True, text=True, check=True)
+            if "exclusive" in running.stdout:
+                break
+            time.sleep(0.05)
+        self.cli("--stop", "exclusive")
+        process.wait(timeout=8)
+
+    def test_launch_refused_by_the_lock_creates_nothing(self):
+        import fcntl
+        sandboxes = self.home / "game-sandboxes"
+        sandboxes.mkdir()
+        # As --delete holds it while removing the capture folder.
+        with (sandboxes / "held.run-lock").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            result = self.cli("--headless", "--name", "held", self.game, "/bin/true", check=False)
+        self.assertIn("already running", result.stderr)
+        self.assertFalse((sandboxes / "held").exists())
+
+    def test_only_the_launcher_holds_the_sandbox_lock(self):
+        # fuse-overlayfs daemonizes, so it must not take the lock along.
+        self.use_fuse_overlay()
+        import time
+        merged = self.home / "game-sandboxes/held/merged"
+        # Last, after a failed test killed the launcher before its cleanup.
+        self.addCleanup(lambda: os.path.ismount(merged) and subprocess.run(["fusermount3", "-u", str(merged)]))
+        process = subprocess.Popen([str(ROOT / "sandbox-game"), "--headless", "--name", "held",
+                                    str(self.game), "/bin/sleep", "30"], env=self.env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        lock = str(self.home / "game-sandboxes/held.run-lock")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            running = subprocess.run([str(ROOT / "sandbox-attach"), "--list"], env=self.env,
+                                     capture_output=True, text=True, check=True)
+            if "held" in running.stdout:
+                break
+            time.sleep(0.05)
+        self.assertTrue(os.path.ismount(merged), "fuse-overlayfs never mounted the game")
+        holders = set()
+        for fd in Path("/proc").glob("[0-9]*/fd/*"):
+            try:
+                if os.readlink(fd) == lock:
+                    holders.add(int(fd.parts[2]))
+            except OSError:
+                pass
+        self.assertEqual(holders, {process.pid})
+        self.cli("--stop", "held")
+        process.wait(timeout=10)
+
     def test_name_derives_from_folder_and_rejects_traversal(self):
         alias = self.base / "alias"
         alias.symlink_to(self.game)
@@ -1447,7 +1560,7 @@ class SecurityTests(unittest.TestCase):
         result = self.cli("--check", check=False)
         lines = result.stdout.splitlines()
         marks = {line.split()[1]: line.split()[0] for line in lines}
-        self.assertEqual(list(marks), ["sandbox", "seccomp", "landlock", "limits", "sound",
+        self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
                                        "gpu", "gamescope", "network", "ntsync"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:

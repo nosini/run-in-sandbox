@@ -162,6 +162,8 @@ proton_roots() {
         "$HOME/.local/share/Steam/steamapps/common" \
         "$HOME/.steam/root/steamapps/common" \
         "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common" \
+        "$HOME/.local/share/bottles/runners" \
+        "$HOME/.var/app/com.usebottles.bottles/data/bottles/runners" \
         /usr/share/steam/compatibilitytools.d
 }
 
@@ -251,6 +253,11 @@ stopped_sandbox() {
         echo "no sandbox named '$1' (see sandbox-game --list)" >&2; return 1; }
     [ -z "$(outer_bwraps "$1")" ] || {
         echo "'$1' is running; stop it first: sandbox-game --stop $1" >&2; return 1; }
+    # Also covers startup, before the outer bwrap has appeared, and holds
+    # launches off for the whole delete/reset operation.
+    exec 18>"$SANDBOXES/$1.run-lock"
+    flock -n 18 || {
+        echo "'$1' is running or being changed; stop it first" >&2; return 1; }
 }
 
 # Asked only in a terminal, so scripts can still use these.
@@ -401,6 +408,12 @@ check_host() {
     local here rt out abi failed=0 nodes=()
     rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     _check_line() { printf '  %s  %-12s %s\n' "$1" "$2" "$3"; [ "$1" != '!!' ] || failed=1; }
+
+    if command -v flock >/dev/null; then
+        _check_line ok flock "one writer per sandbox"
+    else
+        _check_line '!!' flock "not installed: launches need it (package util-linux)"
+    fi
 
     if ! command -v bwrap >/dev/null; then
         _check_line '!!' sandbox "bwrap is not installed"
@@ -730,7 +743,26 @@ for fd in /proc/self/fd/*; do
 done
 
 CAP="$HOME/game-sandboxes/$NAME"
+# One prefix/overlay may only have one owner, including during startup before
+# bwrap exists. The lock sits beside the capture rather than in it, so a
+# --delete removing the folder keeps the lock everyone else is waiting on,
+# and nothing in the capture is created before it is held. Everything
+# long-lived that is started from here (bwrap, fuse-overlayfs, pasta) closes
+# the host-only lock descriptor, so the lock ends with this script.
+mkdir -p "$HOME/game-sandboxes"
+exec 18>"$CAP.run-lock"
+flock -n 18 || { echo "'$NAME' is already running" >&2; exit 1; }
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
+python3 - "$CAP/source.json" "$GAMEDIR" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path = Path(sys.argv[1])
+with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".source-", delete=False) as stream:
+    temporary = stream.name
+    json.dump({"directory": sys.argv[2]}, stream)
+    stream.write("\n")
+os.replace(temporary, path)
+PY
 rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
 
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -1364,7 +1396,7 @@ fuse_overlay() {                     # lower, upper, work, mountpoint
     # cannot add options or expose an unintended host directory. These fds
     # belong only to this command; bwrap and the game never inherit them.
     fuse-overlayfs -o lowerdir=/proc/self/fd/14,upperdir=/proc/self/fd/15,workdir=/proc/self/fd/16 \
-        "$4" 14<"$1" 15<"$2" 16<"$3"
+        "$4" 14<"$1" 15<"$2" 16<"$3" 18>&-
 }
 if [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
@@ -1776,7 +1808,7 @@ fi
 # already means killing it takes the sandbox with it.
 PLAY_START="$(date +%s)"
 if [ "$NET" = 0 ]; then
-    "${BWRAP[@]}" "$@" && rc=0 || rc=$?
+    "${BWRAP[@]}" "$@" 18>&- && rc=0 || rc=$?
 else
     # FIFOs, opened in the same order on both ends: bwrap's info pipe first,
     # then its go pipe. A byte down the go pipe lets the game start; bwrap
@@ -1785,14 +1817,14 @@ else
     # --die-with-parent after that read, so killing the outer bwrap alone
     # would leave it to wake up and start the game without its network.
     FIFOS="$(mktemp -d)"; mkfifo "$FIFOS/info" "$FIFOS/go"
-    "${BWRAP[@]}" "$@" 10>"$FIFOS/info" 11<"$FIFOS/go" &
+    "${BWRAP[@]}" "$@" 18>&- 10>"$FIFOS/info" 11<"$FIFOS/go" &
     BW=$!
     exec 12<"$FIFOS/info" 13>"$FIFOS/go"
     rm -rf "$FIFOS"
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
     if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
-                                    "$LAN_ALL" "$LAN_RULES"; then
+                                    "$LAN_ALL" "$LAN_RULES" 18>&-; then
         printf x >&13
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
