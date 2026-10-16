@@ -64,6 +64,111 @@ class LibraryTests(unittest.TestCase):
         core.atomic_write(capture / "source.json", json.dumps({"directory": "/games/old"}))
         self.assertEqual(self.library.entries()[0]["selection"], "/games/old")
 
+    def test_installation_filters_use_location_instead_of_runtime(self):
+        internal = self.library.create("Internal game")
+        external = {**internal, "name": "external", "title": "External game",
+                    "directory": str(self.home / "games"), "kind": "existing"}
+        self.assertTrue(self.library.matches(internal, "GAME", "sandbox"))
+        self.assertFalse(self.library.matches(internal, "", "external"))
+        self.assertTrue(self.library.matches(external, "external", "external"))
+        self.assertFalse(self.library.matches(external, "internal", "all"))
+        self.assertEqual(self.library.installation({**internal, "kind": "existing"}), "sandbox")
+        unknown = {**external, "directory": ""}
+        self.assertTrue(self.library.matches(unknown))
+        self.assertFalse(self.library.matches(unknown, "", "external"))
+        # A location found beforehand is used as it is.
+        self.assertTrue(self.library.matches(external, "", "sandbox", "sandbox"))
+
+    def test_icon_discovery_does_not_follow_links_to_host_files(self):
+        entry = self.library.create("game")
+        original = self.home / "private.ico"
+        original.write_bytes(b"private")
+        (Path(entry["directory"]) / "icon.ico").symlink_to(original)
+        self.assertEqual(self.library.icon_sources(entry), [])
+
+    def icon_library(self):
+        """A library whose icon helper never runs: subprocess.run is patched in each test."""
+        helpers = self.home / "helpers"
+        helpers.mkdir()
+        (helpers / "sandbox-game-icon").write_text("")
+        library = core.Library(ROOT / "sandbox-game", helpers, ROOT / "Sandbox game",
+                               home=self.home, config=self.home / "config")
+        entry = library.create("game")
+        for name in ("a.exe", "b.exe"):
+            (Path(entry["directory"]) / name).write_bytes(b"MZ")
+        return library, entry
+
+    @staticmethod
+    def finished(code, output=b""):
+        return subprocess.CompletedProcess([], code, output, b"")
+
+    def test_icon_failures_of_the_environment_are_not_remembered(self):
+        library, entry = self.icon_library()
+        metadata = library.capture(entry["name"]) / "icon.json"
+        for failure in (OSError("no bwrap"), self.finished(1), self.finished(-11)):
+            with self.subTest(failure=failure), patch("subprocess.run", side_effect=[failure]) as run:
+                self.assertIsNone(library.icon(entry))
+                self.assertEqual(run.call_count, 1)
+                self.assertFalse(metadata.exists())
+        # Every file answered: that is remembered, and nothing runs again.
+        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)) as run:
+            self.assertIsNone(library.icon(entry))
+            self.assertEqual(run.call_count, 2)
+        self.assertFalse(json.loads(metadata.read_text())["found"])
+        with patch("subprocess.run") as run:
+            self.assertIsNone(library.icon(entry))
+            run.assert_not_called()
+
+    def test_a_slow_file_does_not_stop_the_others_or_get_remembered(self):
+        library, entry = self.icon_library()
+        slow = subprocess.TimeoutExpired("bwrap", 5)
+        with patch("subprocess.run", side_effect=[slow, self.finished(library.NO_ICON)]) as run:
+            self.assertIsNone(library.icon(entry))
+            self.assertEqual(run.call_count, 2)
+        self.assertFalse((library.capture(entry["name"]) / "icon.json").exists())
+        with patch("subprocess.run", side_effect=[slow, self.finished(0, b"png")]):
+            path = library.icon(entry)
+        self.assertEqual(path.read_bytes(), b"png")
+
+    def test_deleted_and_outdated_icon_images_are_made_again(self):
+        library, entry = self.icon_library()
+        with patch("subprocess.run", return_value=self.finished(0, b"first")):
+            first = library.icon(entry)
+        first.unlink()
+        with patch("subprocess.run", return_value=self.finished(0, b"again")) as run:
+            self.assertEqual(library.icon(entry).read_bytes(), b"again")
+            run.assert_called_once()
+        os.utime(Path(entry["directory"]) / "a.exe", ns=(1, 1))
+        with patch("subprocess.run", return_value=self.finished(0, b"changed")):
+            second = library.icon(entry)
+        self.assertNotEqual(second, first)
+        self.assertEqual(sorted(path.name for path in second.parent.iterdir()), [second.name])
+
+    def test_icon_decoder_reads_the_checked_file_not_its_path(self):
+        library, entry = self.icon_library()
+        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)) as run:
+            library.icon(entry)
+        for call in run.call_args_list:
+            self.assertIsInstance(call.kwargs["stdin"], int)
+            self.assertFalse([word for word in call.args[0] if word.endswith(".exe")])
+        # A folder swapped for a link after listing: the opened file is outside.
+        game = Path(entry["directory"])
+        sub = game / "sub"
+        sub.mkdir()
+        (sub / "icon.png").write_bytes(b"png")
+        listed = sub / "icon.png"
+        outside = self.home / "private"
+        outside.mkdir()
+        (outside / "icon.png").write_bytes(b"private")
+        shutil.rmtree(sub)
+        sub.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            library.open_icon_file(listed, [game])
+        (game / "link.png").symlink_to(game / "a.exe")
+        with self.assertRaises(OSError):
+            library.open_icon_file(game / "link.png", [game])
+        os.close(library.open_icon_file(game / "a.exe", [game]))
+
     def test_import_uses_canonical_detection_and_explicit_name_for_old_captures(self):
         game = self.home / "games" / "Native Game"
         game.mkdir(parents=True)

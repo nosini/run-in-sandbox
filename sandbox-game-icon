@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Extract a local PNG/ICO or PE icon as a small PNG; invoked inside bwrap.
+
+Reads the file from standard input, an already opened descriptor, or from the
+path given. Exits 3 when the file has no icon this can decode, and with any
+other failure status when the sandbox or GdkPixbuf itself is unusable.
+"""
+import os
+import resource
+import struct
+import sys
+
+MAX_BYTES = 16 * 1024 * 1024
+MAX_SIZE = 4096
+NO_ICON = 3
+
+
+class NoIcon(Exception):
+    """This file has no icon that can be decoded."""
+
+
+class Reader:
+    def __init__(self, stream):
+        self.stream = stream
+        self.size = os.fstat(stream.fileno()).st_size
+        self.remaining = MAX_BYTES
+
+    def read(self, offset, size):
+        if offset < 0 or size < 0 or offset + size > self.size or size > self.remaining:
+            raise ValueError("Invalid icon data range")
+        self.remaining -= size
+        self.stream.seek(offset)
+        data = self.stream.read(size)
+        if len(data) != size:
+            raise ValueError("Truncated icon")
+        return data
+
+
+def single_ico(entry, payload):
+    """One ICO image: the directory entry's first 12 bytes, then its length and offset."""
+    return struct.pack("<HHH", 0, 1, 1) + entry[:8] + struct.pack("<II", len(payload), 22) + payload
+
+
+def dimensions(kind, data):
+    """Declared image size, read before decoding so oversized images are never allocated."""
+    if kind == "ico":
+        data = data[22:]
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        if data[12:16] != b"IHDR":
+            raise ValueError("Invalid PNG")
+        return struct.unpack_from(">II", data, 16)
+    if kind == "ico" and len(data) >= 12:
+        width, height = struct.unpack_from("<ii", data, 4)  # BITMAPINFOHEADER, two masks high
+        return abs(width), abs(height) // 2
+    raise ValueError("Unknown image format")
+
+
+def ico_icons(reader):
+    """A .ico file's images as single-image ICOs, largest first."""
+    reserved, kind, count = struct.unpack("<HHH", reader.read(0, 6))
+    if reserved != 0 or kind != 1 or not 0 < count <= 64:
+        raise ValueError("Invalid ICO header")
+    table = reader.read(6, count * 16)
+    entries = [table[i * 16:(i + 1) * 16] for i in range(count)]
+    entries.sort(key=lambda entry: (entry[0] or 256) * (entry[1] or 256), reverse=True)
+    for entry in entries:
+        size, offset = struct.unpack_from("<II", entry, 8)
+        try:
+            yield single_ico(entry, reader.read(offset, size))
+        except ValueError:
+            continue
+
+
+def pe_icons(reader):
+    """A PE file's group icon images as single-image ICOs, largest first."""
+    offset, = struct.unpack("<I", reader.read(0x3C, 4))
+    header = reader.read(offset, 24)
+    if header[:4] != b"PE\0\0":
+        raise ValueError("Not a PE image")
+    sections, = struct.unpack_from("<H", header, 6)
+    optional_size, = struct.unpack_from("<H", header, 20)
+    if not 0 < sections <= 96 or not 0 < optional_size <= 4096:
+        raise ValueError("Invalid PE headers")
+    optional = reader.read(offset + 24, optional_size)
+    magic, = struct.unpack_from("<H", optional)
+    if magic not in (0x10B, 0x20B):
+        raise ValueError("Unknown PE format")
+    directories = 96 if magic == 0x10B else 112
+    rva, resource_size = struct.unpack_from("<II", optional, directories + 16)
+    table = reader.read(offset + 24 + optional_size, sections * 40)
+    mappings = []
+    for index in range(sections):
+        _, address, size, raw = struct.unpack_from("<IIII", table, index * 40 + 8)
+        mappings.append((address, size, raw))
+
+    def address(rva, count):
+        for start, size, raw in mappings:
+            if start <= rva and rva + count <= start + size:
+                return raw + rva - start
+        raise ValueError("Unmapped PE resource")
+
+    address(rva, min(16, resource_size))
+
+    def data(relative, count):
+        if relative < 0 or relative + count > resource_size:
+            raise ValueError("Resource outside its directory")
+        return reader.read(address(rva + relative, count), count)
+
+    def directory(relative):
+        header = data(relative, 16)
+        named, ids = struct.unpack_from("<HH", header, 12)
+        count = named + ids
+        if count > 512:
+            raise ValueError("Too many resource entries")
+        entries = data(relative + 16, count * 8)
+        return [struct.unpack_from("<II", entries, i * 8) for i in range(count)]
+
+    def child(relative, identifier):
+        for name, target in directory(relative):
+            if name == identifier and target & 0x80000000:
+                return target & 0x7FFFFFFF
+        raise ValueError("Icon resource not found")
+
+    def leaf(relative):
+        for _, target in directory(relative):  # language variants
+            if not target & 0x80000000:
+                payload_rva, size = struct.unpack_from("<II", data(target, 16))
+                return reader.read(address(payload_rva, size), size)
+        raise ValueError("Missing icon language")
+
+    groups = child(0, 14)  # RT_GROUP_ICON
+    icons = child(0, 3)    # RT_ICON
+    for _, target in directory(groups):
+        if not target & 0x80000000:
+            continue
+        group = leaf(target & 0x7FFFFFFF)
+        reserved, kind, count = struct.unpack_from("<HHH", group)
+        if reserved != 0 or kind != 1 or not 0 < count <= 64 or len(group) < 6 + count * 14:
+            continue
+        frames = []
+        for index in range(count):
+            entry = group[6 + index * 14:20 + index * 14]
+            width, height = entry[0] or 256, entry[1] or 256
+            frames.append((width * height, entry))
+        for _, entry in sorted(frames, key=lambda item: item[0], reverse=True):
+            identifier, = struct.unpack_from("<H", entry, 12)
+            try:
+                # The group's entry ends in a resource identifier instead of
+                # the file offset an ICO has.
+                yield single_ico(entry, leaf(child(icons, identifier)))
+            except ValueError:
+                continue
+
+
+def extract(stream):
+    """The file's kind and its candidate images, best first, read as they are needed."""
+    reader = Reader(stream)
+    magic = reader.read(0, min(8, reader.size))
+    if magic.startswith(b"MZ"):
+        return "ico", pe_icons(reader)
+    if magic.startswith(b"\0\0\1\0"):
+        return "ico", ico_icons(reader)
+    if magic == b"\x89PNG\r\n\x1a\n":
+        return "png", iter([reader.read(0, reader.size)])
+    raise ValueError("No supported icon")
+
+
+def decode(GdkPixbuf, kind, data):
+    width, height = dimensions(kind, data)
+    if not 0 < width <= MAX_SIZE or not 0 < height <= MAX_SIZE:
+        raise ValueError("Invalid icon dimensions")
+    loader = GdkPixbuf.PixbufLoader.new_with_type(kind)
+    declared = []
+    def prepared(loader, width, height):
+        # An exception here would be printed and ignored, so only record it.
+        declared.append((width, height))
+        if 0 < width <= MAX_SIZE and 0 < height <= MAX_SIZE:
+            scale = min(1.0, 128 / max(width, height))
+            loader.set_size(max(1, int(width * scale)), max(1, int(height * scale)))
+    loader.connect("size-prepared", prepared)
+    try:
+        loader.write(data)
+    finally:
+        loader.close()
+    pixels = loader.get_pixbuf()
+    if not declared or any(not 0 < w <= MAX_SIZE or not 0 < h <= MAX_SIZE for w, h in declared) \
+            or pixels is None or pixels.get_width() > 128 or pixels.get_height() > 128:
+        raise ValueError("Cannot decode icon")
+    success, output = pixels.save_to_bufferv("png", [], [])
+    if not success or len(output) > 1024 * 1024:
+        raise ValueError("Cannot encode icon")
+    return output
+
+
+def main():
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024,) * 2)
+    resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    # A missing or broken GdkPixbuf says nothing about the file: not NO_ICON.
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GLib, GdkPixbuf
+    path = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "-" else 0
+    try:
+        with open(path, "rb", closefd=path != 0) as stream:
+            kind, images = extract(stream)
+            for data in images:
+                try:
+                    output = decode(GdkPixbuf, kind, data)
+                    break
+                except (GLib.Error, ValueError, struct.error):
+                    continue   # a smaller image may still decode
+            else:
+                raise NoIcon("No icon could be decoded")
+    except (NoIcon, ValueError, struct.error, MemoryError) as error:
+        print(f"sandbox-game-icon: {error}", file=sys.stderr)
+        sys.exit(NO_ICON)
+    sys.stdout.buffer.write(output)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(f"sandbox-game-icon: {error}", file=sys.stderr)
+        sys.exit(1)

@@ -118,6 +118,10 @@ def main():
             self.library = core.Library(backend, HELPERS, launcher)
             self.appearance = dialogs.Appearance(Adw)
             self.entries, self.rows, self.running, self.processes = [], {}, set(), {}
+            # One extraction at a time, newest request per game: a cold cache
+            # must not start a sandbox per game at once.
+            self.icon_requests, self.icon_paths = {}, {}
+            self.icon_wakeup = threading.Condition()
             # Scans cost a process or a walk of the whole prefix: keep their answers
             # until the library is refreshed, or an installer may have changed them.
             self.proton_list, self.descriptions, self.program_lists = None, {}, {}
@@ -155,9 +159,17 @@ def main():
             self.search.set_margin_end(12)
             self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
             left.append(self.search)
+            self.location_filter = Gtk.DropDown.new_from_strings(
+                ["All games", "Installed in sandbox", "External game folder"])
+            self.location_filter.set_tooltip_text("Filter by installation location")
+            self.location_filter.set_margin_start(12)
+            self.location_filter.set_margin_end(12)
+            self.location_filter.connect("notify::selected", lambda *_: self.listbox.invalidate_filter())
+            left.append(self.location_filter)
             self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
             self.listbox.add_css_class("navigation-sidebar")
-            self.listbox.set_filter_func(lambda row: self.search.get_text().casefold() in row.entry["title"].casefold())
+            self.listbox.set_filter_func(lambda row: self.library.matches(row.entry, self.search.get_text(),
+                ["all", "sandbox", "external"][self.location_filter.get_selected()], row.location))
             self.listbox.connect("row-selected", self.select_row)
             scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
             scroll.set_child(self.listbox)
@@ -189,7 +201,8 @@ def main():
             self.detail.set_margin_top(12)
             self.detail.set_margin_bottom(18)
             hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-            hero.append(Gtk.Image(icon_name="applications-games-symbolic", pixel_size=48))
+            self.game_icon = Gtk.Image(icon_name="applications-games-symbolic", pixel_size=48)
+            hero.append(self.game_icon)
             labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True)
             self.title = Gtk.Label(xalign=0, ellipsize=3)
             self.title.add_css_class("title-1")
@@ -228,6 +241,7 @@ def main():
             content.set_content(self.content)
             self.split.set_content(Adw.NavigationPage.new(content, "Sandbox Manager"))
             self.closed = False
+            threading.Thread(target=self.icon_worker, daemon=True).start()
             for name, callback in (("add", lambda *_: self.add_game()),
                                     ("refresh", lambda *_: self.reload(rescan=True)),
                                     ("check", lambda *_: self.check_system()),
@@ -243,6 +257,8 @@ def main():
 
         def close(self, *_):
             self.closed = True
+            with self.icon_wakeup:
+                self.icon_wakeup.notify()
             self.appearance.preview(self.appearance.saved_theme)
             return False
 
@@ -307,19 +323,28 @@ def main():
             if rescan:
                 with self.proton_lock:
                     self.proton_list = None
-            def loaded(entries, error):
+            def refresh():
+                # Where each game lives, found here once rather than on every keystroke.
+                entries = self.library.entries()
+                return [(entry, self.library.installation(entry)) for entry in entries]
+            def loaded(located, error):
                 if error:
                     return
+                entries = [entry for entry, _ in located]
                 self.entries = entries
                 self.clear(self.listbox)
                 self.rows = {}
-                for entry in entries:
+                for entry, location in located:
                     row = Gtk.ListBoxRow()
                     row.entry = entry
+                    row.location = location
                     box = Gtk.Box(spacing=10)
                     for side in ("top", "bottom", "start", "end"):
                         getattr(box, "set_margin_" + side)(10)
-                    box.append(Gtk.Image(icon_name="applications-games-symbolic"))
+                    row.icon = Gtk.Image(icon_name="applications-games-symbolic", pixel_size=32)
+                    if self.icon_paths.get(entry["name"]):
+                        row.icon.set_from_file(str(self.icon_paths[entry["name"]]))
+                    box.append(row.icon)
                     text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
                     title = Gtk.Label(label=entry["title"], xalign=0, ellipsize=3)
                     row.state = Gtk.Label(label="Ready", xalign=0)
@@ -330,6 +355,7 @@ def main():
                     row.set_child(box)
                     self.listbox.append(row)
                     self.rows[entry["name"]] = row
+                    self.load_icon(entry)
                 self.count.set_label(f"{len(entries)} sandbox{'es' if len(entries) != 1 else ''}")
                 self.selected = None
                 if entries:
@@ -338,7 +364,7 @@ def main():
                     self.content.set_visible_child_name("empty")
                     self.window_title.set_title("Sandbox Manager")
                 self.poll(True)
-            self.work(self.library.entries, loaded)
+            self.work(refresh, loaded)
 
         def select_row(self, _, row):
             if row is None:
@@ -348,6 +374,8 @@ def main():
             entry = self.selected
             self.content.set_visible_child_name("detail")
             self.title.set_label(entry["title"])
+            # Requested for every row as the library loads; show what it found.
+            self.show_icon(self.game_icon, self.icon_paths.get(entry["name"]))
             self.window_title.set_title(entry["title"])
             self.window_title.set_subtitle("Windows sandbox" if entry["kind"] == "windows" else "Game sandbox")
             self.build_overview(entry)
@@ -356,6 +384,45 @@ def main():
             self.update_log()
             self.update_state()
             self.split.set_show_content(True)
+
+        def load_icon(self, entry):
+            with self.icon_wakeup:
+                self.icon_requests[entry["name"]] = dict(entry)
+                self.icon_wakeup.notify()
+
+        def icon_worker(self):
+            while True:
+                with self.icon_wakeup:
+                    while not self.icon_requests and not self.closed:
+                        self.icon_wakeup.wait()
+                    if self.closed:
+                        return
+                    name = next(iter(self.icon_requests))
+                    entry = self.icon_requests.pop(name)
+                try:
+                    path = self.library.icon(entry)
+                except Exception:
+                    continue  # keep whichever icon is shown
+                GLib.idle_add(self.icon_loaded, name, path)
+
+        def icon_loaded(self, name, path):
+            with self.icon_wakeup:
+                if self.closed or name in self.icon_requests:
+                    return False  # a newer request for this game is still to come
+            self.icon_paths[name] = path
+            row = self.rows.get(name)
+            if row:
+                self.show_icon(row.icon, path)
+            if self.selected and self.selected["name"] == name:
+                self.show_icon(self.game_icon, path)
+            return False
+
+        @staticmethod
+        def show_icon(image, path):
+            if path:
+                image.set_from_file(str(path))
+            else:
+                image.set_from_icon_name("applications-games-symbolic")
 
         def build_overview(self, entry):
             self.clear(self.overview)
@@ -391,6 +458,11 @@ def main():
             self.button(files, "Locate game", lambda *_: self.locate(entry))
             self.overview.append(files)
             self.label(self.overview, str(self.library.capture(entry["name"])), "dim-label")
+            row = self.rows.get(entry["name"])
+            location = row.location if row and row.entry is entry else self.library.installation(entry)
+            self.label(self.overview, {"sandbox": "Installation: inside this sandbox",
+                "external": "Installation: external game folder", "unknown": "Installation location unknown"}[location],
+                "dim-label")
             self.size_label = self.label(self.overview, "")
             self.button(self.overview, "Calculate storage used", lambda *_: self.storage(entry))
             self.label(self.overview, "Maintenance", "title-3")
@@ -449,6 +521,7 @@ def main():
                     def choose(*_, program=target):
                         entry["program"] = program
                         self.library.save_entry(entry)
+                        self.load_icon(entry)
                         self.build_overview(entry)
                         self.scan_programs(entry)
                         self.update_state()

@@ -75,7 +75,7 @@ What goes where:
 |---|---|
 | `sandbox-manager`, `sandbox-game`, `sandbox-attach` | `~/.local/bin/` |
 | `sandbox-seccomp`, `sandbox-landlock`, `sandbox-game-lib` and `nwjs-casefold.js` (mode 644) | `~/.local/lib/sandbox-game/` |
-| `sandbox-game-dialog` | `~/.local/lib/sandbox-game/` |
+| `sandbox-game-dialog`, `sandbox-game-icon` | `~/.local/lib/sandbox-game/` |
 | `sandbox-manager-lib.py` | `~/.local/lib/sandbox-game/` |
 | `eu.nosini.SandboxManager.desktop` | `~/.local/share/applications/` |
 | `Sandbox game`, `Sandbox game preferences`, `Stop sandboxed game` | `~/.local/share/nautilus/scripts/` |
@@ -99,6 +99,16 @@ You can also right-click a game folder in Nautilus → **Scripts** → **Sandbox
 The manager lists your sandboxes in a searchable sidebar. Select a game to
 launch or stop it, view its log and playtime, open its files, or change its
 settings. Closing the manager leaves running games open.
+
+The filter below search switches between **All games**, **Installed in sandbox**,
+and **External game folder**. The location of the game's files determines the
+category, independently of which runtime it uses. Older entries with an unknown
+location remain visible under **All games** until you locate their folder.
+
+Game icons are picked up from the selected executable's embedded icon or nearby
+PNG/ICO files. Extraction and image decoding run in a separate bwrap sandbox,
+and the manager caches a small PNG. No icon searches or downloads are made.
+If no suitable icon is found, the library uses its default game icon.
 
 To give a game a readable title, edit **Overview → Display name** and choose
 **Save game details**. This updates its name in the library and window while

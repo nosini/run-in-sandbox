@@ -30,6 +30,8 @@ steps = [0]
 failure = []
 calls = []
 proton_scans = []
+icon_calls = []
+active_icons = [0]
 
 def children(widget):
     yield widget
@@ -52,6 +54,15 @@ def tick():
             assert manager.content.get_visible_child_name() == "empty"
             protons = manager.library.protons
             manager.library.protons = lambda: proton_scans.append(1) or protons()
+            icon = manager.library.icon
+            def counted_icon(entry):
+                active_icons[0] += 1
+                icon_calls.append((entry["name"], active_icons[0]))
+                try:
+                    return icon(entry)
+                finally:
+                    active_icons[0] -= 1
+            manager.library.icon = counted_icon
             manager.add_game()
             dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title() == "Add game")
             name = next(w for w in children(dialog) if isinstance(w, Gtk.Entry) and
@@ -64,6 +75,13 @@ def tick():
             entry = manager.selected
             assert entry["title"] == "GUI Test Game"
             assert manager.content.get_visible_child_name() == "detail"
+            manager.location_filter.set_selected(2)
+            manager.listbox.invalidate_filter()
+            assert not manager.rows[entry["name"]].get_child_visible()
+            manager.location_filter.set_selected(1)
+            manager.listbox.invalidate_filter()
+            assert manager.rows[entry["name"]].get_child_visible()
+            manager.location_filter.set_selected(0)
             assert not manager.play.get_sensitive()
             assert len(proton_scans) == 1, proton_scans
             preferences = manager.preferences
@@ -92,6 +110,21 @@ def tick():
                 return True
             choices[0].emit("clicked")
             assert manager.selected["program"] == "/compat/pfx/drive_c/Example/play.exe"
+            # Icons are extracted one at a time, and selecting a game asks for none.
+            assert icon_calls and max(depth for _, depth in icon_calls) == 1, icon_calls
+            name = manager.selected["name"]
+            import struct, zlib
+            def chunk(kind, data):
+                return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+            png = Path.home() / "icon.png"
+            png.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+                            + chunk(b"IDAT", zlib.compress(b"\0\xff\0\0\xff")) + chunk(b"IEND", b""))
+            manager.icon_loaded(name, png)
+            assert manager.rows[name].icon.get_storage_type() != Gtk.ImageType.ICON_NAME
+            # A program without an icon brings the generic one back.
+            manager.icon_loaded(name, None)
+            for image in (manager.rows[name].icon, manager.game_icon):
+                assert image.get_icon_name() == "applications-games-symbolic"
             assert manager.play.get_sensitive()
             def start(entry, **kwargs):
                 calls.append((entry["name"], kwargs))

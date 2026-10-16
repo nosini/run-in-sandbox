@@ -44,6 +44,7 @@ each() {
     "$@" 644 sandbox-game-lib         "$HELPERS"
     "$@" 755 sandbox-game-dialog      "$HELPERS"
     "$@" 644 sandbox-manager-lib.py   "$HELPERS"
+    "$@" 755 sandbox-game-icon        "$HELPERS"
     "$@" 644 nwjs-casefold.js         "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"

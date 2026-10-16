@@ -4,9 +4,12 @@ No GTK imports here: every game and installer still runs through sandbox-game.
 Metadata lives outside the writable mounts handed to games.
 """
 import json
+import hashlib
 import os
 import re
 import shlex
+import signal
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -28,11 +31,13 @@ def read_json(path):
 
 
 def atomic_write(path, text):
+    """Replace PATH with TEXT, a str or bytes, never leaving a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    binary = isinstance(text, bytes)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=".manager-", delete=False) as stream:
+        with tempfile.NamedTemporaryFile(mode="wb" if binary else "w", encoding=None if binary else "utf-8",
+                                         dir=path.parent, prefix=".manager-", delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(text)
         temporary.replace(path)
@@ -101,6 +106,151 @@ class Library:
         shlex.split(entry.get("arguments", ""))
         atomic_write(self.capture(entry["name"]) / "manager.json",
                      json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+
+    def installation(self, entry):
+        """Describe where the installed game lives, independently of its runner."""
+        directory = entry.get("directory", "")
+        if directory:
+            if Path(directory).resolve().is_relative_to(self.capture(entry["name"]).resolve()):
+                return "sandbox"
+            return "external"
+        if entry.get("kind") == "windows":
+            return "sandbox"
+        return "unknown"
+
+    def matches(self, entry, query="", location="all", installation=None):
+        """INSTALLATION, when known, saves looking at the game's folder again."""
+        return query.casefold() in entry["title"].casefold() and (
+            location == "all" or (installation or self.installation(entry)) == location)
+
+    def icon_sources(self, entry):
+        """Only the selected executable and nearby files; never search the host."""
+        return self.icon_files(entry)[0]
+
+    def icon_files(self, entry):
+        """The candidate files, and the folders they must stay inside."""
+        candidates = []
+        if entry.get("program"):
+            try:
+                candidates.append(self.program_host(entry, entry["program"]))
+            except ValueError:
+                pass
+        elif entry.get("selection") and Path(entry["selection"]).is_file():
+            candidates.append(Path(entry["selection"]))
+        directory = entry.get("directory", "")
+        roots = []
+        for executable in candidates[:]:
+            roots.append(executable.parent)
+            for suffix in (".ico", ".png"):
+                candidates.append(executable.with_suffix(suffix))
+        if directory:
+            roots.append(Path(directory))
+        for root in dict.fromkeys(roots):
+            for relative in ("icon.png", "icon.ico", "game.png", "game.ico",
+                             "window_icon.png", "game/gui/window_icon.png"):
+                candidates.append(root / relative)
+            # An imported folder may not have a selected launcher yet.
+            try:
+                candidates.extend(sorted(root.glob("*.exe"))[:12])
+                candidates.extend(sorted(root.glob("*.ico"))[:8])
+            except OSError:
+                pass
+        safe = []
+        for path in dict.fromkeys(candidates):
+            try:
+                if path.suffix.lower() not in (".exe", ".ico", ".png") or not path.is_file():
+                    continue
+                # Games can plant symlinks, including icon.png -> a host file.
+                if not any(path.resolve().is_relative_to(root.resolve()) for root in roots):
+                    continue
+                safe.append(path)
+            except OSError:
+                continue
+        return safe[:32], roots
+
+    @staticmethod
+    def open_icon_file(path, roots):
+        """Open PATH, without following a link, only if what was opened lies inside ROOTS.
+
+        Checked on the open descriptor: a game that swaps the file for a link
+        after it was listed can no longer change what the decoder reads."""
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            opened = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or \
+                    not any(opened.is_relative_to(root.resolve()) for root in roots):
+                raise OSError(f"{path} is not a file inside the game")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    NO_ICON = 3  # sandbox-game-icon's status for a file without a usable icon
+
+    def icon(self, entry):
+        sources, roots = self.icon_files(entry)
+        fingerprint = []
+        for path in sources:
+            try:
+                info = path.stat()
+                fingerprint.append([str(path), info.st_size, info.st_mtime_ns])
+            except OSError:
+                pass
+        key = hashlib.sha256(json.dumps(fingerprint).encode()).hexdigest()
+        capture = self.capture(entry["name"])
+        metadata = read_json(capture / "icon.json")
+        cached = capture / "icons" / (key + ".png")
+        if cached.is_file():
+            return cached
+        if metadata.get("key") == key and metadata.get("found") is False:
+            return None
+        helper = self.helpers / "sandbox-game-icon"
+        if not helper.is_file():
+            return None
+        result = None
+        # Only an answer from every file is remembered as "no icon": a missing
+        # bwrap, a broken GdkPixbuf or a busy system says nothing about them.
+        definite = True
+        for path in sources:
+            try:
+                fd = self.open_icon_file(path, roots)
+            except OSError:
+                continue  # changed since it was listed
+            try:
+                # The parser/decoder gets one open file, no home, display or network.
+                # New GdkPixbuf builds invoke their own Glycin sandbox, so
+                # permit that nested decoder while isolating the PE reader too.
+                args = ["bwrap", "--unshare-all", "--unshare-user",
+                        "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
+                        "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib",
+                        "--symlink", "usr/lib64", "/lib64", "--dev", "/dev", "--tmpfs", "/tmp",
+                        "--proc", "/proc", "--setenv", "HOME", "/tmp",
+                        "--ro-bind", str(helper), "/extract.py",
+                        "--chdir", "/", "/usr/bin/python3", "-I", "/extract.py", "-"]
+                output = subprocess.run(args, stdin=fd, capture_output=True, check=False, timeout=5)
+            except subprocess.TimeoutExpired:
+                definite = False
+                continue  # this file may just be slow; the others still get a turn
+            except OSError:
+                definite = False
+                break  # no isolation available: keep the generic icon for now
+            finally:
+                os.close(fd)
+            if output.returncode == 0 and output.stdout:
+                result = output.stdout
+                break
+            # No icon in it, or the helper's CPU limit ended it: that file's answer.
+            if output.returncode not in (self.NO_ICON, 128 + signal.SIGXCPU, 128 + signal.SIGKILL):
+                definite = False
+                break
+        if result:
+            atomic_write(cached, result)
+        if result or definite:
+            atomic_write(capture / "icon.json", json.dumps({"key": key, "found": bool(result)}))
+            for old in cached.parent.glob("*.png"):
+                if old != cached:
+                    old.unlink(missing_ok=True)  # made for files that have changed since
+        return cached if result else None
 
     def create(self, title, proton="auto", internet=False):
         if not title.strip():
