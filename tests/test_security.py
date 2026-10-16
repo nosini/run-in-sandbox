@@ -1585,6 +1585,93 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         # Not Proton: --wayland under gamescope still gets gamescope's socket.
         self.assertIn("--expose-wayland", self.recorded_args("--gamescope", "--wayland"))
 
+    def test_split_display_keeps_native_wayland_and_private_x11_available(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--wayland-x11", "--proton=" + str(proton),
+                                  "--x11-exe=Vendor Launcher.exe")
+        self.assertIn("gamescope", args)
+        self.assertIn("WINE_GRAPHICS_DRIVER", args)
+        self.assertEqual(args[args.index("WINE_GRAPHICS_DRIVER") + 1], "wayland")
+        self.assertEqual(args[args.index("PROTON_USE_X11_EXCLUSIVE") + 1], "Vendor Launcher.exe")
+        self.assertNotIn("--expose-wayland", args)
+        self.assertNotIn("STEAM_COMPAT_CONFIG", args)
+        self.assertNotIn("/tmp/.Xauthority", args)
+        self.assertNotIn(":123", args)  # recorded_args deliberately supplies a host DISPLAY
+        inner = args.index("--unix-connect-where-writable")
+        self.assertIn("/run/host-wayland", args[inner - 4:inner])
+        self.assertIn("WAYLAND_DISPLAY=/run/host-wayland/wayland-0", args[inner:])
+
+    def test_split_display_connects_to_both_sockets_after_gamescope_clears_wayland(self):
+        import socket
+        import threading
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.runtime / "wayland-split"))
+        listener.listen()
+        listener.settimeout(8)
+        def serve():
+            connection, _ = listener.accept()
+            with connection:
+                connection.sendall(b"wayland")
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.env["WAYLAND_DISPLAY"] = "wayland-split"
+        self.env["DISPLAY"] = ":123"
+        # Simulate gamescope's environment handling and private X socket,
+        # while using real bwrap mounts and both Landlock domains.
+        gamescope = self.game / "gamescope"
+        gamescope.write_text('''#!/usr/bin/python3
+import os, socket, sys
+server = socket.socket(socket.AF_UNIX)
+server.bind("/tmp/.X11-unix/X77")
+server.listen()
+if os.fork() == 0:
+    client, _ = server.accept()
+    client.sendall(b"x11")
+    os._exit(0)
+server.close()
+os.environ["DISPLAY"] = ":77"
+os.environ.pop("WAYLAND_DISPLAY", None)
+args = sys.argv[sys.argv.index("--") + 1:]
+os.execvp(args[0], args)
+''')
+        gamescope.chmod(0o755)
+        self.env["PATH"] = str(self.game) + ":/usr/bin:/bin"
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        (proton / "proton").chmod(0o755)
+        probe = '''
+import os, socket
+assert os.environ["WINE_GRAPHICS_DRIVER"] == "wayland"
+assert os.environ["DISPLAY"] == ":77"
+assert "STEAM_COMPAT_CONFIG" not in os.environ
+assert not os.path.exists("/tmp/.X11-unix/X123")
+for path in (os.environ["WAYLAND_DISPLAY"], "/tmp/.X11-unix/X77"):
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(3)
+        client.connect(path)
+        print(client.recv(64).decode())
+'''
+        result = self.cli("--wayland-x11", "--proton=" + str(proton),
+                          "--env=PATH=/game:/usr/bin:/bin", self.game, "/usr/bin/python3", "-c", probe)
+        self.assertEqual(result.stdout.splitlines(), ["wayland", "x11"])
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
+    def test_split_mode_rejects_incompatible_display_options(self):
+        for options, message in ((["--wayland-x11"], "needs --proton"),
+                                 (["--x11-exe=Launcher.exe"], "needs --wayland-x11"),
+                                 (["--proton", "--wayland-x11", "--headless"], "--headless cannot"),
+                                 (["--proton", "--wayland-x11", "--host-x11"], "--host-x11 cannot")):
+            with self.subTest(options=options):
+                result = self.cli(*options, self.game, "play.exe", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_machine_identifiers_are_stand_ins(self):
         read = lambda path: Path(path).read_text().strip()
         probe = ('printf "%s|%s|%s|" "$(cat /proc/sys/kernel/random/boot_id)" '
@@ -2129,6 +2216,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
             (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
         recorded = self.base / "launched"
         stub = bindir / "sandbox-game"
+        stub.unlink(missing_ok=True)
         stub.write_text('#!/bin/sh\n'
                         f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
                         f'printf "%s\\n" "$@" > "{recorded}"\n{then}\n')
@@ -2350,6 +2438,19 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual(keys(save("Host X11 (other X apps can watch and control it)")),
                          ("0", "0", "1"))
 
+    def test_split_display_is_saved_and_forwarded_to_the_cli(self):
+        (self.game / "play.exe").touch()
+        self.env["TEST_VALUES"] = json.dumps({"x11_exe": "Vendor Launcher.exe"})
+        _, saved = self.preferences(["Native Wayland + private X11 (split)", "Off", "auto", "Off", "Off",
+                                     "This game only"])
+        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "1"))
+        self.assertEqual(saved["x11_exe"], "Vendor Launcher.exe")
+        recorded = self.stub_launcher()
+        args = self.launch_with(recorded, self.game, "".join(f"{key}={value}\n" for key, value in saved.items()))
+        self.assertIn("--wayland-x11", args)
+        self.assertIn("--x11-exe=Vendor Launcher.exe", args)
+        self.assertNotIn("--wayland", args)
+
     def test_preferences_offer_only_what_the_game_can_do(self):
         all_four = ["Native Wayland", "Native Wayland, in gamescope",
                     "X11, in gamescope (private Xwayland)",
@@ -2366,7 +2467,8 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         (config / name).write_text("wayland=1\ngamescope=1\n")
         combos, _ = self.preferences([], proton)                 # cancelled: nothing saved
         self.assertEqual(combos["Display"][0], "X11, in gamescope (private Xwayland)")
-        self.assertEqual(sorted(combos["Display"]), sorted(set(all_four) - {all_four[1]}))
+        self.assertEqual(sorted(combos["Display"]), sorted((set(all_four) - {all_four[1]}) |
+                         {"Native Wayland + private X11 (split)"}))
         self.assertIn("Proton version", combos)
         self.assertEqual(combos["Mod loaders"][0], "Off")
         # A Ren'Py build without SDL's Wayland driver: X11 only.

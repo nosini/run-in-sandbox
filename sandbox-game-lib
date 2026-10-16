@@ -179,14 +179,20 @@ renpy_without_wayland() {                      # $1 = game dir
 # WL=1 when native Wayland was chosen; DOTNET_APP=1 for a .NET program.
 # shellcheck disable=SC2034  # outputs, read by whoever sourced this
 pref_flags() {
-    local host_x11 lan_allow e wp ga pv
+    local host_x11 x11_exe lan_allow e wp ga pv
     local -a host_entries cfg_env
     FLAG=( --name "$NAME" )
     host_x11="$(cfg_get host_x11 0)"
     [ "$host_x11" = 1 ] && FLAG+=( --host-x11 )
     WL=0
     [ "$host_x11" != 1 ] && [ "$(cfg_get wayland 0)" = 1 ] && WL=1
-    [ "$WL" = 1 ] && FLAG+=( --wayland )
+    if [ "$WL" = 1 ] && [ "$PROTON" = 1 ] && [ "$(cfg_get wayland_x11 0)" = 1 ]; then
+        FLAG+=( --wayland-x11 )
+        x11_exe="$(cfg_get x11_exe '')"
+        [ -z "$x11_exe" ] || FLAG+=( "--x11-exe=$x11_exe" )
+    elif [ "$WL" = 1 ]; then
+        FLAG+=( --wayland )
+    fi
     [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
     if [ "$(cfg_get net 0)" = 1 ]; then
         FLAG+=( --net )
@@ -248,6 +254,7 @@ prefs_save() (
 import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
+        "wayland_x11", "x11_exe",
         "net", "proton", "mod_loaders", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
         "lan", "lan_allow", "private_hosts", "hosts", "hosts_writable", "env"}
@@ -332,9 +339,9 @@ PY
         fi
     fi
 
-    bools="wayland host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton
+    bools="wayland wayland_x11 host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton
            dotnet lan private_hosts hosts_writable"
-    optional="with_proton lan_allow hosts"
+    optional="with_proton lan_allow hosts x11_exe"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
         for key in $bools; do

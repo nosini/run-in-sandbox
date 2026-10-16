@@ -300,6 +300,29 @@ benefit of CPU-bound games. It is a young driver, one more within a game's
 reach, so no other engine gets it. `sandbox-game --check` says whether it is
 there and yours to open.
 
+##### Native Wayland with X11 launcher windows
+
+Some Proton builds can select the graphics driver per process: the game uses
+native Wayland while a launcher or browser helper uses X11. Choose **Native
+Wayland + private X11 (split)** in Display settings for this arrangement.
+The game talks to the desktop's Wayland compositor, as with native Wayland;
+X11 windows run through gamescope's private Xwayland. The host's X server and
+authentication cookie are kept out of the sandbox.
+
+This requires a runner implementing `WINE_GRAPHICS_DRIVER` and per-process
+X11 selection, such as [DWProton 11.0-14](https://github.com/dawn-winery/dwproton-mirror/releases/tag/dwproton-11.0-14).
+The runner supplies its own launcher selection. **X11 executable (optional)**
+adds an executable basename or Windows path fragment through
+`PROTON_USE_X11_EXCLUSIVE`; leave it blank to use only the runner's selection.
+
+```sh
+sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Example /game/Launcher.exe
+```
+
+Gamescope's resolution and fullscreen controls apply to the X11 windows.
+The native Wayland game uses its own window and display settings. MangoHud
+runs with the game in this mode, so it measures the game rather than the launcher.
+
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
 
 Mod loaders for Windows games hook in through a DLL named after a Windows one,
@@ -536,6 +559,8 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | Option | |
 |---|---|
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
+| `--wayland-x11` | Proton's native Wayland game with gamescope's private X11 for compatible launchers/helpers |
+| `--x11-exe EXE` | with `--wayland-x11`: an extra executable name or Windows path fragment for the runner's X11 selection |
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--net` | internet access, and only that; see [Network](#network) |
 | `--allow-lan LIST` | with `--net`: these LAN addresses or networks after all, optionally only one port or protocol; see [Network](#network) |
@@ -755,7 +780,7 @@ discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
 `SANDBOX_SECCOMP` and `SANDBOX_GPU_CARD`, and `MANGOHUD=1` still selects the
 overlay.
 
-Under gamescope (the default display, and `--gamescope`) the game never
+Under ordinary gamescope mode (the default display, and `--gamescope`) the game never
 reaches the desktop's compositor. gamescope supplies a private Xwayland
 server, and, with `--wayland`, a Wayland socket of its own. The desktop's
 Wayland socket is mounted for gamescope at `/run/host-wayland/wayland-0`, away
@@ -773,6 +798,10 @@ Native `--wayland` without gamescope talks to the desktop's compositor
 directly: quicker, but the compositor is then within the game's reach. It
 exposes no host X socket or cookie, including for Proton: builds lacking
 winewayland must use gamescope instead.
+`--wayland-x11` explicitly combines direct desktop Wayland access with
+gamescope's private X11. Its inner Landlock domain permits connecting to the
+desktop's Wayland socket, while still preventing access to gamescope's processes
+and descriptors. The host X server remains unavailable.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided. Without it,
 GTK cannot read the desktop's settings, so one is passed in: GNOME's title-bar
@@ -1095,6 +1124,8 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 
 ```ini
 wayland=0|1
+wayland_x11=0|1
+x11_exe=Launcher.exe
 mangohud=0|1
 net=0|1
 mod_loaders=0|1
@@ -1132,6 +1163,10 @@ else in `gamescope_args`, and all of `env`, is set by hand and carried through
 saves untouched. `env` values cannot contain spaces — the list is split on
 them.
 
+`wayland_x11=1` with `wayland=1` selects split display for Windows games.
+`x11_exe` is optional and only applies to that mode. An empty value uses the
+runner's own built-in selection; names and path fragments may contain spaces.
+
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
 
@@ -1164,7 +1199,7 @@ launch log. Under `--proton` it sets `STEAM_COMPAT_CONFIG=wayland`, which
 GE, DW and CachyOS builds honour. Builds without winewayland need the default
 gamescope mode; host X is never silently exposed as a fallback.
 
-Proton under gamescope always uses gamescope's Xwayland, `--wayland` or not.
+Proton under ordinary gamescope mode uses gamescope's Xwayland, `--wayland` or not.
 Wine's Wayland driver requires `wl_subcompositor` and `wp_viewporter`, which
 gamescope's own Wayland server does not offer, and with Proton's Wayland
 setting it is the only driver Wine tries: the game would run with no display

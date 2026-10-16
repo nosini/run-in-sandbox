@@ -11,6 +11,7 @@ from pathlib import Path
 
 DISPLAY_CHOICES = {
     "wayland": "Native Wayland",
+    "wayland-x11": "Native Wayland + private X11 (split)",
     "wayland-gamescope": "Native Wayland, in gamescope",
     "x11": "X11, in gamescope (private Xwayland)",
     "host-x11": "Host X11 (other X apps can watch and control it)",
@@ -157,6 +158,8 @@ class Preferences:
         self.scope = "game"
         if self.values.get("host_x11") == "1":
             self.display = "host-x11"
+        elif self.values.get("wayland_x11") == "1" and self.values.get("wayland") == "1":
+            self.display = "wayland-x11"
         elif self.values.get("wayland") == "1":
             self.display = "wayland-gamescope" if self.values.get("gamescope") == "1" else "wayland"
         else:
@@ -172,10 +175,10 @@ class Preferences:
     @property
     def displays(self):
         if self.engine == "proton":
-            return ["wayland", "x11", "host-x11"]
+            return ["wayland", "wayland-x11", "x11", "host-x11"]
         if self.engine == "native" and self.request.get("renpy_x11"):
             return ["x11", "host-x11"]
-        return list(DISPLAY_CHOICES)
+        return ["wayland", "wayland-gamescope", "x11", "host-x11"]
 
     @property
     def proton_controls(self):
@@ -219,19 +222,20 @@ class Preferences:
 
     @property
     def uses_gamescope(self):
-        return self.display in ("x11", "wayland-gamescope")
+        return self.display in ("x11", "wayland-gamescope", "wayland-x11")
 
     def set_runtime(self, runtime):
         self.runtime = runtime
         if self.display not in self.displays:
-            self.display = "x11"
+            self.display = "wayland" if self.display == "wayland-x11" and "wayland" in self.displays else "x11"
 
     def result(self):
         if self.scope == "clear":
             return {"scope": "clear"}
         result = {"scope": self.scope,
                   "wayland": "1" if self.display.startswith("wayland") else "0",
-                  "gamescope": "1" if self.display == "wayland-gamescope" else "0",
+                  "wayland_x11": "1" if self.display == "wayland-x11" else "0",
+                  "gamescope": "1" if self.display in ("wayland-gamescope", "wayland-x11") else "0",
                   "host_x11": "1" if self.display == "host-x11" else "0",
                   "net": self.values.get("net", "0")}
         if self.request.get("can_proton"):
@@ -239,6 +243,8 @@ class Preferences:
         if self.engine != "nwjs":
             result["mangohud"] = self.values.get("mangohud", "0")
         if self.proton_controls:
+            if self.display == "wayland-x11":
+                result["x11_exe"] = self.values.get("x11_exe", "")
             for key, fallback in (("proton", "auto"), ("mod_loaders", "0")):
                 result[key] = self.values.get(key, fallback)
         if self.engine == "nwjs":
@@ -420,6 +426,14 @@ class Dialog:
                           self.state.runtime, self.runtime_changed)
         self.dropdown("display", "Display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays],
                       self.state.display, self.display_changed)
+        self.entry("x11_exe", "X11 executable (optional)", self.state.values.get("x11_exe", ""),
+                   "Launcher.exe or a Windows path fragment")
+        self.split_note = Gtk.Label(xalign=0, wrap=True,
+            label="Uses the desktop's Wayland compositor for the game and gamescope's private X11 for launcher windows. "
+                  "Requires a runner with per-process graphics selection. Leave the executable blank for its built-in selection. "
+                  "Gamescope's resolution and fullscreen settings apply to the X11 windows.")
+        self.split_note.add_css_class("dim-label")
+        self.body.append(self.split_note)
         self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
                     lambda widget, *_: self.set_value("mangohud", "1" if widget.get_active() else "0"))
         protons = list(dict.fromkeys(["auto", *request.get("protons", [])]))
@@ -512,6 +526,8 @@ class Dialog:
         self.refresh_visibility()
 
     def refresh_visibility(self):
+        self.rows["x11_exe"].set_visible(self.state.display == "wayland-x11")
+        self.split_note.set_visible(self.state.display == "wayland-x11")
         self.rows["proton"].set_visible(self.state.proton_controls)
         self.rows["mod_loaders"].set_visible(self.state.proton_controls)
         for key in ("casefold", "webgl"):

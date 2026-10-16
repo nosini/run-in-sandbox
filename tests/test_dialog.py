@@ -14,6 +14,22 @@ Preferences = MODULE["Preferences"]
 
 
 class PreferencePolicyTests(unittest.TestCase):
+    def test_split_display_round_trip_and_runtime_switch(self):
+        state = Preferences({"engine": "proton", "values": {
+            "wayland": "1", "wayland_x11": "1", "gamescope": "1", "x11_exe": "Launcher.exe"}})
+        self.assertEqual(state.display, "wayland-x11")
+        self.assertTrue(state.uses_gamescope)
+        saved = state.result()
+        self.assertEqual((saved["wayland"], saved["wayland_x11"], saved["gamescope"]), ("1", "1", "1"))
+        self.assertEqual(saved["x11_exe"], "Launcher.exe")
+        state.display = "wayland"
+        self.assertEqual(state.result()["wayland_x11"], "0")
+        self.assertNotIn("x11_exe", state.result())
+        native = Preferences({"engine": "native", "values": saved})
+        self.assertEqual(native.display, "wayland")
+        x11 = Preferences({"engine": "proton", "values": {**saved, "wayland": "0"}})
+        self.assertEqual(x11.display, "x11")
+
     def test_switching_runtime_preserves_edits_and_omits_hidden_settings(self):
         state = Preferences({"engine": "nwjs", "can_proton": True, "values": {
             "mangohud": "1", "proton": "GE-Test", "casefold": "0", "webgl": "vulkan"}})
@@ -203,6 +219,18 @@ class GtkDialogTests(unittest.TestCase):
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["dotnet"], "1")
         self.assertFalse(self.create("preferences", {"engine": "native"}).rows["dotnet"].get_visible())
+
+    def test_split_display_shows_optional_executable_inside_preferences(self):
+        dialog = self.create("preferences", {"engine": "proton"})
+        index = [key for key, _ in dialog.choices["display"]].index("wayland-x11")
+        dialog.widgets["display"].set_selected(index)
+        self.assertTrue(dialog.rows["x11_exe"].get_visible())
+        self.assertTrue(dialog.split_note.get_visible())
+        dialog.widgets["x11_exe"].set_text("Launcher.exe")
+        dialog.save_preferences()
+        saved = self.responses[0][1]
+        self.assertEqual(saved["wayland_x11"], "1")
+        self.assertEqual(saved["x11_exe"], "Launcher.exe")
 
     def test_native_proton_choice_starts_at_none(self):
         dialog = self.create("preferences", {"engine": "native", "can_proton": True, "protons": ["GE-Test"]})

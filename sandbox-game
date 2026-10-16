@@ -26,6 +26,11 @@
 #               builds without that driver need --gamescope for Xwayland.
 #               Not under gamescope, whose Wayland server that driver cannot
 #               use: there Proton goes through gamescope's Xwayland.
+#   --wayland-x11  Proton's main game uses the desktop's native Wayland;
+#               compatible launcher/helper processes use gamescope's private
+#               Xwayland. Needs a runner with per-process graphics selection.
+#   --x11-exe EXE  with --wayland-x11, an extra executable basename or Windows
+#               path fragment for the runner to put on X11.
 #   --name NAME override the sandbox name (else derived from the game dir).
 #   --net       give the game the internet, and only that: no LAN, nothing
 #               listening on this machine, no incoming connections. Through
@@ -504,6 +509,10 @@ CMD refers to the game at /game, not at its path on disk.
 
 Display (default: gamescope's private Xwayland)
   --wayland             native Wayland; with --proton, Proton's winewayland
+  --wayland-x11         Proton: native Wayland plus gamescope's private X11
+                        for launcher/helper processes (needs a patched runner)
+  --x11-exe EXE         with --wayland-x11: an executable to put on X11;
+                        empty uses only the runner's built-in selection
   --gamescope[=ARGS]    run inside gamescope, passing ARGS (quote them all)
   --host-x11            the host X server -- other X apps can be watched and
                         controlled; never for a game you do not trust
@@ -574,11 +583,15 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
+WAYLAND_X11=0; X11_EXE=""
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
+        --wayland-x11) WAYLAND_X11=1; WAYLAND=1; GS=1; shift ;;
+        --x11-exe)   X11_EXE="${2?--x11-exe needs an executable name}"; shift 2 ;;
+        --x11-exe=*) X11_EXE="${1#--x11-exe=}"; shift ;;
         --host-x11)  HOST_X11=1; shift ;;
         --headless)  HEADLESS=1; shift ;;
         --net)       NET=1; shift ;;
@@ -625,6 +638,12 @@ while [ "$#" -gt 0 ]; do
         *)           break ;;
     esac
 done
+[ "$WAYLAND_X11" = 0 ] || [ -n "$PROTON_SPEC" ] || {
+    echo "--wayland-x11 needs --proton and a runner with per-process graphics selection" >&2; exit 1; }
+[ -z "$X11_EXE" ] || [ "$WAYLAND_X11" = 1 ] || {
+    echo "--x11-exe needs --wayland-x11" >&2; exit 1; }
+[[ "$X11_EXE" != *$'\n'* && "$X11_EXE" != *$'\r'* ]] || {
+    echo "--x11-exe must be one executable name or path fragment" >&2; exit 1; }
 [ -z "$PROTON_SPEC" ] || [ -z "$MKXP_SPEC" ] || {
     echo "--proton and --mkxp are mutually exclusive" >&2; exit 1; }
 [ -z "$PGMMV_SPEC" ] || { [ -z "$PROTON_SPEC" ] && [ -z "$MKXP_SPEC" ]; } || {
@@ -1137,7 +1156,7 @@ fi
 # draws goes through gamescope either way, Xwayland is the path gamescope is
 # built around, and it is as far from the desktop. So Proton gets that. Said
 # in the log only, not as a notice: it is a known answer, not a problem.
-if [ -n "$PROTON" ] && [ "$GS" = 1 ] && [ "$WAYLAND" = 1 ]; then
+if [ -n "$PROTON" ] && [ "$GS" = 1 ] && [ "$WAYLAND" = 1 ] && [ "$WAYLAND_X11" = 0 ]; then
     echo "sandbox-game: Proton under gamescope uses gamescope's Xwayland: Wine's Wayland" \
          "driver needs wl_subcompositor and wp_viewporter, which gamescope lacks" >&2
     WAYLAND=0
@@ -1148,7 +1167,7 @@ fi
 # gamescope_args by hand. Decided here, before anything reads it.
 GS_EXPOSE=0
 if [ "$GS" = 1 ]; then
-    [ "$WAYLAND" = 1 ] && GS_EXPOSE=1
+    [ "$WAYLAND" = 1 ] && [ "$WAYLAND_X11" = 0 ] && GS_EXPOSE=1
     [[ " ${GS_ARGS[*]} " == *" --expose-wayland "* ]] && GS_EXPOSE=1
 fi
 
@@ -1168,7 +1187,7 @@ if [ "$MHUD" = 1 ]; then
     # against gamescope's general advice. Either route reads the same config.
     # GS_EXPOSE, not WAYLAND: the flag can equally arrive by hand through
     # gamescope_args, and mangoapp breaks on the socket however it got there.
-    [ "$GS" = 1 ] && [ "$GS_EXPOSE" = 0 ] && MHUD_VIA_APP=1
+    [ "$GS" = 1 ] && [ "$GS_EXPOSE" = 0 ] && [ "$WAYLAND_X11" = 0 ] && MHUD_VIA_APP=1
     [ "$MHUD_VIA_APP" = 1 ] || command -v mangohud >/dev/null || {
         echo "mangohud not found (openSUSE: zypper in mangohud)" >&2; exit 1; }
     CFG="${XDG_CONFIG_HOME:-$HOME/.config}/MangoHud"
@@ -1197,7 +1216,7 @@ if [ "$GS" = 1 ]; then
     # Without this the game quietly lands back on winex11.drv inside gamescope,
     # STEAM_COMPAT_CONFIG=wayland notwithstanding -- and an SDL game pinned to
     # the Wayland backend has nothing at all to talk to.
-    if [ "$WAYLAND" = 1 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
+    if [ "$WAYLAND" = 1 ] && [ "$WAYLAND_X11" = 0 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
         GS_CMD+=( --expose-wayland )
     fi
     # An inherited MANGOHUD=1 would light up MangoHud's Vulkan layer inside the
@@ -1297,7 +1316,14 @@ fi
 # so no other engine gets it -- bar a native program running Proton's Wine
 # itself. -try: kernels without it leave it out.
 [ -z "$PROTON$WITH_PROTON" ] || DEVICE_ARGS+=( --dev-bind-try /dev/ntsync /dev/ntsync )
-if [ "$WAYLAND" = 1 ]; then
+if [ "$WAYLAND_X11" = 1 ]; then
+    # Select the patched Wine driver's per-process mode directly. Proton's
+    # exclusive Wayland option in older runners disables winex11.drv, which
+    # would prevent the launcher's X11 fallback even with DISPLAY available.
+    VIDEO_ENV+=( --setenv WINE_GRAPHICS_DRIVER wayland
+                 --setenv WINE_USE_EGL 1 --setenv WINE_DISABLE_FULLSCREEN_HACK 1 )
+    [ -z "$X11_EXE" ] || VIDEO_ENV+=( --setenv PROTON_USE_X11_EXCLUSIVE "$X11_EXE" )
+elif [ "$WAYLAND" = 1 ]; then
     if [ -n "$PROTON" ]; then
         VIDEO_ENV+=( --setenv STEAM_COMPAT_CONFIG wayland )
     else
@@ -1795,9 +1821,18 @@ if [ "$GS" = 1 ]; then
     # to use gamescope's connections. See sandbox-landlock for both options.
     # The outer domain may write in /run/sandbox-attach, for the inner
     # sandbox-landlock to make the socket there before restricting itself.
+    INNER_DISPLAY_RULES=(); INNER_DISPLAY_ENV=()
+    if [ "$WAYLAND_X11" = 1 ]; then
+        # This explicit mode grants the same desktop compositor access as
+        # --wayland. Only X11 windows go through gamescope. Set the game's
+        # Wayland connection after gamescope, which clears WAYLAND_DISPLAY
+        # for its X11 children unless --expose-wayland was requested.
+        INNER_DISPLAY_RULES=( --rw /run/host-wayland )
+        INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
+    fi
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach -- "${GS_CMD[@]}" -- \
-        /run/sandbox-landlock "${LL_ARGS[@]}" --unix-connect-where-writable \
-        --no-abstract-scope --attach /run/sandbox-attach -- "$@"
+        /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" --unix-connect-where-writable \
+        --no-abstract-scope --attach /run/sandbox-attach -- "${INNER_DISPLAY_ENV[@]}" "$@"
 else
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --attach /run/sandbox-attach -- "$@"
 fi

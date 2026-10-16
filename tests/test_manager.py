@@ -214,6 +214,18 @@ class LibraryTests(unittest.TestCase):
         value = self.library.settings(entry["name"])["gamescope_args"]
         self.assertEqual(value, "-W 1920 -H 1080 -f --adaptive-sync -r 60")
 
+    def test_split_display_flags_preserve_executable_names_with_spaces(self):
+        entry = self.library.create("game")
+        self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1",
+            "x11_exe": "Vendor Launcher.exe", "gamescope_args": "-W 1920 -H 1080"})
+        flags = self.library.flags(entry)
+        self.assertIn("--wayland-x11", flags)
+        self.assertIn("--x11-exe=Vendor Launcher.exe", flags)
+        self.assertIn("--gamescope=-W 1920 -H 1080", flags)
+        self.assertNotIn("--wayland", flags)
+        self.library.update_settings(entry["name"], {"wayland": "0"})
+        self.assertNotIn("--wayland-x11", self.library.flags(entry))
+
     def test_program_selection_refuses_traversal_external_links_and_missing_files(self):
         entry = self.library.create("game")
         game = Path(entry["directory"])
