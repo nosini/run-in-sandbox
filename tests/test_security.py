@@ -1871,6 +1871,47 @@ sys.exit(3)
         log = (self.home / "game-sandboxes" / "split" / "home" / "gamescope.log").read_text()
         self.assertEqual(log.splitlines(), ["started False /run/host-wayland/wayland-0"] * 2 + ["terminated"])
 
+    def test_split_mangohud_keeps_config_but_disables_x11_shortcut_polling(self):
+        self.recorded_args()  # command recorders and the validated Wayland socket
+        wrapper = self.base / "bin" / "mangohud"
+        wrapper.write_text('#!/bin/sh\nexec "$@"\n')
+        wrapper.chmod(0o755)
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text('#!/bin/sh\nexit 0\n')
+        (proton / "proton").chmod(0o755)
+        config = self.home / ".config" / "MangoHud"
+        config.mkdir(parents=True)
+        (config / "MangoHud.conf").write_text('fps_limit=60\ntoggle_hud=F12\n')
+
+        def settings(*options):
+            args = self.recorded_args("--proton=" + str(proton), *options)
+            values = {args[i + 1]: args[i + 2] for i, a in enumerate(args) if a == "--setenv"}
+            if "--mangohud" in options:
+                self.assertIn("mangohud", args)
+                self.assertIn(str(config), args)
+            return values.get("MANGOHUD_CONFIG")
+
+        bindings = {"toggle_hud", "toggle_hud_position", "toggle_preset", "reset_fps_metrics",
+                    "toggle_fps_limit", "toggle_logging", "reload_cfg", "upload_log", "upload_logs"}
+        default = settings("--wayland-x11", "--mangohud")
+        values = dict(option.split("=", 1) if "=" in option else (option, "1")
+                      for option in default.split(","))
+        self.assertEqual(values.pop("read_cfg"), "1")
+        self.assertEqual(values, dict.fromkeys(bindings, ""))
+        custom = settings("--wayland-x11", "--mangohud",
+                          "--env=MANGOHUD_CONFIG=read_cfg,fps_limit=40,toggle_hud=F12,permit_upload=1")
+        values = dict(option.split("=", 1) if "=" in option else (option, "1")
+                      for option in custom.split(","))
+        self.assertEqual(values.pop("read_cfg"), "1")
+        self.assertEqual(values.pop("fps_limit"), "40")
+        self.assertEqual(values.pop("permit_upload"), "1")
+        self.assertEqual(values, dict.fromkeys(bindings, ""))
+        empty = settings("--wayland-x11", "--mangohud", "--env=MANGOHUD_CONFIG=")
+        self.assertFalse(empty.startswith(","))
+        self.assertIsNone(settings("--wayland-x11"))
+        self.assertIsNone(settings("--wayland", "--mangohud"))
+
     def test_split_mode_rejects_incompatible_display_options(self):
         for options, message in ((["--wayland-x11"], "needs --proton"),
                                  (["--x11-exe=Launcher.exe"], "needs --wayland-x11"),

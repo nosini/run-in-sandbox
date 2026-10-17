@@ -400,9 +400,14 @@ fullscreen, it would cover the game, so the fullscreen setting is ignored in
 this mode. Gamescope's resolution applies to the X11 windows; the native
 Wayland game uses its own window and display settings. MangoHud wraps the
 whole Proton command in this mode, so X11 launcher windows can show the
-overlay too. MangoHud can also keep an X11 connection open inside a native
-Wayland game; closing gamescope then terminates the game with an X11 error.
-Disable MangoHud for split mode if you want to close gamescope while playing.
+overlay too. Its shortcut polling normally keeps an X11 connection open even
+inside a native Wayland game, which terminates the game when gamescope closes.
+In split mode the sandbox clears MangoHud's shortcut bindings, keeping the
+overlay and configured FPS limit working without that connection. Its hotkeys
+for toggling the overlay, changing limits and starting recordings are therefore
+unavailable in this mode. Other MangoHud settings still apply, including
+per-executable config files and explicit `MANGOHUD_CONFIG` values. If your
+config hides the overlay with `no_display`, set `no_display=0` to show it.
 
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
 

@@ -1394,6 +1394,22 @@ if [ "$MHUD" = 1 ]; then
     if [ -d "$CFG" ]; then
         MANGOHUD_ARGS=( --ro-bind "$CFG" "$HOME/.config/MangoHud" )
     fi
+    if [ "$WAYLAND_X11" = 1 ]; then
+        # MangoHud checks X11 shortcuts even for a Wayland surface, keeping
+        # DISPLAY open inside the game. Closing gamescope then makes Xlib
+        # terminate that game. Empty bindings skip those checks; read_cfg
+        # keeps the usual global/per-executable overlay and FPS settings.
+        _mh_keys='toggle_hud=,toggle_hud_position=,toggle_preset=,reset_fps_metrics=,toggle_fps_limit=,toggle_logging=,reload_cfg=,upload_log=,upload_logs='
+        MANGOHUD_ARGS+=( --setenv MANGOHUD_CONFIG "read_cfg,$_mh_keys" )
+        # Explicit config still supplies everything else, with the same
+        # shortcut restriction applied after it (including read_cfg files).
+        for ((i = 0; i < ${#ENV_ARGS[@]}; i += 3)); do
+            if [ "${ENV_ARGS[i + 1]}" = MANGOHUD_CONFIG ]; then
+                ENV_ARGS[i + 2]="${ENV_ARGS[i + 2]}${ENV_ARGS[i + 2]:+,}$_mh_keys"
+            fi
+        done
+        echo "sandbox-game: MangoHud shortcuts disabled in split mode so closing gamescope can leave the game running" >&2
+    fi
     [ "$MHUD_VIA_APP" = 1 ] || set -- mangohud "$@"
 fi
 
