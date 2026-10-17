@@ -8,3 +8,6 @@ pgmmv-player-decrypt/
 
 # Byte-code left behind by running the test suite.
 __pycache__/
+
+# DWProton runner fix for NIKKE's store, kept in its own repository.
+dwproton-nikke-split/
