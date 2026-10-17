@@ -1449,6 +1449,28 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("needs --proton", result.stderr)
 
+    def test_proton_sandbox_lasts_until_wine_is_done(self):
+        # A launcher that starts the game and is then closed ends proton run;
+        # the sandbox waits for Wine's last program, and keeps Proton's status.
+        proton = self.base / "proton"
+        (proton / "files" / "bin").mkdir(parents=True)
+        (proton / "proton").write_text(
+            '#!/bin/sh\n'
+            '( sleep 1; echo game >> "$HOME/order"; : > /tmp/game-done ) &\n'
+            'echo launcher >> "$HOME/order"\n'
+            'exit 3\n')
+        (proton / "files" / "bin" / "wineserver").write_text(
+            '#!/bin/sh\n'
+            'while [ ! -e /tmp/game-done ]; do sleep 0.1; done\n'
+            'echo "wineserver $1 $WINEPREFIX" >> "$HOME/order"\n')
+        for f in (proton / "proton", proton / "files" / "bin" / "wineserver"):
+            f.chmod(0o755)
+        result = self.cli("--headless", "--proton=" + str(proton), "--name", "wine-lasts",
+                          self.game, "/game/game.exe", check=False)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        order = (self.home / "game-sandboxes" / "wine-lasts" / "home" / "order").read_text().split("\n")
+        self.assertEqual(order[:3], ["launcher", "game", "wineserver -w /compat/pfx"])
+
     def test_ntsync_only_for_proton(self):
         # A young driver: Wine's thread synchronisation needs it, nothing else.
         proton = self.base / "proton"

@@ -1018,7 +1018,14 @@ if [ -n "$PROTON_SPEC" ]; then
     fi
     # Games routinely load assets relative to the cwd, so land in the exe's dir.
     case "$1" in /*) CHDIR="$(dirname "$1")" ;; esac
-    set -- /proton/proton run "$@"
+    # `proton run` returns when the program it started does, and the sandbox
+    # ends with it: a launcher that starts the game and is then closed took
+    # the game along. Wait for Wine as a whole instead, as Steam and umu do:
+    # wineserver -w returns once its last program is gone, at once if none
+    # ever started. Proton's own exit status is the sandbox's.
+    set -- /bin/sh -c '"$@"; rc=$?
+        [ ! -x /proton/files/bin/wineserver ] || WINEPREFIX=/compat/pfx /proton/files/bin/wineserver -w
+        exit "$rc"' sh /proton/proton run "$@"
 fi
 
 # ---- mkxp-z ----------------------------------------------------------------
