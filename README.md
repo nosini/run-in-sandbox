@@ -347,6 +347,16 @@ never open a window. These packages are usually named with a `-32bit`,
 `sandbox-game --check` names any library the Proton builds it finds cannot
 load.
 
+Videos go through GStreamer. Proton brings its own plugins, built for Steam's
+runtime, and outside it some cannot load: its FFmpeg plugin, which decodes most
+video, needs a `libvpx.so.9` that current distributions no longer ship. A game
+then fails to play its videos, and may blame the network. So Proton games get
+your system's GStreamer plugins too, searched before Proton's, as Flatpak apps
+use their runtime's. Install your distribution's GStreamer plugin packages
+(good, bad, ugly and libav) for the formats games use. For H.264, the most
+common one, you may need FFmpeg with H.264 from an extra repository (Packman on
+openSUSE, RPM Fusion on Fedora) or the OpenH264 plugin with Cisco's library.
+
 ##### Native Wayland with X11 launcher windows
 
 Some Proton builds can select the graphics driver per process: the game uses

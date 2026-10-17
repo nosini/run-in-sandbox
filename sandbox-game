@@ -997,6 +997,20 @@ if [ -n "$PROTON_SPEC" ]; then
     # instead, and turn the bridge off, once UMU_ID is set; others ignore it.
     # No numeric ID, so nothing takes it for a Steam app. --env still wins.
     [ "$STEAM" = 1 ] || PROTON_ARGS+=( --setenv UMU_ID umu-default )
+    # Proton's GStreamer plugins are built for Steam's runtime. Outside it some
+    # cannot load -- its FFmpeg wants a libvpx.so.9 no current system has --
+    # and a game's videos fail, often reported as a network error. This
+    # system's own plugins are built against its own libraries: list them
+    # first (Proton's script sets only the system path, after them), as the
+    # Flatpak apps use their runtime's. GStreamer refuses plugins built for a
+    # newer release series than Proton's, and takes Proton's copy of any that
+    # do not load. A game's own --env still wins.
+    _gst=""
+    for d in /usr/lib64/gstreamer-1.0 /usr/lib/x86_64-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0 \
+             /usr/lib32/gstreamer-1.0 /usr/lib/i386-linux-gnu/gstreamer-1.0; do
+        [ ! -d "$d" ] || _gst="${_gst:+$_gst:}$d"
+    done
+    [ -z "$_gst" ] || PROTON_ARGS+=( --setenv GST_PLUGIN_PATH_1_0 "$_gst" )
     # Mod loaders get into a game through a DLL named after a system one,
     # dropped beside the .exe: BepInEx's winhttp.dll, MelonLoader's
     # version.dll, UE4SS's dwmapi.dll, an ASI loader's dinput8.dll. Windows

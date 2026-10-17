@@ -1445,6 +1445,21 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(umu_ids("--steam"), [])
         self.assertEqual(umu_ids("--env", "UMU_ID=umu-123"), ["umu-default", "umu-123"])
         self.assertNotIn("UMU_ID", self.recorded_args())
+
+    def test_proton_finds_this_systems_gstreamer_plugins_first(self):
+        # Proton's own plugins are built for Steam's runtime and some cannot
+        # load outside it; the system's come first, where it has any.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--proton=" + str(proton))
+        found = [d for d in ("/usr/lib64/gstreamer-1.0", "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+                             "/usr/lib/gstreamer-1.0", "/usr/lib32/gstreamer-1.0",
+                             "/usr/lib/i386-linux-gnu/gstreamer-1.0") if os.path.isdir(d)]
+        values = [args[i + 2] for i, a in enumerate(args) if a == "--setenv" and args[i + 1] == "GST_PLUGIN_PATH_1_0"]
+        self.assertEqual(values, [":".join(found)] if found else [])
+        self.assertNotIn("GST_PLUGIN_PATH_1_0", self.recorded_args())
         result = self.cli("--headless", "--steam", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("needs --proton", result.stderr)
