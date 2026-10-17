@@ -88,14 +88,18 @@ install_one() {
         # Desktop launchers must also work when ~/.local/bin is not on PATH.
         python3 - "$3/$2" "$BIN/sandbox-manager" <<'PY'
 from pathlib import Path
+import re
 import sys
 path = Path(sys.argv[1])
 value = sys.argv[2].replace("%", "%%")
-for char in ('\\', '"', '`', '$'):
-    value = value.replace(char, '\\' + char)
-# Backslashes are escaped once more by the desktop entry string parser.
-value = value.replace('\\', '\\\\')
-path.write_text(path.read_text().replace('Exec=sandbox-manager', 'Exec="' + value + '"'))
+# Quoted only when the desktop entry spec needs it: menu editors take a
+# quoted program for a missing one.
+if re.search(r"""[\s"'\\><~|&;$*?#()`]""", value):
+    for char in ('\\', '"', '`', '$'):
+        value = value.replace(char, '\\' + char)
+    # Backslashes are escaped once more by the desktop entry string parser.
+    value = '"' + value.replace('\\', '\\\\') + '"'
+path.write_text(path.read_text().replace('Exec=sandbox-manager', 'Exec=' + value))
 PY
     fi
 }

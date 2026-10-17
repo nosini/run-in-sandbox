@@ -765,6 +765,107 @@ class LibraryTests(unittest.TestCase):
         popen.assert_called_once()
         self.assertEqual(self.library.log_path(entry["name"]).read_text(), "previous run")
 
+    def shortcut_library(self):
+        desktop = self.home / "Desktop"
+        desktop.mkdir(exist_ok=True)
+        backend = self.home / "odd $dir \\ 100%" / "sandbox-game"
+        return core.Library(backend, ROOT, ROOT / "Sandbox game", home=self.home,
+                            config=self.home / "config", data=self.home / "data", desktop=desktop)
+
+    def test_shortcuts_start_the_game_through_the_manager_and_follow_its_name(self):
+        library = self.shortcut_library()
+        entry = library.create("Game name")
+        name = entry["name"]
+        self.assertEqual(library.shortcuts(name), {"menu": False, "desktop": False})
+        icon = library.capture(name) / "icons/abc.png"
+        library.set_shortcut(name, "menu", True, icon)
+        library.set_shortcut(name, "desktop", True)
+        self.assertEqual(library.shortcuts(name), {"menu": True, "desktop": True})
+        menu = self.home / f"data/applications/sandbox-game-{name}.desktop"
+        desktop = self.home / f"Desktop/sandbox-game-{name}.desktop"
+        lines = menu.read_text().splitlines()
+        self.assertIn("Name=Game name", lines)
+        self.assertIn(f"Icon={icon}", lines)
+        # Quoted for Exec, then escaped once more as a desktop entry string.
+        manager = library.backend.with_name("sandbox-manager")
+        self.assertIn('Exec="' + str(manager.parent).replace("\\", "\\\\\\\\").replace("$", "\\\\$")
+                      .replace("%", "%%") + f'/sandbox-manager" --launch {name}', lines)
+        self.assertEqual(menu.stat().st_mode & 0o777, 0o644)
+        # Desktops start only executable launchers placed there.
+        self.assertEqual(desktop.stat().st_mode & 0o777, 0o755)
+        self.assertIn("Icon=applications-games", desktop.read_text().splitlines())
+        renamed = library.update_entry(name, title=" Renamed\ngame", title_custom=True)
+        library.refresh_shortcuts(renamed, icon)
+        self.assertIn("Name=\\sRenamed\\ngame", desktop.read_text().splitlines())
+        self.assertIn(f"Icon={icon}", desktop.read_text().splitlines())
+        library.set_shortcut(name, "menu", False)
+        self.assertEqual(library.shortcuts(name), {"menu": False, "desktop": True})
+        # A removed shortcut is not brought back by a refresh.
+        library.refresh_shortcuts(renamed, icon)
+        self.assertFalse(menu.exists())
+        with patch.object(core.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 0, "", "")):
+            library.operate(name, "delete")
+        self.assertFalse(desktop.exists())
+
+    def test_shortcuts_quote_the_manager_only_when_they_must(self):
+        # Menu editors take a quoted program for a missing one.
+        library = core.Library(self.home / ".local/bin/sandbox-game", ROOT, ROOT / "Sandbox game",
+                               home=self.home, config=self.home / "config", data=self.home / "data")
+        entry = library.create("game")
+        library.set_shortcut(entry["name"], "menu", True)
+        self.assertIn(f"Exec={self.home}/.local/bin/sandbox-manager --launch {entry['name']}",
+                      (self.home / f"data/applications/sandbox-game-{entry['name']}.desktop").read_text())
+        self.assertEqual(core.desktop_exec_argument("/opt/a b"), '"/opt/a b"')
+        self.assertEqual(core.desktop_exec_argument("/opt/100%"), "/opt/100%%")
+
+    def test_desktop_shortcuts_need_a_desktop_folder_other_than_home(self):
+        library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
+                               config=self.home / "config", data=self.home / "data")
+        entry = library.create("game")
+        config = self.home / "xdg-config"
+        config.mkdir()
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config)}):
+            self.assertIsNone(library.desktop_folder())  # ~/Desktop is not there
+            (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/"\n')
+            # What user-dirs.dirs sets to turn the desktop folder off.
+            self.assertIsNone(library.desktop_folder())
+            with self.assertRaisesRegex(ValueError, "desktop folder"):
+                library.set_shortcut(entry["name"], "desktop", True)
+            self.assertFalse(any(self.home.glob("*.desktop")))
+            (self.home / "Schreibtisch").mkdir()
+            (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Schreibtisch"\n')
+            self.assertEqual(library.desktop_folder(), self.home.resolve() / "Schreibtisch")
+        with self.assertRaises(ValueError):
+            library.set_shortcut("../game", "menu", True)
+
+    def test_an_unlocated_game_is_not_started_from_the_current_folder(self):
+        capture = self.library.root / "old-game"
+        capture.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            self.library.command(self.library.entry("old-game"))
+
+    def run_launch(self, name):
+        record = self.home / "dialog.json"
+        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
+               "SANDBOX_DIALOG": str(ROOT / "tests/dialog_recorder.py"), "DIALOG_RECORD": str(record)}
+        result = subprocess.run([str(ROOT / "sandbox-manager"), "--launch", name], env=env,
+                                capture_output=True, text=True, timeout=30)
+        return result, json.loads(record.read_text()) if record.exists() else None
+
+    def test_a_shortcut_to_a_deleted_or_unready_sandbox_explains_itself(self):
+        result, shown = self.run_launch("deleted-game")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(shown[0], "error")
+        self.assertIn("no longer exists", shown[-1])
+        library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
+                               config=self.home / ".config/sandbox-game")
+        entry = library.create("Game name")
+        result, shown = self.run_launch(entry["name"])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(shown[:2], ["error", "--title=Game name"])
+        self.assertIn("Programs page", shown[-1])
+
     def test_environment_editor_writes_only_the_chosen_files_own_list(self):
         entry = self.library.create("game")
         name = entry["name"]

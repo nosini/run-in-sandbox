@@ -114,6 +114,16 @@ To give a game a readable title, edit **Overview → Display name** and choose
 **Save game details**. This updates its name in the library and window while
 keeping the existing sandbox folder, settings and saves in place.
 
+To start a game without opening the manager, use **Overview → Shortcuts**.
+**Show in the applications menu** adds it to your desktop's app list, and
+**Place a shortcut on the desktop** puts a launcher in your desktop folder
+(GNOME shows desktop icons only with an extension such as Desktop Icons NG).
+A shortcut starts the game as **Play** does, with the game's icon and display
+name, and both follow later changes the manager makes. Deleting the sandbox
+in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
+file in `~/.local/share/applications` or the desktop folder, running
+`sandbox-manager --launch NAME`, which you can also use from a shell.
+
 Choose **Add game → Add an existing game** for an unpacked game. Select its
 folder or launcher; its original files stay in place, and saves and changes
 are captured in its sandbox. Games launched through the file manager or CLI

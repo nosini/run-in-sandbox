@@ -32,6 +32,7 @@ calls = []
 proton_scans = []
 icon_calls = []
 active_icons = [0]
+shortcuts = []
 
 def children(widget):
     yield widget
@@ -156,6 +157,15 @@ def tick():
             assert opened == [drive], opened
             drive.unlink()
             drive.with_name("moved").rename(drive)
+            shortcut = Path.home() / f".local/share/applications/sandbox-game-{manager.selected['name']}.desktop"
+            menu = next(w for w in children(manager.overview) if isinstance(w, Gtk.CheckButton)
+                        and w.get_label() == "Show in the applications menu")
+            desktop = next(w for w in children(manager.overview) if isinstance(w, Gtk.CheckButton)
+                           and w.get_label() == "Place a shortcut on the desktop")
+            # No ~/Desktop in this home.
+            assert not desktop.get_sensitive()
+            menu.set_active(True)
+            shortcuts.append((menu, shortcut))
             manager.confirm_operation(manager.selected, "delete")
             dialog = manager.window.get_visible_dialog()
             assert isinstance(dialog, Adw.AlertDialog)
@@ -191,6 +201,11 @@ def tick():
         elif stage == 4:
             if len(manager.entries) != 3:
                 return True
+            menu, shortcut = shortcuts[0]
+            assert shortcut.is_file(), shortcut
+            info = Gio.DesktopAppInfo.new_from_filename(str(shortcut))
+            assert info.get_name() == "GUI Test Game"
+            assert info.get_commandline().endswith(" --launch gui-test-game"), info.get_commandline()
             assert manager.library.game_folders() == [Path.home() / "External Games"]
             moved = next(e for e in manager.entries if e["name"] == "moved-game")
             assert moved["directory"] == str(Path.home() / "External Games/Native/Moved Game")

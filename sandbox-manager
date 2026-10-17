@@ -27,7 +27,67 @@ core = load_module("sandbox_manager_core", HELPERS / "sandbox-manager-lib.py")
 dialogs = load_module("sandbox_manager_dialogs", HELPERS / "sandbox-game-dialog")
 
 
+def make_library():
+    backend = HERE / "sandbox-game"
+    if not backend.exists():
+        backend = Path.home() / ".local/bin/sandbox-game"
+    launcher = HERE / "Sandbox game"
+    if not launcher.exists():
+        launcher = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") \
+            / "nautilus/scripts/Sandbox game"
+    return core.Library(backend, HELPERS, launcher)
+
+
+def show(mode, title, text):
+    """TEXT in a sandbox-game-dialog window, or a notification without one."""
+    command = [os.environ.get("SANDBOX_DIALOG") or str(HELPERS / "sandbox-game-dialog"), mode, "--title=" + title]
+    # A log is read from stdin, and may be long; a message is an argument.
+    if mode != "log":
+        command.append("--text=" + text)
+    try:
+        # 2: no GTK to show it with.
+        if subprocess.run(command, input=text.encode("utf-8", errors="replace") if mode == "log" else b"",
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode in (0, 1):
+            return
+    except OSError:
+        pass
+    try:
+        subprocess.run(["notify-send", title, text[:500]], stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def launch(name):
+    """Start a game as Play does, for its desktop shortcut: no library window."""
+    library = make_library()
+    title = name
+    try:
+        if not library.capture(name).is_dir():
+            raise ValueError("This sandbox no longer exists. Remove its shortcut, "
+                             "or create a new one in Sandbox Manager.")
+        entry = library.entry(name)
+        title = entry["title"]
+        if entry["kind"] == "windows" and not entry.get("program"):
+            raise ValueError("Open Sandbox Manager and choose the installed game or launcher on the "
+                             "Programs page first.")
+        process = library.start(entry)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"sandbox-manager: {error}", file=sys.stderr)
+        show("error", title, str(error))
+        return 1
+    code = process.wait()
+    # The file-manager launcher reports its own failures; a Windows sandbox's
+    # program is started directly, so its failure is shown here.
+    if code and entry["kind"] == "windows":
+        log = library.read_log(name).splitlines()[-80:]
+        show("log", f"sandbox-game failed ({title})", "\n".join(
+            [f"exit code: {code}", f"log: {library.log_path(name)}", "", *log]) + "\n")
+    return code
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--launch":
+        return launch(sys.argv[2])
     try:
         import gi
         gi.require_version("Gtk", "4.0")
@@ -112,14 +172,7 @@ def main():
     class Manager:
         def __init__(self, app):
             self.app = app
-            backend = HERE / "sandbox-game"
-            if not backend.exists():
-                backend = Path.home() / ".local/bin/sandbox-game"
-            launcher = HERE / "Sandbox game"
-            if not launcher.exists():
-                launcher = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") \
-                    / "nautilus/scripts/Sandbox game"
-            self.library = core.Library(backend, HELPERS, launcher)
+            self.library = make_library()
             self.appearance = dialogs.Appearance(Adw)
             self.entries, self.rows, self.running, self.processes = [], {}, set(), {}
             # One extraction at a time, newest request per game: a cold cache
@@ -420,6 +473,11 @@ def main():
                     path = self.library.icon(entry)
                 except Exception:
                     continue  # keep whichever icon is shown
+                try:
+                    # Requested again on every reload, so renames reach shortcuts too.
+                    self.library.refresh_shortcuts(entry, path)
+                except (OSError, ValueError):
+                    pass
                 GLib.idle_add(self.icon_loaded, name, path)
 
         def icon_loaded(self, name, path):
@@ -471,6 +529,7 @@ def main():
                 except (OSError, ValueError) as error:
                     self.toast(error)
             self.button(self.overview, "Save game details", save)
+            self.build_shortcuts(entry)
             total, last = self.library.stats(entry["name"])
             played = f"{total // 3600}h {total % 3600 // 60}m" if total else "Not played yet"
             last_text = datetime.fromtimestamp(last).strftime("%d %b %Y, %H:%M") if last else "Never"
@@ -503,6 +562,37 @@ def main():
             self.button(self.maintenance, "Reset install changes", lambda *_: self.confirm_operation(entry, "reset-install"))
             self.button(self.maintenance, "Delete sandbox", lambda *_: self.confirm_operation(entry, "delete"), "destructive-action")
             self.overview.append(self.maintenance)
+
+        def build_shortcuts(self, entry):
+            self.label(self.overview, "Shortcuts", "title-3")
+            present = self.library.shortcuts(entry["name"])
+            desktop = self.library.desktop_folder() is not None
+            for where, text in (("menu", "Show in the applications menu"),
+                                ("desktop", "Place a shortcut on the desktop")):
+                check = Gtk.CheckButton(label=text, active=present[where])
+                check.set_sensitive(where != "desktop" or desktop)
+                check.where = where
+                check.reverting = False
+                def toggled(check):
+                    if check.reverting:
+                        return
+                    enabled = check.get_active()
+                    def done(_, error):
+                        if not error:
+                            self.toast({("menu", True): "Added to the applications menu",
+                                        ("menu", False): "Removed from the applications menu",
+                                        ("desktop", True): "Shortcut placed on the desktop",
+                                        ("desktop", False): "Shortcut removed from the desktop"}[check.where, enabled])
+                            return
+                        check.reverting = True
+                        check.set_active(not enabled)
+                        check.reverting = False
+                    self.work(lambda: self.library.set_shortcut(entry["name"], check.where, enabled,
+                                                                self.icon_paths.get(entry["name"])), done)
+                check.connect("toggled", toggled)
+                self.overview.append(check)
+            self.label(self.overview, "Shortcuts start the game as Play does, without opening this window." +
+                       ("" if desktop else " There is no desktop folder to place a shortcut in."), "dim-label")
 
         def build_programs(self, entry):
             self.clear(self.program_page)

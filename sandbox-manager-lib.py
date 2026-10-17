@@ -33,7 +33,7 @@ def read_json(path):
         return {}
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, mode=None):
     """Replace PATH with TEXT, a str or bytes, never leaving a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     binary = isinstance(text, bytes)
@@ -43,6 +43,8 @@ def atomic_write(path, text):
                                          dir=path.parent, prefix=".manager-", delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(text)
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
         temporary.replace(path)
     finally:
         if temporary is not None:
@@ -83,8 +85,32 @@ def read_settings(path):
     return values
 
 
+def desktop_string(text):
+    """TEXT as a desktop entry string value."""
+    text = text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return "\\s" + text[1:] if text.startswith(" ") else text
+
+
+# Characters the desktop entry spec says an Exec argument must be quoted for.
+EXEC_RESERVED = re.compile(r"""[\s"'\\><~|&;$*?#()`]""")
+
+
+def desktop_exec_argument(text):
+    """TEXT as one argument of a desktop entry's Exec key: quoted only when it
+    must be, as menu editors take a quoted program for a missing one."""
+    text = text.replace("%", "%%")
+    if text and not EXEC_RESERVED.search(text):
+        return text
+    for char in ('\\', '"', '`', '$'):
+        text = text.replace(char, '\\' + char)
+    # The string parser undoes one level of backslashes before Exec is split.
+    return '"' + text.replace('\\', '\\\\') + '"'
+
+
 class Library:
-    def __init__(self, backend, helpers, launcher, home=None, config=None):
+    SHORTCUTS = ("menu", "desktop")
+
+    def __init__(self, backend, helpers, launcher, home=None, config=None, data=None, desktop=None):
         self.backend = Path(backend)
         self.helpers = Path(helpers)
         self.launcher = Path(launcher)
@@ -92,6 +118,9 @@ class Library:
         self.root = self.home / "game-sandboxes"
         self.config = Path(config) if config is not None else Path(
             os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "sandbox-game"
+        self.data = Path(data) if data is not None else Path(
+            os.environ.get("XDG_DATA_HOME") or self.home / ".local/share")
+        self.desktop = Path(desktop) if desktop is not None else None
         # One folder search or reconnect at a time, each over what the last saved.
         self.lock = threading.RLock()
 
@@ -630,6 +659,22 @@ PY
             raise ValueError(result.stderr.strip() or "Cannot read this sandbox's settings")
         return [str(self.backend), *result.stdout.split("\0")[:-1]]
 
+    def user_dirs(self):
+        """{"DESKTOP": path, ...} as set in user-dirs.dirs."""
+        try:
+            text = (Path(os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "user-dirs.dirs") \
+                .read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        folders = {}
+        for match in re.finditer(r'^\s*XDG_([A-Z]+)_DIR="([^"\n]*)"', text, re.M):
+            value = match[2]
+            if value.startswith("$HOME"):
+                value = str(self.home.resolve()) + value[len("$HOME"):]
+            if value.startswith("/"):
+                folders[match[1]] = Path(value)
+        return folders
+
     def shared_folder(self, folder):
         """Folders that collect unrelated files: home, its parents and the XDG user folders."""
         folder = folder.resolve()
@@ -638,18 +683,83 @@ PY
             return True
         folders = {home / name for name in ("Desktop", "Documents", "Downloads", "Music", "Pictures",
                                             "Public", "Templates", "Videos")}
-        try:
-            text = (Path(os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "user-dirs.dirs") \
-                .read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
-        for match in re.finditer(r'^\s*XDG_[A-Z]+_DIR="([^"\n]*)"', text, re.M):
-            value = match[1]
-            if value.startswith("$HOME"):
-                value = str(home) + value[len("$HOME"):]
-            if value.startswith("/"):
-                folders.add(Path(value))
+        folders.update(self.user_dirs().values())
         return any(folder == path.resolve() for path in folders)
+
+    def desktop_folder(self):
+        """The desktop folder, or None without one. Never created here: a
+        desktop set to home, as user-dirs.dirs turns it off, is none either."""
+        folder = self.desktop or self.user_dirs().get("DESKTOP", self.home / "Desktop")
+        try:
+            if folder.is_dir() and folder.resolve() != self.home.resolve():
+                return folder
+        except OSError:
+            pass
+        return None
+
+    def shortcut_path(self, name, where):
+        self.capture(name)
+        if where == "menu":
+            return self.data / "applications" / f"sandbox-game-{name}.desktop"
+        if where == "desktop":
+            folder = self.desktop_folder()
+            if folder is None:
+                raise ValueError("There is no desktop folder to place a shortcut in")
+            return folder / f"sandbox-game-{name}.desktop"
+        raise ValueError("Unknown shortcut location")
+
+    def shortcuts(self, name):
+        """{"menu": bool, "desktop": bool}: which shortcuts to this sandbox exist."""
+        found = {}
+        for where in self.SHORTCUTS:
+            try:
+                found[where] = self.shortcut_path(name, where).is_file()
+            except ValueError:
+                found[where] = False
+        return found
+
+    def shortcut_text(self, entry, icon=None):
+        manager = self.backend.with_name("sandbox-manager")
+        return "".join(line + "\n" for line in (
+            "[Desktop Entry]", "Type=Application",
+            "Name=" + desktop_string(entry["title"]),
+            "Comment=Play in its sandbox",
+            "Exec=" + desktop_exec_argument(str(manager)) + " --launch " + entry["name"],
+            # Hidden from menus once the manager is uninstalled.
+            "TryExec=" + desktop_string(str(manager)),
+            "Icon=" + desktop_string(str(icon) if icon else "applications-games"),
+            "Terminal=false", "Categories=Game;"))
+
+    def write_shortcut(self, path, text, where):
+        if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8", errors="replace") == text:
+            return
+        # Desktops start only executable launchers there, GNOME's only trusted ones too.
+        atomic_write(path, text, mode=0o755 if where == "desktop" else 0o644)
+        if where == "desktop":
+            try:
+                subprocess.run(["gio", "set", "--", str(path), "metadata::trusted", "true"],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def set_shortcut(self, name, where, enabled, icon=None):
+        path = self.shortcut_path(name, where)
+        if enabled:
+            self.write_shortcut(path, self.shortcut_text(self.entry(name), icon), where)
+        else:
+            path.unlink(missing_ok=True)
+
+    def refresh_shortcuts(self, entry, icon=None):
+        """Keep existing shortcuts' names and icons as the library shows them."""
+        for where, present in self.shortcuts(entry["name"]).items():
+            if present:
+                self.write_shortcut(self.shortcut_path(entry["name"], where),
+                                    self.shortcut_text(entry, icon), where)
+
+    def remove_shortcuts(self, name):
+        for where, present in self.shortcuts(name).items():
+            if present:
+                self.shortcut_path(name, where).unlink(missing_ok=True)
 
     def installer_binds(self, installer):
         """Read-only installer media, never a whole home or downloads folder."""
@@ -672,7 +782,7 @@ PY
     def command(self, entry, installer=None, tool=None, program=None):
         if entry["kind"] == "existing" and not installer and not tool and not program:
             selection = Path(entry["selection"])
-            if not selection.exists():
+            if not entry["selection"] or not selection.exists():
                 raise ValueError("The game folder is missing. Use Locate game to reconnect it.")
             return [str(self.launcher)], {**os.environ,
                 "NAUTILUS_SCRIPT_SELECTED_FILE_PATHS": str(selection),
@@ -818,4 +928,6 @@ PY
                                 errors="replace", timeout=40)
         if result.returncode:
             raise ValueError(result.stderr.strip() or result.stdout.strip() or "Operation failed")
+        if operation == "delete":
+            self.remove_shortcuts(name)
         return result.stdout
