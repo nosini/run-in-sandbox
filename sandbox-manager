@@ -92,11 +92,15 @@ def main():
                 result = self.state.result()
                 if result["scope"] != "clear":
                     buffer = self.env.get_buffer()
-                    lines = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False).splitlines()
-                    for line in lines:
-                        if line and (not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=\S*", line)):
-                            raise ValueError("Use NAME=value on each line, without spaces in values.")
-                    result["env"] = " ".join(line for line in lines if line)
+                    # Saved space-separated, so values cannot hold spaces, and
+                    # spaces separate entries here as well as new lines do.
+                    words = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False).split()
+                    for word in words:
+                        if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=\S*", word):
+                            raise ValueError(f"Use NAME=value, one per line; values cannot contain spaces: {word}")
+                        if word.startswith("env="):
+                            raise ValueError(f"Leave out the env= in front: {word[4:]}")
+                    result["env"] = " ".join(words)
                 self.manager.library.save_preferences(self.name, result)
                 self.appearance.save(self.selected("appearance"))
                 self.error_note.set_visible(False)

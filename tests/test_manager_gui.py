@@ -94,6 +94,16 @@ def tick():
             assert text() == "DXVK_HUD=1"
             scope.set_selected(0)
             preferences.widgets["net"].set_active(True)
+            # A pasted line of several variables is several; the file's own
+            # env= in front is not a variable called env.
+            buffer.set_text("env=WINE_GRAPHICS_DRIVER=x11")
+            preferences.save()
+            assert "env=" in preferences.error_note.get_label()
+            assert "WINE_GRAPHICS_DRIVER" not in manager.library.settings(entry["name"])["env"]
+            buffer.set_text("WINE_GRAPHICS_DRIVER=x11 WINEDLLOVERRIDES=lsteamclient=d\n")
+            preferences.save()
+            assert manager.library.settings(entry["name"])["env"] == \
+                "WINE_GRAPHICS_DRIVER=x11 WINEDLLOVERRIDES=lsteamclient=d"
             buffer.set_text("WINE_GRAPHICS_DRIVER=x11")
             preferences.save()
             assert manager.library.settings(entry["name"])["net"] == "1"
