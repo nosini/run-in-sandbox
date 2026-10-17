@@ -408,6 +408,7 @@ pref_flags() {
         pv="${PROTON_VER:-$(cfg_get proton auto)}"
         if [ "$pv" = auto ]; then FLAG+=( --proton ); else FLAG+=( "--proton=$pv" ); fi
         [ "$(cfg_get mod_loaders 0)" = 1 ] && FLAG+=( --mod-loaders )
+        [ "$(cfg_get steam 0)" = 1 ] && FLAG+=( --steam )
     fi
 }
 
@@ -424,7 +425,7 @@ import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
         "wayland_x11", "x11_exe",
-        "net", "proton", "mod_loaders", "casefold", "webgl",
+        "net", "proton", "mod_loaders", "steam", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
         "lan", "lan_allow", "private_hosts", "hosts", "hosts_writable", "env"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
@@ -508,7 +509,7 @@ PY
         fi
     fi
 
-    bools="wayland wayland_x11 host_x11 mangohud gamescope net launch_with mod_loaders casefold webgl proton
+    bools="wayland wayland_x11 host_x11 mangohud gamescope net launch_with mod_loaders steam casefold webgl proton
            dotnet lan private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }

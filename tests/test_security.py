@@ -1083,6 +1083,12 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--mod-loaders", recorded.read_text().splitlines())
+        self.assertNotIn("--steam", recorded.read_text().splitlines())
+        (config / name).write_text("steam=1\n")
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--steam", recorded.read_text().splitlines())
 
     def test_nwjs_runs_under_the_games_name_without_a_copy(self):
         # The runtime's nw, under the game's name beside links to the rest of
@@ -1417,6 +1423,27 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(overrides("--mod-loaders", "--env", "WINEDLLOVERRIDES=winhttp=b"),
                          [mods, mods + ";winhttp=b"])
         result = self.cli("--headless", "--mod-loaders", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs --proton", result.stderr)
+
+    def test_proton_starts_programs_as_non_steam_unless_asked(self):
+        # Through steam.exe, Wine passes for a running Steam client, and a
+        # launcher that can sign in through Steam offers only a login that
+        # cannot work here. UMU_ID selects umu's non-Steam start in the builds
+        # that have it; --steam keeps steam.exe, and --env still has the last say.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        def umu_ids(*options):
+            args = self.recorded_args("--proton=" + str(proton), *options)
+            return [args[i + 2] for i, a in enumerate(args)
+                    if a == "--setenv" and args[i + 1] == "UMU_ID"]
+        self.assertEqual(umu_ids(), ["umu-default"])
+        self.assertEqual(umu_ids("--steam"), [])
+        self.assertEqual(umu_ids("--env", "UMU_ID=umu-123"), ["umu-default", "umu-123"])
+        self.assertNotIn("UMU_ID", self.recorded_args())
+        result = self.cli("--headless", "--steam", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("needs --proton", result.stderr)
 

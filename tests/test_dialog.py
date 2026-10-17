@@ -54,14 +54,16 @@ class PreferencePolicyTests(unittest.TestCase):
 
     def test_switching_runtime_preserves_edits_and_omits_hidden_settings(self):
         state = Preferences({"engine": "nwjs", "can_proton": True, "values": {
-            "mangohud": "1", "proton": "GE-Test", "casefold": "0", "webgl": "vulkan"}})
+            "mangohud": "1", "proton": "GE-Test", "casefold": "0", "webgl": "vulkan", "steam": "1"}})
         self.assertNotIn("mangohud", state.result())
         self.assertNotIn("proton", state.result())
+        self.assertNotIn("steam", state.result())
         state.display = "wayland-gamescope"
         state.set_runtime("proton")
         self.assertEqual(state.display, "x11")
         self.assertEqual(state.result()["mangohud"], "1")
         self.assertEqual(state.result()["proton"], "GE-Test")
+        self.assertEqual(state.result()["steam"], "1")
         self.assertNotIn("webgl", state.result())
         state.set_runtime("auto")
         self.assertEqual(state.result()["casefold"], "0")

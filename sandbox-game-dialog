@@ -145,7 +145,7 @@ class Preferences:
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders", "dotnet", "lan", "private_hosts",
+        for key in ("net", "mangohud", "mod_loaders", "steam", "dotnet", "lan", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("with_proton", "lan_allow", "hosts"):
@@ -254,7 +254,7 @@ class Preferences:
         if self.proton_controls:
             if self.split_controls:
                 result["x11_exe"] = self.values.get("x11_exe", "").strip()
-            for key, fallback in (("proton", "auto"), ("mod_loaders", "0")):
+            for key, fallback in (("proton", "auto"), ("mod_loaders", "0"), ("steam", "0")):
                 result[key] = self.values.get(key, fallback)
         if self.engine == "nwjs":
             result["casefold"] = self.values.get("casefold", "1")
@@ -453,6 +453,8 @@ class Dialog:
                       pinned, lambda *_: self.set_value("proton", self.selected("proton")))
         self.switch("mod_loaders", "Mod loaders (BepInEx, MelonLoader, …)", self.state.values.get("mod_loaders") == "1",
                     lambda widget, *_: self.set_value("mod_loaders", "1" if widget.get_active() else "0"))
+        self.switch("steam", "Start through Proton's Steam stand-in", self.state.values.get("steam") == "1",
+                    lambda widget, *_: self.set_value("steam", "1" if widget.get_active() else "0"))
         self.dropdown("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")],
                       self.state.values.get("casefold", "1"), lambda *_: self.set_value("casefold", self.selected("casefold")))
         self.dropdown("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")],
@@ -539,6 +541,7 @@ class Dialog:
         self.split_note.set_visible(self.state.split_controls)
         self.rows["proton"].set_visible(self.state.proton_controls)
         self.rows["mod_loaders"].set_visible(self.state.proton_controls)
+        self.rows["steam"].set_visible(self.state.proton_controls)
         for key in ("casefold", "webgl"):
             self.rows[key].set_visible(self.state.engine == "nwjs")
         self.rows["resolution"].set_visible(self.state.uses_gamescope)

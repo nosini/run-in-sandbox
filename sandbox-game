@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-#              [--proton[=VER] [--mod-loaders]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
+#              [--proton[=VER] [--mod-loaders] [--steam]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
@@ -61,6 +61,9 @@
 #   --mod-loaders  with --proton: Wine takes the game's own winhttp.dll,
 #               version.dll and the like over its built-in ones, as Windows
 #               does, so BepInEx, MelonLoader, UE4SS and ASI loaders load.
+#   --steam     with --proton: start CMD through Proton's steam.exe, which
+#               stands in for a running Steam client. Without it, Proton
+#               builds with umu's non-Steam mode start CMD with plain Wine.
 #   --mkxp      run an RPG Maker XP/VX/VX Ace game natively under mkxp-z, no
 #               Wine involved. CMD is optional and normally omitted: the
 #               runtime is the program. =DIR names the mkxp-z install, else
@@ -573,6 +576,8 @@ Runtimes
                         found, or VER by name or path ($PROTON_DIR wins)
   --mod-loaders         with --proton: load mod loaders the game ships
                         (BepInEx, MelonLoader, UE4SS, ASI loaders)
+  --steam               with --proton: start it through Proton's steam.exe,
+                        as Steam does, rather than as a non-Steam program
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
   --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
   --dotnet[=DIR]        the host's .NET runtime, for a .NET program that does
@@ -632,7 +637,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0
 WAYLAND_X11=0; X11_EXE=""
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
@@ -667,6 +672,7 @@ while [ "$#" -gt 0 ]; do
         --proton)    PROTON_SPEC="auto"; shift ;;
         --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
         --mod-loaders) MODS=1; shift ;;
+        --steam)     STEAM=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --pgmmv)     PGMMV_SPEC="auto"; shift ;;
@@ -707,6 +713,8 @@ done
     echo "--pgmmv, --proton and --mkxp are mutually exclusive" >&2; exit 1; }
 [ "$MODS" = 0 ] || [ -n "$PROTON_SPEC" ] || {
     echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
+[ "$STEAM" = 0 ] || [ -n "$PROTON_SPEC" ] || {
+    echo "--steam is for Windows games: it needs --proton" >&2; exit 1; }
 [ -z "$WITH_PROTON_SPEC" ] || [ -z "$PROTON_SPEC" ] || {
     echo "--with-proton is for native programs; --proton already brings Proton along" >&2; exit 1; }
 [ "$NET" = 1 ] || { [ "${#LAN_ALLOW[@]}" = 0 ] && [ "$LAN_ALL" = 0 ]; } || {
@@ -972,6 +980,15 @@ if [ -n "$PROTON_SPEC" ]; then
         --setenv STEAM_COMPAT_CLIENT_INSTALL_PATH /steamclient
         --setenv STEAM_COMPAT_INSTALL_PATH       /game
     )
+    # `proton run` starts the program through Proton's steam.exe, which with
+    # Wine's help passes for a running Steam client: Steam's registry entries
+    # name a live process, and the Steam API finds its bridge DLL. A launcher
+    # that can also sign in through Steam then offers only that, and with no
+    # Steam client in here it can never work. Builds with umu's non-Steam mode
+    # (GE-Proton and those built on it) start the program with plain Wine
+    # instead, and turn the bridge off, once UMU_ID is set; others ignore it.
+    # No numeric ID, so nothing takes it for a Steam app. --env still wins.
+    [ "$STEAM" = 1 ] || PROTON_ARGS+=( --setenv UMU_ID umu-default )
     # Mod loaders get into a game through a DLL named after a system one,
     # dropped beside the .exe: BepInEx's winhttp.dll, MelonLoader's
     # version.dll, UE4SS's dwmapi.dll, an ASI loader's dinput8.dll. Windows

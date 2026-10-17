@@ -679,9 +679,10 @@ PY
                 "SANDBOX_BACKEND": str(self.backend),
                 "SANDBOX_GAME_NAME": entry["name"]}
         flags = self.flags(entry)
-        # Proton's steam.exe waits only for a command ending in .exe; anything
-        # else it hands to ShellExecute and returns at once, and Proton, then
-        # the sandbox, exits with the program barely started.
+        # Proton's steam.exe (the Steam setting) waits only for a command
+        # ending in .exe; anything else it hands to ShellExecute and returns
+        # at once, and Proton, then the sandbox, exits with the program barely
+        # started. Plain Wine, without that setting, waits for either.
         if installer is not None:
             installer = Path(installer).resolve(strict=True)
             if not installer.is_file() or installer.suffix.lower() not in (".exe", ".msi"):
