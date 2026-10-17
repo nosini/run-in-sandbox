@@ -786,6 +786,7 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── compat/     --proton: the Wine prefix, under pfx/
 ├── mkxp.json   --mkxp: the runtime config, yours to edit
 ├── machine-id  the game's own stand-in for /etc/machine-id
+├── mac-address --net: the MAC address of the game's network card
 ├── hosts       --hosts-writable: the game's /etc/hosts
 └── playtime    one line per launch: when it started, seconds played
 ```
@@ -891,6 +892,11 @@ filesystem by UUID), the loaded module list and the SSH host keys read as
 empty. A game that had already run before this existed keeps
 seeing the real machine-id, in case it keyed its saves to it; delete its
 `machine-id` file to give it a fresh one.
+
+With `--net`, the game's network card has a MAC address of its own, made up
+at random the first time and kept in `mac-address`, so it never shows the real
+card's. It stays the same between launches: launchers that tie a saved login
+to the device would otherwise log you out every time.
 
 ## Network
 

@@ -5,6 +5,7 @@ Uses real bubblewrap for filesystem/namespace checks and temporary command
 recorders for display policy checks, without opening a game window.
 """
 import ctypes
+import glob
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import ipaddress
@@ -153,7 +154,8 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0)
             with self.subTest(whole_lan=whole_lan), \
                     mock.patch.object(sys, "argv", ["helper", "123", "169.254.1.1", "pidfile",
-                                                    "pasta", whole_lan, json.dumps(allowed)]), \
+                                                    "pasta", "02:00:00:00:00:01", whole_lan,
+                                                    json.dumps(allowed)]), \
                     mock.patch("shutil.which", return_value="ip"), \
                     mock.patch("os.open", return_value=31), \
                     mock.patch("fcntl.ioctl", return_value=32), \
@@ -1834,6 +1836,30 @@ for path in (os.environ["WAYLAND_DISPLAY"], "/tmp/.X11-unix/X77"):
                         result = subprocess.run(args, input=payload, **kwargs)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, payload)
+
+    def test_network_card_keeps_its_address_between_launches(self):
+        # The kernel gives pasta's interface a random MAC at each start, and a
+        # launcher that ties its saved login to the "device" forgot it every
+        # time. Each sandbox keeps one of its own; none is the real card's.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        probe = ("import fcntl, socket, struct\n"
+                 "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                 "for _, name in socket.if_nameindex():\n"
+                 "    if name != 'lo':\n"
+                 "        req = struct.pack('256s', name.encode())\n"
+                 "        print(fcntl.ioctl(s.fileno(), 0x8927, req)[18:24].hex(':'))\n")
+        (self.game / "mac.py").write_text(probe)
+        def macs(*options):
+            result = self.cli("--headless", "--net", *options, self.game, "python3", "/game/mac.py")
+            return result.stdout.split()
+        first = macs()
+        self.assertEqual(len(first), 1, first)
+        self.assertEqual(int(first[0][:2], 16) & 3, 2, first)   # locally administered, unicast
+        self.assertEqual(macs(), first)
+        self.assertNotEqual(macs("--name", "other-sandbox"), first)
+        host = {Path(f).read_text().strip() for f in glob.glob("/sys/class/net/*/address")}
+        self.assertNotIn(first[0], host)
 
     def test_network_reaches_the_internet_and_nothing_else(self):
         if not shutil.which("pasta"):

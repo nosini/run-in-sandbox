@@ -1711,6 +1711,18 @@ if [ "$NET" = 1 ]; then
     # wherever /etc/resolv.conf really lives, which is often under /run.
     exec 6<<<"nameserver $DNS_ADDR"
     PASTA_PID="$(mktemp)"            # cleanup() ends pasta with the game
+    # pasta's interface in here would get a new random MAC address from the
+    # kernel at every launch, and Windows programs see it through Wine: a
+    # launcher that ties a saved login to its "device" then forgets it each
+    # time. Each sandbox keeps one of its own, as with its machine-id: locally
+    # administered and unicast, and nothing of the real card's.
+    MAC="$(cat "$CAP/mac-address" 2>/dev/null || true)"
+    if [[ ! "$MAC" =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]]; then
+        read -r -a _b < <(od -An -N6 -tx1 /dev/urandom)
+        _b[0]="$(printf '%02x' $(( (0x${_b[0]} & 0xfe) | 0x02 )))"
+        MAC="$(IFS=:; printf '%s' "${_b[*]}")"
+        printf '%s\n' "$MAC" > "$CAP/mac-address"
+    fi
     # pasta runs from a copy named after the game, NAME-pasta, so that proxies
     # which route by process (mihomo's PROCESS-NAME) can tell one game's
     # traffic from another's, and from podman's own pasta. They go by the
@@ -1751,7 +1763,7 @@ read -r -d '' NET_HELPER <<'EOF' || true
 import ctypes, fcntl, ipaddress, json, os, shutil, subprocess, sys
 NS_GET_USERNS = 0xB701
 CLONE_NEWUSER, CLONE_NEWNET = 0x10000000, 0x40000000
-pid, dns, pidfile, pasta, whole_lan, allowed = sys.argv[1:]
+pid, dns, pidfile, pasta, mac, whole_lan, allowed = sys.argv[1:]
 ip = shutil.which("ip") or next(p for p in ("/usr/sbin/ip", "/sbin/ip")
                                 if os.access(p, os.X_OK))
 # Private, shared and link-local space, IPv6's private fc00::/7 included,
@@ -1819,7 +1831,7 @@ subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
                 "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
                 "-t", "none", "-u", "none", "-T", "none", "-U", "none",
                 "--map-host-loopback", "none", "--map-guest-addr", "none",
-                "--dns-forward", dns] + ([] if has_v6 else ["-4"]),
+                "--dns-forward", dns, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
                check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
                pass_fds=(user_fd,))
 for ver, nets in block.items():
@@ -2033,7 +2045,7 @@ else
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
     if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
-                                    "$LAN_ALL" "$LAN_RULES" 18>&-; then
+                                    "$MAC" "$LAN_ALL" "$LAN_RULES" 18>&-; then
         printf x >&13
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
