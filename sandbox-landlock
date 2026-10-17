@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """sandbox-landlock [--rw PATH | --ro PATH | --ls PATH | --unix-connect PATH]...
                  [--unix-connect-where-writable] [--no-abstract-scope]
-                 [--attach DIR] -- CMD...
+                 [--attach DIR | --gamescope-on-demand] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
    sandbox-landlock --has-unix-connect   exit 0 if the kernel can restrict
                                          connecting to Unix sockets by path
@@ -42,6 +42,27 @@ hands the game that one socket back. That layer does not scope abstract sockets,
 gamescope's Xwayland listens on one, and X11 clients do not fall back to its
 socket file when refused.
 
+--gamescope-on-demand: split display (sandbox-game --wayland-x11), where
+the game draws on the desktop and only its X11 windows -- a launcher, a
+helper -- go through gamescope. CMD is gamescope's command, then --, then the
+game's. Started above the game, as everywhere else, gamescope would take the
+game along when its window is closed: it sends SIGTERM to everything it
+started, and as the sandbox's main process it ends the sandbox too. So this
+process starts the game beside gamescope instead, and gives it a display of
+its own, :0, whose connections it passes on to gamescope's Xwayland --
+bytes, and the descriptors DRI3, Present and MIT-SHM send along with them.
+Gamescope is started when an X11 program connects and none is running: the
+first time, and again after its window was closed, which ends only the X11
+programs that were in it. A display of our own because Wine keeps the
+DISPLAY a program started with, and a gamescope started afresh picks its
+display number itself. When the game ends, gamescope is stopped.
+
+Passing connections on gives the game nothing new: its X11 programs could
+connect to gamescope's display socket themselves. Which display gamescope
+took is read from the X lock files, which the game can write to; it can
+only send its own X11 programs to a socket of its own that way, since the
+connection goes to an abstract socket, which no symlink redirects.
+
 On a kernel without Landlock the command runs anyway, with a warning, the way
 sandbox-game carries on without a systemd scope: it is defence in depth, and
 everything else still stands. Any other failure stops the launch.
@@ -69,11 +90,14 @@ stdin, stdout and stderr or asks for a terminal, whose master side is sent
 back. The command runs in a session of its own, in /; its exit status is
 sent back when it ends, and closing the connection hangs it up.
 """
+import array
 import ctypes
 import fcntl
 import json
 import os
+import re
 import resource
+import select
 import selectors
 import signal
 import socket
@@ -308,6 +332,273 @@ def serve(listener, game):
                     conn.close()
 
 
+X11_DIR = "/tmp/.X11-unix"
+CHUNK = 1 << 16
+MAX_FDS = 64                            # XCB passes at most 16 with a request
+
+
+def hold_display():
+    """Display :0 for the game: its lock file, then its socket."""
+    try:
+        fd = os.open("/tmp/.X0-lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o444)
+        os.write(fd, b"%10d\n" % os.getpid())
+        os.close(fd)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+        listener.bind(f"{X11_DIR}/X0")
+        listener.listen(64)
+    except OSError as e:
+        sys.exit(f"sandbox-landlock: holding display :0: {e.strerror}")
+    listener.setblocking(False)
+    return listener
+
+
+def descends(pid, ancestor):
+    """Whether PID is ANCESTOR or a process below it."""
+    for _ in range(64):
+        if pid == ancestor:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                pid = int(f.read().rsplit(b")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if pid <= 1:
+            return False
+    return False
+
+
+def gamescope_display(pid):
+    """The lowest display whose lock file names PID or a process below it --
+    a wrapper script's gamescope -- or None so far."""
+    found = []
+    for name in os.listdir("/tmp"):
+        number = re.fullmatch(r"\.X([0-9]{1,4})-lock", name)
+        if not number:
+            continue
+        # The game can put anything there: a FIFO would block a plain open.
+        try:
+            fd = os.open(f"/tmp/{name}", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            continue
+        # The PID padded to ten characters, then a newline from X servers and
+        # a NUL from wlroots, which makes gamescope's Xwayland display.
+        try:
+            owner = re.fullmatch(rb" *([0-9]{1,10})[\n\0]?", os.read(fd, 16)) \
+                if stat.S_ISREG(os.fstat(fd).st_mode) else None
+            if owner and descends(int(owner[1]), pid):
+                found.append(int(number[1]))
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return min(found, default=None)
+
+
+class Link:
+    """One X11 client joined to gamescope's display, both ways."""
+
+    def __init__(self, owner, client, server):
+        self.owner, self.sel = owner, owner.sel
+        self.peer = {client: server, server: client}
+        self.queue = {client: [], server: []}   # (bytes, descriptors) to send to each
+        self.events = {}
+        self.closed = False
+        self.update()
+
+    def update(self):
+        # Nothing more is read from one side while the other is behind.
+        for sock, peer in self.peer.items():
+            want = (0 if self.queue[peer] else selectors.EVENT_READ) \
+                | (selectors.EVENT_WRITE if self.queue[sock] else 0)
+            have = self.events.get(sock, 0)
+            if want == have:
+                continue
+            if not have:
+                self.sel.register(sock, want, self.pump)
+            elif not want:
+                self.sel.unregister(sock)
+            else:
+                self.sel.modify(sock, want, self.pump)
+            self.events[sock] = want
+
+    def flush(self, sock):
+        queue = self.queue[sock]
+        while queue:
+            data, fds = queue[0]
+            anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds))] if fds else []
+            try:
+                sent = sock.sendmsg([data], anc)
+            except BlockingIOError:
+                return
+            for fd in fds:
+                os.close(fd)
+            if sent < len(data):
+                queue[0] = (data[sent:], [])
+            else:
+                queue.pop(0)
+
+    def pump(self, sock, mask):
+        if self.closed:                 # closed earlier in the same round
+            return
+        peer = self.peer[sock]
+        try:
+            if mask & selectors.EVENT_WRITE:
+                self.flush(sock)
+            if mask & selectors.EVENT_READ:
+                data, anc, flags, _ = sock.recvmsg(CHUNK, socket.CMSG_SPACE(MAX_FDS * 4),
+                                                   socket.MSG_CMSG_CLOEXEC)
+                fds = array.array("i")
+                for level, kind, raw in anc:
+                    if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                        fds.frombytes(raw[:len(raw) - len(raw) % fds.itemsize])
+                if data or fds:
+                    self.queue[peer].append((data, list(fds)))
+                self.flush(peer)
+                # The end, or descriptors lost and the two sides out of step.
+                if not data or flags & socket.MSG_CTRUNC:
+                    return self.close()
+        except BlockingIOError:
+            pass
+        except OSError:
+            return self.close()
+        self.update()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        for sock in self.peer:
+            if self.events.get(sock):
+                self.sel.unregister(sock)
+            sock.close()
+        for queue in self.queue.values():
+            for _, fds in queue:
+                for fd in fds:
+                    os.close(fd)
+        self.owner.links.discard(self)
+
+
+class OnDemand:
+    """Gamescope, started for X11 programs that connect to display :0."""
+
+    def __init__(self, listener, command):
+        self.sel = selectors.DefaultSelector()
+        self.listener, self.command = listener, command
+        self.pid = self.pidfd = self.display = None
+        self.shown = False              # whether this gamescope's display was ever found
+        self.waiting = []               # accepted, not yet passed on
+        self.links = set()
+        self.sel.register(listener, selectors.EVENT_READ, self.accept)
+
+    def start(self):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                execute(self.command)
+            except OSError as e:
+                print(f"sandbox-landlock: {self.command[0]}: {e.strerror}", file=sys.stderr)
+            os._exit(127)
+        self.pid, self.display, self.shown = pid, None, False
+        self.pidfd = os.pidfd_open(pid)
+        self.sel.register(self.pidfd, selectors.EVENT_READ, lambda *_: self.ended(pid))
+
+    def ended(self, pid):
+        if pid != self.pid:             # seen to already, earlier in the same round
+            return
+        self.sel.unregister(self.pidfd)
+        os.close(self.pidfd)
+        os.waitpid(pid, 0)
+        # Programs that came as its window closed get a new one; those that
+        # came while it was starting and failing do not get another try.
+        again = self.shown and self.waiting
+        self.pid = self.pidfd = self.display = None
+        for link in list(self.links):
+            link.close()
+        if again:
+            self.start()
+        else:
+            for client in self.waiting:
+                client.close()
+            self.waiting = []
+
+    def accept(self, *_):
+        try:
+            client, _ = self.listener.accept()
+        except OSError:
+            return
+        client.setblocking(False)
+        self.waiting.append(client)
+        if self.pid is None:
+            self.start()
+        self.connect()
+
+    def connect(self):
+        if self.display is None:
+            self.display = gamescope_display(self.pid)
+            self.shown = self.shown or self.display is not None
+        while self.display is not None and self.waiting:
+            server = socket.socket(socket.AF_UNIX,
+                                   socket.SOCK_STREAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK)
+            try:
+                server.connect(f"\0{X11_DIR}/X{self.display}")
+            except BlockingIOError:     # a full backlog, until Xwayland is up
+                server.close()
+                return
+            except OSError:             # closing, most likely: look again shortly
+                server.close()
+                self.display = None
+                return
+            self.links.add(Link(self, self.waiting.pop(0), server))
+
+    def stop(self):
+        if self.pid is None:
+            return
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+            if not select.select([self.pidfd], [], [], 3)[0]:
+                os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(self.pid, 0)
+
+    def serve(self, game):
+        def forward(sig, _frame):
+            try:
+                os.kill(game, sig)
+            except ProcessLookupError:
+                pass
+        for sig in FORWARDED:
+            signal.signal(sig, forward)
+        self.sel.register(os.pidfd_open(game), selectors.EVENT_READ, None)
+        while True:
+            starting = self.waiting and self.pid is not None
+            for key, mask in self.sel.select(0.05 if starting else None):
+                if key.data is None:
+                    status = os.waitpid(game, 0)[1]
+                    self.stop()
+                    finish(status)
+                key.data(key.fileobj, mask)
+            if self.waiting and self.pid is not None:
+                self.connect()
+
+
+def beside_gamescope(cmd):
+    """--gamescope-on-demand: see the top. Does not return."""
+    if "--" not in cmd or cmd.index("--") in (0, len(cmd) - 1):
+        sys.exit(__doc__.split("\n\n")[0])
+    gamescope, game_cmd = cmd[:cmd.index("--")], cmd[cmd.index("--") + 1:]
+    listener = hold_display()
+    game = os.fork()
+    if game == 0:
+        os.environ["DISPLAY"] = ":0"
+        try:
+            execute(game_cmd)
+        except OSError as e:
+            print(f"sandbox-landlock: {game_cmd[0]}: {e.strerror}", file=sys.stderr)
+        os._exit(127)
+    OnDemand(listener, gamescope).serve(game)
+
+
 def main():
     args = sys.argv[1:]
     libc = ctypes.CDLL(None, use_errno=True)
@@ -327,8 +618,12 @@ def main():
         os.close(fd)
     if args == ["--has-unix-connect"]:  # for sandbox-game --check
         sys.exit(0 if has_unix else 1)
-    rules, unix, abstract, attach_dir = [], False, True, None
+    rules, unix, abstract, attach_dir, on_demand = [], False, True, None, False
     while args and args[0] != "--":
+        if args[0] == "--gamescope-on-demand":
+            on_demand = True
+            args = args[1:]
+            continue
         if args[0] == "--attach" and len(args) > 1:
             attach_dir = args[1]
             args = args[2:]
@@ -343,8 +638,9 @@ def main():
         rules.append((args[0], args[1]))
         args = args[2:]
     cmd = args[1:]
-    if not cmd:
+    if not cmd or (on_demand and attach_dir):
         sys.exit(__doc__.split("\n\n")[0])
+    run = beside_gamescope if on_demand else execute
 
     # Made while this process can still create it there.
     listener = listen(attach_dir) if attach_dir else None
@@ -352,7 +648,7 @@ def main():
     if abi < 1:
         print("sandbox-landlock: warning: no Landlock in this kernel; running without it", file=sys.stderr)
         if listener is None:
-            execute(cmd)
+            run(cmd)
         serve(listener, start_game(cmd, listener, lambda: None))
 
     handled = ABI_FS[min(abi, 5)]
@@ -429,7 +725,7 @@ def main():
     restrict()
     if listener is None:
         os.close(ruleset)
-        execute(cmd)
+        run(cmd)
     # The same rules once more for the game: a domain below this one.
     game = start_game(cmd, listener, restrict)
     os.close(ruleset)

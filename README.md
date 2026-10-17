@@ -393,13 +393,16 @@ adds an executable basename or Windows path fragment through
 sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Example /game/Launcher.exe
 ```
 
-Gamescope starts with the game and its window stays open beside the game's
-for the whole session, even if no X11 window ever appears. It stays a window:
+Gamescope's window opens when the first X11 program starts, beside the
+game's. Closing it ends the X11 programs in it, such as a launcher, but not
+the game, and the next X11 program opens it again. It stays a window:
 fullscreen, it would cover the game, so the fullscreen setting is ignored in
 this mode. Gamescope's resolution applies to the X11 windows; the native
 Wayland game uses its own window and display settings. MangoHud wraps the
 whole Proton command in this mode, so X11 launcher windows can show the
-overlay too.
+overlay too. MangoHud can also keep an X11 connection open inside a native
+Wayland game; closing gamescope then terminates the game with an X11 error.
+Disable MangoHud for split mode if you want to close gamescope while playing.
 
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
 

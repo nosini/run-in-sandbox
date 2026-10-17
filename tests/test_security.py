@@ -1731,6 +1731,8 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         args = self.recorded_args("--wayland-x11", "--proton=" + str(proton),
                                   "--x11-exe=Vendor Launcher.exe")
         self.assertIn("gamescope", args)
+        self.assertLess(args.index("--gamescope-on-demand"), args.index("gamescope"))
+        self.assertNotIn("--gamescope-on-demand", self.recorded_args("--gamescope", "--proton=" + str(proton)))
         self.assertIn("WINE_GRAPHICS_DRIVER", args)
         self.assertEqual(args[args.index("WINE_GRAPHICS_DRIVER") + 1], "wayland")
         self.assertEqual(args[args.index("PROTON_USE_X11_EXCLUSIVE") + 1], "Vendor Launcher.exe")
@@ -1777,7 +1779,9 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("--x11-exe needs an executable name", result.stderr)
 
-    def test_split_display_connects_to_both_sockets_after_gamescope_clears_wayland(self):
+    def test_split_display_gamescope_comes_and_goes_beside_the_game(self):
+        # Closing gamescope's window ends the X11 programs in it, not the game
+        # beside it; the next X11 program opens it again, on the same DISPLAY.
         import socket
         import threading
         listener = socket.socket(socket.AF_UNIX)
@@ -1793,23 +1797,39 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         thread.start()
         self.env["WAYLAND_DISPLAY"] = "wayland-split"
         self.env["DISPLAY"] = ":123"
-        # Simulate gamescope's environment handling and private X socket,
-        # while using real bwrap mounts and both Landlock domains.
+        # Gamescope as far as the sandbox sees it: an Xwayland display of its
+        # choosing, with a lock file naming it and an abstract socket, and its
+        # X11 programs gone when its window is closed. Real bwrap mounts and
+        # both Landlock domains around it.
         gamescope = self.game / "gamescope"
         gamescope.write_text('''#!/usr/bin/python3
-import os, socket, sys
-server = socket.socket(socket.AF_UNIX)
-server.bind("/tmp/.X11-unix/X77")
-server.listen()
-if os.fork() == 0:
-    client, _ = server.accept()
-    client.sendall(b"x11")
+import array, os, signal, socket
+log = open(os.path.expanduser("~/gamescope.log"), "a", buffering=1)
+def terminated(*_):
+    log.write("terminated\\n")
     os._exit(0)
-server.close()
-os.environ["DISPLAY"] = ":77"
-os.environ.pop("WAYLAND_DISPLAY", None)
-args = sys.argv[sys.argv.index("--") + 1:]
-os.execvp(args[0], args)
+signal.signal(signal.SIGTERM, terminated)
+log.write(f"started {'DISPLAY' in os.environ} {os.environ.get('WAYLAND_DISPLAY')}\\n")
+n = 1
+while os.path.exists(f"/tmp/.X{n}-lock"):
+    n += 1
+with open(f"/tmp/.X{n}-lock", "w") as lock:
+    lock.write("%10d\\0" % os.getpid())   # as wlroots writes it
+server = socket.socket(socket.AF_UNIX)
+server.bind(f"\\0/tmp/.X11-unix/X{n}")
+server.listen()
+clients = []
+while True:
+    client, _ = server.accept()
+    clients.append(client)
+    data, anc, _, _ = client.recvmsg(64, socket.CMSG_SPACE(4))
+    if data == b"close":
+        os.unlink(f"/tmp/.X{n}-lock")
+        os._exit(0)
+    fds = array.array("i")
+    for _, _, raw in anc:
+        fds.frombytes(raw)
+    client.sendall(data + b" " + (os.read(fds[0], 64) if fds else b""))
 ''')
         gamescope.chmod(0o755)
         self.env["PATH"] = str(self.game) + ":/usr/bin:/bin"
@@ -1818,22 +1838,38 @@ os.execvp(args[0], args)
         (proton / "proton").write_text('#!/bin/sh\nshift\nexec "$@"\n')
         (proton / "proton").chmod(0o755)
         probe = '''
-import os, socket
+import array, os, socket, sys
 assert os.environ["WINE_GRAPHICS_DRIVER"] == "wayland"
-assert os.environ["DISPLAY"] == ":77"
+assert os.environ["DISPLAY"] == ":0"
 assert "STEAM_COMPAT_CONFIG" not in os.environ
 assert not os.path.exists("/tmp/.X11-unix/X123")
-for path in (os.environ["WAYLAND_DISPLAY"], "/tmp/.X11-unix/X77"):
-    with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(3)
-        client.connect(path)
-        print(client.recv(64).decode())
+with socket.socket(socket.AF_UNIX) as client:
+    client.settimeout(3)
+    client.connect(os.environ["WAYLAND_DISPLAY"])
+    print(client.recv(64).decode())
+def x11(message, fd=None):
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(5)
+    client.connect("/tmp/.X11-unix/X0")
+    client.sendmsg([message], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))] if fd else [])
+    return client
+r, w = os.pipe()
+os.write(w, b"descriptor")
+launcher = x11(b"launcher", r)
+print(launcher.recv(64).decode())
+print(x11(b"close").recv(64) == launcher.recv(64) == b"")
+print(x11(b"again").recv(64).decode().strip())
+sys.exit(3)
 '''
-        result = self.cli("--wayland-x11", "--proton=" + str(proton),
-                          "--env=PATH=/game:/usr/bin:/bin", self.game, "/usr/bin/python3", "-c", probe)
-        self.assertEqual(result.stdout.splitlines(), ["wayland", "x11"])
+        result = self.cli("--wayland-x11", "--proton=" + str(proton), "--name", "split",
+                          "--env=PATH=/game:/usr/bin:/bin", self.game, "/usr/bin/python3", "-c", probe,
+                          check=False)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["wayland", "launcher descriptor", "True", "again"])
         thread.join(timeout=1)
         self.assertFalse(thread.is_alive())
+        log = (self.home / "game-sandboxes" / "split" / "home" / "gamescope.log").read_text()
+        self.assertEqual(log.splitlines(), ["started False /run/host-wayland/wayland-0"] * 2 + ["terminated"])
 
     def test_split_mode_rejects_incompatible_display_options(self):
         for options, message in ((["--wayland-x11"], "needs --proton"),

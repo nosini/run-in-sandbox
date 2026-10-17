@@ -1410,9 +1410,9 @@ if [ "$GS" = 1 ]; then
     # Landlock domain of its own below gamescope (see "landlock"), may not
     # connect to it. A connection handed over instead will not do: gamescope
     # makes several, one of them only to look and close again.
-    # Split display starts gamescope for X11 windows the game may never open,
-    # and its window stays up next to the game's own for the whole session.
-    # Fullscreen, it would cover the game: so it stays a window.
+    # In split display gamescope's window is there for X11 windows -- a
+    # launcher, a helper -- beside the game's own. Fullscreen, it would cover
+    # the game: so it stays a window.
     if [ "$WAYLAND_X11" = 1 ]; then
         _ga=()
         for _w in "${GS_ARGS[@]}"; do
@@ -2083,17 +2083,22 @@ if [ "$GS" = 1 ]; then
     # to use gamescope's connections. See sandbox-landlock for both options.
     # The outer domain may write in /run/sandbox-attach, for the inner
     # sandbox-landlock to make the socket there before restricting itself.
-    INNER_DISPLAY_RULES=(); INNER_DISPLAY_ENV=()
+    INNER_DISPLAY_RULES=(); INNER_DISPLAY_ENV=(); GS_START=( -- "${GS_CMD[@]}" -- )
     if [ "$WAYLAND_X11" = 1 ]; then
+        # The game draws on the desktop, so gamescope goes beside it, not
+        # above: closing gamescope's window would end the game with it. The
+        # outer sandbox-landlock starts gamescope whenever an X11 program
+        # connects and none is running, again after that window was closed.
+        GS_START=( --gamescope-on-demand -- "${GS_CMD[@]}" -- )
         # This explicit mode grants the same desktop compositor access as
-        # --wayland. Only X11 windows go through gamescope. Set the game's
-        # Wayland connection after gamescope, which clears WAYLAND_DISPLAY
-        # for its X11 children unless --expose-wayland was requested.
+        # --wayland. Only X11 windows go through gamescope. The sandbox's
+        # environment names the desktop's socket to gamescope alone, so the
+        # game's Wayland connection is set here, after the inner starter.
         # Connecting to that one socket, nothing else in gamescope's folder.
         INNER_DISPLAY_RULES=( --unix-connect "$HOST_WL" )
         INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
     fi
-    set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach -- "${GS_CMD[@]}" -- \
+    set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach "${GS_START[@]}" \
         /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" --unix-connect-where-writable \
         --no-abstract-scope --attach /run/sandbox-attach -- "${INNER_DISPLAY_ENV[@]}" "$@"
 else
