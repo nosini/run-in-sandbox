@@ -357,6 +357,13 @@ use their runtime's. Install your distribution's GStreamer plugin packages
 common one, you may need FFmpeg with H.264 from an extra repository (Packman on
 openSUSE, RPM Fusion on Fedora) or the OpenH264 plugin with Cisco's library.
 
+Games that stream their videos over HTTPS hit one more snag on distributions
+whose GnuTLS takes its default settings from the system crypto policy, such as
+openSUSE and Fedora. Wine switches that policy off for its own TLS, which also
+leaves the default empty for GStreamer's downloads, and every connection fails.
+The sandbox gives Wine a policy file that sets the default to GnuTLS's own
+`NORMAL` instead, which is no stricter than Wine intended.
+
 ##### Native Wayland with X11 launcher windows
 
 Some Proton builds can select the graphics driver per process: the game uses

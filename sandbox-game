@@ -1247,6 +1247,24 @@ if [ -n "$WITH_PROTON_SPEC" ]; then
     done
 fi
 
+# Wine's crypt32 points GNUTLS_SYSTEM_PRIORITY_FILE at /dev/null for its whole
+# process, unless it is set already, so that no distribution's crypto policy
+# narrows what Windows programs may connect with. Where GnuTLS is built with
+# @SYSTEM as its default (openSUSE, Fedora), that leaves the default meaning
+# nothing: Wine's own TLS names its ciphers and works, but anything else in
+# the process that takes the default -- GStreamer streaming a game's video,
+# through GLib -- fails with "No or insufficient priorities were set". A file
+# defining SYSTEM as GnuTLS's own NORMAL is what Wine meant: no policy on top.
+WINE_TLS_ARGS=()
+if [ -n "$PROTON$WITH_PROTON" ]; then
+    exec 17<<'CFG'
+[priorities]
+SYSTEM = NORMAL
+CFG
+    WINE_TLS_ARGS=( --ro-bind-data 17 /run/sandbox-gnutls.config
+                    --setenv GNUTLS_SYSTEM_PRIORITY_FILE /run/sandbox-gnutls.config )
+fi
+
 # ---- private hosts file ----------------------------------------------------
 # /etc/hosts is the host's, like the rest of /etc. --hosts gives the game one
 # of its own: the host's, with the --add-host names removed from inherited
@@ -1998,6 +2016,7 @@ BWRAP=( "${SCOPE[@]}" env -i "$(command -v bwrap)"
     "${PGMMV_ARGS[@]}"
     "${DOTNET_ARGS[@]}"
     "${WITH_PROTON_ARGS[@]}"
+    "${WINE_TLS_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
     "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above
