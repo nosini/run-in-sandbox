@@ -366,3 +366,12 @@ sys.exit(main())
                     input=b"caf\xe9\nUTF-8: caf\xc3\xa9\n", capture_output=True, env=env, timeout=5, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
                 self.assertIn(b"window opened and closed", result.stdout)
+
+
+class NetworkCardPreferenceTests(unittest.TestCase):
+    def test_card_address_kind_is_offered_and_saved_only_with_the_internet(self):
+        state = Preferences({"engine": "proton", "values": {"net": "0", "mac_vendor": "1"}})
+        self.assertNotIn("mac_vendor", state.result())
+        state.values["net"] = "1"
+        self.assertEqual(state.result()["mac_vendor"], "1")
+

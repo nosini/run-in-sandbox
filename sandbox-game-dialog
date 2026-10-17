@@ -145,7 +145,7 @@ class Preferences:
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders", "steam", "dotnet", "lan", "private_hosts",
+        for key in ("net", "mangohud", "mod_loaders", "steam", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("with_proton", "lan_allow", "hosts"):
@@ -267,6 +267,7 @@ class Preferences:
         # show; hidden, the saved values stay as they were.
         if self.lan_controls:
             result["lan"] = self.values["lan"]
+            result["mac_vendor"] = self.values["mac_vendor"]
         if self.lan_allow_controls:
             result["lan_allow"] = ", ".join(w for w in re.split(r"[\s,]+", self.values["lan_allow"]) if w)
         result["private_hosts"] = self.values["private_hosts"]
@@ -473,6 +474,9 @@ class Dialog:
                     self.toggle("lan"))
         self.entry("lan_allow", "LAN addresses allowed anyway", self.state.values["lan_allow"],
                    "10.0.50.105:443, 192.168.1.0/24")
+        self.switch("mac_vendor", "Network card address with your card's manufacturer prefix",
+                    self.state.values["mac_vendor"] == "1",
+                    lambda widget, *_: self.set_value("mac_vendor", "1" if widget.get_active() else "0"))
         self.switch("private_hosts", "Private hosts file (names redirected for this game only)",
                     self.state.values["private_hosts"] == "1", self.toggle("private_hosts"))
         self.text_area("hosts", "Hosts entries, one per line: an address, then the names it is for",
@@ -551,6 +555,7 @@ class Dialog:
         self.rows["with_proton"].set_visible(self.state.with_proton_controls)
         self.rows["lan"].set_visible(self.state.lan_controls)
         self.rows["lan_allow"].set_visible(self.state.lan_allow_controls)
+        self.rows["mac_vendor"].set_visible(self.state.lan_controls)
         for key in ("hosts", "hosts_writable"):
             self.rows[key].set_visible(self.state.hosts_controls)
         self.note.set_label("MangoHud is unavailable with NW.js." if self.state.engine == "nwjs" else "")

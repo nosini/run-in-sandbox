@@ -92,6 +92,9 @@
 #               IPv6 in brackets when a port follows. A port without a
 #               protocol means TCP and UDP. Repeatable.
 #   --lan       with --net: the whole LAN too. Still not this machine.
+#   --mac-vendor  with --net: the game's network card gets the manufacturer
+#               prefix of this machine's own card, the rest made up, rather
+#               than an address that is plainly made up. Kept per sandbox.
 #   --hosts     a private /etc/hosts: the host's, with the --add-host entries
 #               in front of it, made afresh on every launch. The game's own
 #               name lookups only; the desktop's are not affected.
@@ -591,6 +594,8 @@ Access
   --allow-lan LIST      with --net: these LAN addresses after all, e.g.
                         10.0.50.105:443,192.168.1.0/24 ([v6]:port, :80/tcp)
   --lan                 with --net: the whole LAN, still not this machine
+  --mac-vendor          with --net: a network card address with your own
+                        card's manufacturer prefix, the rest made up
   --hosts               a private /etc/hosts, the host's plus --add-host's
   --add-host "ADDR NAME..."  an entry in it (implies --hosts)
   --hosts-writable      the game may edit it too; kept in the capture folder
@@ -637,7 +642,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; MAC_VENDOR=0
 WAYLAND_X11=0; X11_EXE=""
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
@@ -685,6 +690,7 @@ while [ "$#" -gt 0 ]; do
         --allow-lan) LAN_ALLOW+=( "${2?--allow-lan needs a list of addresses}" ); shift 2 ;;
         --allow-lan=*) LAN_ALLOW+=( "${1#--allow-lan=}" ); shift ;;
         --lan)       LAN_ALL=1; shift ;;
+        --mac-vendor) MAC_VENDOR=1; shift ;;
         --hosts)     HOSTS=1; shift ;;
         --add-host)  HOSTS=1; HOSTS_ADD+=( "${2?--add-host needs \"ADDRESS NAME...\"}" ); shift 2 ;;
         --add-host=*) HOSTS=1; HOSTS_ADD+=( "${1#--add-host=}" ); shift ;;
@@ -719,6 +725,8 @@ done
     echo "--with-proton is for native programs; --proton already brings Proton along" >&2; exit 1; }
 [ "$NET" = 1 ] || { [ "${#LAN_ALLOW[@]}" = 0 ] && [ "$LAN_ALL" = 0 ]; } || {
     echo "--allow-lan and --lan widen --net: they need it" >&2; exit 1; }
+[ "$NET" = 1 ] || [ "$MAC_VENDOR" = 0 ] || {
+    echo "--mac-vendor is about the network card --net gives: it needs --net" >&2; exit 1; }
 
 # The LAN allowances and hosts entries, checked before anything starts and
 # handed on in a form nothing has to parse again. The preferences window
@@ -1701,8 +1709,24 @@ done
 # us (--info-fd) which process to attach to. The helper finds the user
 # namespace that owns the network namespace with NS_GET_USERNS: by the time it
 # looks, that process has already moved into the nested one.
+# The manufacturer prefix of the card the default route leaves through. A
+# locally administered or group address (a bridge, a tunnel, Wi-Fi's random
+# addresses) names no manufacturer: Realtek's then, as common as any.
+host_oui() {
+    local dev mac
+    dev="$(ip route show default 2>/dev/null \
+        | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+    mac="$(cat "/sys/class/net/${dev:-none}/address" 2>/dev/null || true)"
+    if [[ "$mac" =~ ^([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}): ]] && (( (0x${mac:0:2} & 3) == 0 )) \
+        && [ "${BASH_REMATCH[1]}" != 00:00:00 ]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '00:e0:4c\n'
+    fi
+}
+
 NET_ARGS=()
-DNS_ADDR=169.254.1.1                  # pasta forwards this to the host's resolver
+DNS_ADDR=169.254.1.1                 # pasta forwards this to the host's resolver
 if [ "$NET" = 1 ]; then
     command -v pasta >/dev/null || {
         echo "--net needs pasta (openSUSE: zypper in passt)" >&2; exit 1; }
@@ -1716,12 +1740,25 @@ if [ "$NET" = 1 ]; then
     # launcher that ties a saved login to its "device" then forgets it each
     # time. Each sandbox keeps one of its own, as with its machine-id: locally
     # administered and unicast, and nothing of the real card's.
-    MAC="$(cat "$CAP/mac-address" 2>/dev/null || true)"
+    # A locally administered address is what VMs and spoofing tools use, so
+    # --mac-vendor takes the manufacturer prefix of this machine's own card
+    # instead -- the one the default route leaves through -- and makes up the
+    # rest: any card of that make could have it. The address never leaves this
+    # machine either way; pasta talks to the network through sockets. Each kind
+    # is kept in a file of its own, so switching back and forth does not make
+    # the game's device a new one every time.
+    MAC_FILE="$CAP/mac-address"; [ "$MAC_VENDOR" = 0 ] || MAC_FILE="$CAP/mac-address-vendor"
+    MAC="$(cat "$MAC_FILE" 2>/dev/null || true)"
     if [[ ! "$MAC" =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]]; then
         read -r -a _b < <(od -An -N6 -tx1 /dev/urandom)
-        _b[0]="$(printf '%02x' $(( (0x${_b[0]} & 0xfe) | 0x02 )))"
+        if [ "$MAC_VENDOR" = 1 ]; then
+            IFS=: read -r -a _oui <<<"$(host_oui)"
+            _b[0]="${_oui[0]}"; _b[1]="${_oui[1]}"; _b[2]="${_oui[2]}"
+        else
+            _b[0]="$(printf '%02x' $(( (0x${_b[0]} & 0xfe) | 0x02 )))"
+        fi
         MAC="$(IFS=:; printf '%s' "${_b[*]}")"
-        printf '%s\n' "$MAC" > "$CAP/mac-address"
+        printf '%s\n' "$MAC" > "$MAC_FILE"
     fi
     # pasta runs from a copy named after the game, NAME-pasta, so that proxies
     # which route by process (mihomo's PROCESS-NAME) can tell one game's

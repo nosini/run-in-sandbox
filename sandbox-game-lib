@@ -359,6 +359,7 @@ pref_flags() {
     [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
     if [ "$(cfg_get net 0)" = 1 ]; then
         FLAG+=( --net )
+        [ "$(cfg_get mac_vendor 0)" != 1 ] || FLAG+=( --mac-vendor )
         if [ "$(cfg_get lan 0)" = 1 ]; then
             FLAG+=( --lan )
         else
@@ -427,7 +428,7 @@ keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
         "wayland_x11", "x11_exe",
         "net", "proton", "mod_loaders", "steam", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
-        "lan", "lan_allow", "private_hosts", "hosts", "hosts_writable", "env"}
+        "lan", "lan_allow", "mac_vendor", "private_hosts", "hosts", "hosts_writable", "env"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
@@ -510,7 +511,7 @@ PY
     fi
 
     bools="wayland wayland_x11 host_x11 mangohud gamescope net launch_with mod_loaders steam casefold webgl proton
-           dotnet lan private_hosts hosts_writable"
+           dotnet lan mac_vendor private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"

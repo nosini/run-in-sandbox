@@ -616,6 +616,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--net` | internet access, and only that; see [Network](#network) |
 | `--allow-lan LIST` | with `--net`: these LAN addresses or networks after all, optionally only one port or protocol; see [Network](#network) |
 | `--lan` | with `--net`: the whole LAN, but still not this machine |
+| `--mac-vendor` | with `--net`: a network card address that starts like your own card's; see [Managing sandboxes](#managing-sandboxes) |
 | `--hosts` | a private `/etc/hosts`; see [Private hosts file](#private-hosts-file) |
 | `--add-host "ADDR NAME..."` | an entry in it, ahead of the host's own; implies `--hosts`, repeatable |
 | `--hosts-writable` | the game may edit that file too; it is then kept in the capture folder |
@@ -787,6 +788,7 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── mkxp.json   --mkxp: the runtime config, yours to edit
 ├── machine-id  the game's own stand-in for /etc/machine-id
 ├── mac-address --net: the MAC address of the game's network card
+├── mac-address-vendor  the same with --mac-vendor
 ├── hosts       --hosts-writable: the game's /etc/hosts
 └── playtime    one line per launch: when it started, seconds played
 ```
@@ -897,6 +899,15 @@ With `--net`, the game's network card has a MAC address of its own, made up
 at random the first time and kept in `mac-address`, so it never shows the real
 card's. It stays the same between launches: launchers that tie a saved login
 to the device would otherwise log you out every time.
+
+Such a made-up address is marked as locally administered, as the addresses of
+virtual machines are, which a game could take as a sign of one. **Network card
+address with your card's manufacturer prefix** in the preferences
+(`mac_vendor=1`, or `--mac-vendor`) gives the game an address that starts like
+your own card's, with the rest still made up and kept in
+`mac-address-vendor`. That tells the game who made your card, which it shares
+with every other card of that make, but not which card it is. The address never
+reaches your network in either case.
 
 ## Network
 
@@ -1199,6 +1210,7 @@ proton=auto|<install name>
 dotnet=0|1
 with_proton=|auto|<install name>
 lan=0|1
+mac_vendor=0|1
 lan_allow=10.0.50.105:443, 192.168.1.0/24
 private_hosts=0|1
 hosts=10.0.50.105 lobby.example.com login.example.com, 255.255.221.21 telemetry.example.com

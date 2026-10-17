@@ -1860,6 +1860,24 @@ for path in (os.environ["WAYLAND_DISPLAY"], "/tmp/.X11-unix/X77"):
         self.assertNotEqual(macs("--name", "other-sandbox"), first)
         host = {Path(f).read_text().strip() for f in glob.glob("/sys/class/net/*/address")}
         self.assertNotIn(first[0], host)
+        # --mac-vendor: the prefix of the card the default route uses, when
+        # that names a manufacturer, else Realtek's; the rest made up. Kept
+        # apart, so switching back finds the first address again.
+        route = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True).stdout.split()
+        card = route[route.index("dev") + 1] if "dev" in route else ""
+        try:
+            own = Path(f"/sys/class/net/{card}/address").read_text().strip()
+        except OSError:
+            own = ""
+        expected = own[:8] if own and int(own[:2], 16) & 3 == 0 and own[:8] != "00:00:00" else "00:e0:4c"
+        vendor = macs("--mac-vendor")
+        self.assertEqual(vendor[0][:8], expected, (vendor, own))
+        self.assertNotIn(vendor[0], host)
+        self.assertEqual(macs("--mac-vendor"), vendor)
+        self.assertEqual(macs(), first)
+        refused = self.cli("--headless", "--mac-vendor", self.game, "/bin/true", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("needs --net", refused.stderr)
 
     def test_network_reaches_the_internet_and_nothing_else(self):
         if not shutil.which("pasta"):
