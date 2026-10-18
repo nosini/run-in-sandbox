@@ -1508,6 +1508,59 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         order = (self.home / "game-sandboxes" / "wine-lasts" / "home" / "order").read_text().split("\n")
         self.assertEqual(order[:3], ["launcher", "game", "wineserver -w /compat/pfx"])
 
+    def test_damaged_registry_comes_back_from_the_last_whole_copy(self):
+        # wineserver never syncs its registry saves: a crash soon after one can
+        # leave system.reg and user.reg empty, and Wine then refuses the prefix.
+        proton = self.base / "proton"
+        proton.mkdir()
+        def launch(script):
+            (proton / "proton").write_text("#!/bin/sh\n" + script)
+            (proton / "proton").chmod(0o755)
+            return self.cli("--headless", "--proton=" + str(proton), "--name", "registry",
+                            self.game, "/game/game.exe")
+        capture = self.home / "game-sandboxes" / "registry"
+        pfx, copies = capture / "compat" / "pfx", capture / "registry-backup"
+        whole = {f: f"WINE REGISTRY Version 2\n;; {f}\n" for f in ("system.reg", "user.reg", "userdef.reg")}
+        launch("mkdir -p /compat/pfx\n"
+               'for f in system user userdef; do printf "WINE REGISTRY Version 2\\n;; %s.reg\\n" $f'
+               " > /compat/pfx/$f.reg; done\n")
+        for f, text in whole.items():
+            self.assertEqual((copies / f).read_text(), text)
+        # A crash right after a save: the renamed files never got their data.
+        (pfx / "system.reg").write_bytes(b"")
+        (pfx / "user.reg").write_bytes(b"")
+        result = launch('cat /compat/pfx/system.reg /compat/pfx/user.reg > "$HOME/seen"\n')
+        self.assertEqual((capture / "home" / "seen").read_text(), whole["system.reg"] + whole["user.reg"])
+        self.assertIn("system.reg was damaged", result.stderr)
+        self.assertIn("user.reg was damaged", result.stderr)
+        self.assertNotIn("userdef.reg was damaged", result.stderr)
+        self.assertEqual((pfx / "system.reg.damaged").read_bytes(), b"")
+
+        # The prefix is the game's to write in: a link it leaves there takes no
+        # host file into the copies, and nothing is written through one.
+        secret = self.base / "secret"
+        secret.write_text("WINE REGISTRY Version 2\n;; host secret\n")
+        victim = self.base / "victim"
+        victim.write_bytes(b"")
+        launch(f"ln -sf {secret} /compat/pfx/system.reg\nln -sf {victim} /compat/pfx/user.reg\n")
+        launch("")
+        self.assertEqual((copies / "system.reg").read_text(), whole["system.reg"])
+        self.assertEqual(victim.read_bytes(), b"")
+        host_dir = self.base / "elsewhere"
+        host_dir.mkdir()
+        (host_dir / "system.reg").write_bytes(b"")
+        launch(f"rm -rf /compat/pfx\nln -s {host_dir} /compat/pfx\n")
+        launch("")
+        self.assertEqual((host_dir / "system.reg").read_bytes(), b"")
+        self.assertEqual(sorted(p.name for p in host_dir.iterdir()), ["system.reg"])
+
+        # A prefix made again is a new one: the old one's copies are not its.
+        (capture / "compat" / "pfx").unlink()
+        launch("mkdir /compat/pfx\n: > /compat/pfx/system.reg\n")
+        launch("")
+        self.assertEqual((pfx / "system.reg").read_bytes(), b"")
+        self.assertFalse((copies / "system.reg").exists())
+
     def test_ntsync_only_for_proton(self):
         # A young driver: Wine's thread synchronisation needs it, nothing else.
         proton = self.base / "proton"

@@ -328,6 +328,14 @@ The Proton install is never changed either: it is mounted with an overlay whose
 writes are thrown away when the game exits. Valve's Proton builds need that,
 since they lock a file in their own folder on every start.
 
+Wine saves the prefix's registry every 30 seconds while a game runs, but never
+makes sure it reached the disk. A crash or power cut soon after can leave
+`system.reg` and `user.reg` empty (XFS does), and Wine then calls the prefix a
+32-bit installation and starts nothing. Before and after each launch, the
+sandbox keeps a copy of each registry file that is still whole in
+`registry-backup/`, and puts it back over one that is not; the launch log says
+so, and the damaged file stays beside it as `system.reg.damaged` and the like.
+
 Proton normally starts a game through its own `steam.exe`, which makes Windows
 programs believe a Steam client is running. There is never one in the sandbox,
 so a launcher that can also sign in through Steam would offer only a Steam
@@ -820,6 +828,7 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── home/       writes to $HOME — configs, saves, whatever it scatters
 ├── rw/         writes into the install directory at /game
 ├── compat/     --proton: the Wine prefix, under pfx/
+├── registry-backup/  --proton: the prefix's last whole registry files
 ├── mkxp.json   --mkxp: the runtime config, yours to edit
 ├── machine-id  the game's own stand-in for /etc/machine-id
 ├── mac-address --net: the MAC address of the game's network card

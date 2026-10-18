@@ -972,10 +972,54 @@ need_proton() {                       # $1 = auto | name substring | path
     return 1
 }
 
+# wineserver saves the registry every 30 seconds while a program runs, by
+# writing a new file and renaming it over the old one, but never syncs it to
+# disk. A crash or power cut soon after can leave system.reg and user.reg
+# empty -- XFS does -- and Wine then takes the prefix for a 32-bit one and
+# starts nothing. Before and after each run, a synced copy of each file that
+# still reads as a registry is kept in registry-backup/, outside what the game
+# sees, and put back over one that does not. The copies belong to the prefix
+# they came from: one deleted and made again starts without them.
+valid_registry() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -c 23 -- "$1")" = "WINE REGISTRY Version 2" ]; }
+keep_registry() {
+    local pfx="$CAP/compat/pfx" copies="$CAP/registry-backup" id name f b tmp
+    # The prefix is the game's to write in: never follow a link it put there.
+    # (It is not running: the lock above is held.)
+    [ ! -L "$CAP/compat" ] && [ ! -L "$pfx" ] && [ -d "$pfx" ] || return 0
+    id="$(stat -c '%d:%i:%W' -- "$pfx")"
+    if [ -L "$copies" ] || { [ -e "$copies" ] && [ ! -d "$copies" ]; }; then return 0; fi
+    if [ "$(cat -- "$copies/prefix" 2>/dev/null)" != "$id" ]; then
+        rm -rf -- "$copies"; mkdir -p -- "$copies"; printf '%s\n' "$id" > "$copies/prefix"
+    fi
+    for name in system.reg user.reg userdef.reg; do
+        f="$pfx/$name"; b="$copies/$name"
+        if valid_registry "$f"; then
+            tmp="$(mktemp -p "$copies" ".$name.XXXXXX")" || continue
+            if cp --reflink=auto -- "$f" "$tmp" && sync -- "$tmp" && mv -fT -- "$tmp" "$b"; then
+                sync -- "$copies" || true
+            else
+                rm -f -- "$tmp"
+            fi
+        elif [ -f "$f" ] && [ ! -L "$f" ] && valid_registry "$b"; then
+            # Damaged, most likely emptied: the last copy that was whole goes
+            # back, the damaged file is kept beside it as $name.damaged.
+            tmp="$(mktemp -p "$pfx" ".$name.XXXXXX")" || continue
+            if cp --reflink=auto -- "$b" "$tmp" && sync -- "$tmp" \
+               && mv -fT -- "$f" "$f.damaged" && mv -fT -- "$tmp" "$f"; then
+                sync -- "$pfx" || true
+                echo "sandbox-game: $name was damaged; put back its copy from $(date -r "$b" '+%Y-%m-%d %H:%M')" >&2
+            else
+                rm -f -- "$tmp"
+            fi
+        fi
+    done
+}
+
 PROTON=""; PROTON_ARGS=()
 if [ -n "$PROTON_SPEC" ]; then
     PROTON="$(need_proton "$PROTON_SPEC")" || exit 1
     mkdir -p "$CAP/compat" "$CAP/steam"
+    keep_registry || true             # never what stops a game from starting
     # STEAM_COMPAT_CLIENT_INSTALL_PATH is read unconditionally by proton's
     # setup_prefix(), so it has to exist -- but it is only mined for optional
     # legacycompat/steamclient*.dll, which a non-Steam game does not want.
@@ -2155,6 +2199,7 @@ else
     wait "$BW" && rc=0 || rc=$?
 fi
 cleanup; trap - EXIT
+if [ -n "$PROTON" ]; then keep_registry || true; fi
 # Ended by --stop: that was asked for, not a crash.
 if [ -e "$CAP/.stopped" ]; then rm -f "$CAP/.stopped"; rc=0; fi
 exit "$rc"
