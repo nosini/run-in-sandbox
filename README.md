@@ -379,8 +379,11 @@ Games that stream their videos over HTTPS hit one more snag on distributions
 whose GnuTLS takes its default settings from the system crypto policy, such as
 openSUSE and Fedora. Wine switches that policy off for its own TLS, which also
 leaves the default empty for GStreamer's downloads, and every connection fails.
-The sandbox gives Wine a policy file that sets the default to GnuTLS's own
-`NORMAL` instead, which is no stricter than Wine intended.
+The sandbox has GLib, which GStreamer downloads through, ask for GnuTLS's own
+`NORMAL` settings by name (`G_TLS_GNUTLS_PRIORITY`) instead, which is no
+stricter than Wine intended. Wine's own TLS is left as Wine sets it up: given
+any other policy file, Wine would drop the TLS versions programs ask for, and
+installers such as Microsoft's WebView2 setup then fail to connect.
 
 ##### Native Wayland with X11 launcher windows
 
