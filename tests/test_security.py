@@ -1449,7 +1449,8 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
     def test_wine_leaves_gnutls_a_default_priority(self):
         # Wine empties GnuTLS's system priority file unless one is set; where
         # GnuTLS defaults to @SYSTEM that left GStreamer's HTTPS, through GLib,
-        # without ciphers. The sandbox's file makes @SYSTEM plain NORMAL.
+        # without ciphers. GLib gets NORMAL by name; the file stays Wine's,
+        # since any other one makes Wine's schannel give up its own priorities.
         cli = shutil.which("gnutls-cli")
         if not cli:
             self.skipTest("gnutls-cli is not installed")
@@ -1460,13 +1461,13 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
             f.chmod(0o755)
         self.env["PROTON_DIR"] = str(proton)
         # As Wine's crypt32 does: /dev/null, unless something is set already.
-        script = ('echo "$GNUTLS_SYSTEM_PRIORITY_FILE"; '
+        script = ('echo "${GNUTLS_SYSTEM_PRIORITY_FILE-unset}"; '
                   'export GNUTLS_SYSTEM_PRIORITY_FILE="${GNUTLS_SYSTEM_PRIORITY_FILE:-/dev/null}"; '
-                  'gnutls-cli --priority @SYSTEM --list | grep "^Protocols"')
+                  'gnutls-cli --priority "$G_TLS_GNUTLS_PRIORITY" --list | grep "^Protocols"')
         out = self.run_guest(script, "--with-proton").stdout.splitlines()
-        self.assertEqual(out[0], "/run/sandbox-gnutls.config")
+        self.assertEqual(out[0], "unset")
         self.assertIn("VERS-TLS1.2", out[1])
-        self.assertEqual(self.run_guest('echo "${GNUTLS_SYSTEM_PRIORITY_FILE-unset}"').stdout.strip(), "unset")
+        self.assertEqual(self.run_guest('echo "${G_TLS_GNUTLS_PRIORITY-unset}"').stdout.strip(), "unset")
 
     def test_proton_finds_this_systems_gstreamer_plugins_first(self):
         # Proton's own plugins are built for Steam's runtime and some cannot

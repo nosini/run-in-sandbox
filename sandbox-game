@@ -1297,16 +1297,15 @@ fi
 # @SYSTEM as its default (openSUSE, Fedora), that leaves the default meaning
 # nothing: Wine's own TLS names its ciphers and works, but anything else in
 # the process that takes the default -- GStreamer streaming a game's video,
-# through GLib -- fails with "No or insufficient priorities were set". A file
-# defining SYSTEM as GnuTLS's own NORMAL is what Wine meant: no policy on top.
+# through GLib -- fails with "No or insufficient priorities were set". GLib
+# gets GnuTLS's own NORMAL by name instead, the way it would add %COMPAT to
+# the default. The variable itself must stay Wine's: set to any other file,
+# Wine's schannel drops its own priorities for the default, with TLS 1.3 on
+# whatever protocols the program asked for, and Edge's updater (WebView2's
+# installer) then fails with "A TLS fatal alert has been received".
 WINE_TLS_ARGS=()
 if [ -n "$PROTON$WITH_PROTON" ]; then
-    exec 17<<'CFG'
-[priorities]
-SYSTEM = NORMAL
-CFG
-    WINE_TLS_ARGS=( --ro-bind-data 17 /run/sandbox-gnutls.config
-                    --setenv GNUTLS_SYSTEM_PRIORITY_FILE /run/sandbox-gnutls.config )
+    WINE_TLS_ARGS=( --setenv G_TLS_GNUTLS_PRIORITY NORMAL:%COMPAT )
 fi
 
 # ---- private hosts file ----------------------------------------------------
