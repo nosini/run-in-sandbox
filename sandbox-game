@@ -1461,6 +1461,141 @@ fi
 # front of the game. Its --mangoapp is the supported way to get the overlay in
 # here: gamescope's own help says to use it instead of wrapping the game, and
 # doing both would draw the thing twice.
+
+# The size of the desktop Wine's Wayland driver makes of the compositor's
+# monitors, printed as "WIDTH HEIGHT": asked over the Wayland socket (argv[1])
+# the way winewayland.drv asks, then laid out the way it lays them out
+# (dlls/winewayland.drv/display.c): each monitor at its current mode's pixel
+# size, starting from its logical position, overlaps pushed apart keeping the
+# monitors' relative placement. Exits non-zero if there is nothing to go on.
+read -r -d '' WINE_DESKTOP_SIZE <<'EOF' || true
+import socket, struct, sys
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(2)
+sock.connect(sys.argv[1])
+ids, data, handlers = [1], b"", {}
+def new_id():
+    ids[0] += 1
+    return ids[0]
+def send(obj, opcode, payload=b""):
+    sock.sendall(struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload)
+def string(text):
+    raw = text.encode() + b"\0"
+    return struct.pack("=I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
+def take_string(body):
+    size = struct.unpack_from("=I", body)[0]
+    return body[4:4 + size - 1].decode(errors="replace"), body[4 + (size + 3) // 4 * 4:]
+def roundtrip():
+    global data
+    done = new_id()
+    send(1, 0, struct.pack("=I", done))                 # wl_display.sync
+    while True:
+        while len(data) < 8 or len(data) < struct.unpack_from("=II", data)[1] >> 16:
+            chunk = sock.recv(65536)
+            if not chunk:
+                sys.exit(1)
+            data += chunk
+        obj, word = struct.unpack_from("=II", data)
+        body, data = data[8:word >> 16], data[word >> 16:]
+        if obj == done:
+            return
+        if obj == 1 and word & 0xffff == 0:             # wl_display.error
+            sys.exit(1)
+        if obj in handlers:
+            handlers[obj](word & 0xffff, body)
+
+globals_ = []
+registry = new_id()
+send(1, 1, struct.pack("=I", registry))                 # wl_display.get_registry
+def on_global(opcode, body):
+    if opcode == 0:
+        name = struct.unpack_from("=I", body)[0]
+        interface, rest = take_string(body[4:])
+        globals_.append((name, interface, struct.unpack_from("=I", rest)[0]))
+handlers[registry] = on_global
+roundtrip()
+
+def bind(name, interface, version):
+    obj = new_id()
+    send(registry, 0, struct.pack("=I", name) + string(interface) + struct.pack("=II", version, obj))
+    return obj
+outputs = []
+for name, interface, version in globals_:
+    if interface == "wl_output":
+        out = {"mode": None, "transform": 0, "lx": 0, "ly": 0, "lw": 0, "lh": 0}
+        def on_output(opcode, body, out=out):
+            if opcode == 0:                             # geometry: transform comes last
+                _, rest = take_string(body[20:])
+                _, rest = take_string(rest)
+                out["transform"] = struct.unpack_from("=i", rest)[0]
+            elif opcode == 1:                           # mode
+                flags, width, height, _ = struct.unpack_from("=Iiii", body)
+                if flags & 1:
+                    out["mode"] = (width, height)
+        out["id"] = bind(name, "wl_output", min(version, 4))
+        handlers[out["id"]] = on_output
+        outputs.append(out)
+manager = [bind(n, i, min(v, 3)) for n, i, v in globals_ if i == "zxdg_output_manager_v1"]
+for out in outputs if manager else []:
+    xdg = new_id()
+    send(manager[0], 1, struct.pack("=II", xdg, out["id"]))   # get_xdg_output
+    def on_xdg(opcode, body, out=out):
+        if opcode == 0:
+            out["lx"], out["ly"] = struct.unpack_from("=ii", body)
+        elif opcode == 1:
+            out["lw"], out["lh"] = struct.unpack_from("=ii", body)
+    handlers[xdg] = on_xdg
+roundtrip()
+
+monitors = []
+for out in outputs:
+    if not out["mode"]:
+        continue
+    w, h = out["mode"]
+    if out["transform"] & 1:                            # turned 90 or 270 degrees
+        w, h = h, w
+    monitors.append({"w": w, "h": h, "lx": out["lx"], "ly": out["ly"],
+                     "lw": out["lw"] or w, "lh": out["lh"] or h, "x": out["lx"], "y": out["ly"]})
+if not monitors:
+    sys.exit(1)
+def overlap(a, b):
+    return (b["x"] < a["x"] + a["w"] and b["x"] + b["w"] > a["x"] and
+            b["y"] < a["y"] + a["h"] and b["y"] + b["h"] > a["y"])
+def quadrant(x, y):
+    return (x < 0) * 2 + (y < 0)
+PREFS = ((0, 1, 2, 3), (3, 0, 2, 1), (2, 3, 0, 1), (3, 2, 1, 0))
+def anchor(a, b):
+    qa, qb = quadrant(a["lx"], a["ly"]), quadrant(b["lx"], b["ly"])
+    if qa != qb:
+        return a if qa < qb else b
+    qab = quadrant(b["lx"] - a["lx"], b["ly"] - a["ly"])
+    qba = quadrant(a["lx"] - b["lx"], a["ly"] - b["ly"])
+    return a if PREFS[qa][qab] < PREFS[qa][qba] else b
+def resolve():
+    found = False
+    for i, a in enumerate(monitors):
+        for b in monitors[:i]:
+            if not overlap(a, b):
+                continue
+            found = True
+            fixed = anchor(a, b)
+            move = b if fixed is a else a
+            end = move["lx"] < fixed["lx"]
+            rel = (move["lx"] - fixed["lx"] + (move["lw"] if end else 0)) / fixed["lw"]
+            move["x"] = int(fixed["x"] + fixed["w"] * rel - (move["w"] if end else 0))
+            end = move["ly"] < fixed["ly"]
+            rel = (move["ly"] - fixed["ly"] + (move["lh"] if end else 0)) / fixed["lh"]
+            move["y"] = int(fixed["y"] + fixed["h"] * rel - (move["h"] if end else 0))
+    return found
+steps = 0
+while resolve():
+    steps += 1
+    if steps >= len(monitors):
+        break
+print(max(m["x"] + m["w"] for m in monitors) - min(m["x"] for m in monitors),
+      max(m["y"] + m["h"] for m in monitors) - min(m["y"] for m in monitors))
+EOF
+
 if [ "$GS" = 1 ]; then
     command -v gamescope >/dev/null || {
         echo "gamescope not found (openSUSE: zypper in gamescope)" >&2; exit 1; }
@@ -1480,6 +1615,29 @@ if [ "$GS" = 1 ]; then
         [ "${#_ga[@]}" = "${#GS_ARGS[@]}" ] || echo "sandbox-game: --wayland-x11 keeps gamescope" \
             "windowed: it stays open beside the game, which fullscreen would cover" >&2
         GS_ARGS=( "${_ga[@]}" )
+        # Wine has one desktop for both of its display drivers, and in split
+        # display the Wayland one lays it out: every monitor at its own pixel
+        # size, side by side. The X11 programs place their windows on that
+        # desktop too, but gamescope's X screen is 1280x720 unless told
+        # otherwise, so a window opened further out lies off that screen:
+        # gamescope still shows it, while the pointer, which cannot leave the
+        # screen, clicks somewhere else than where it is drawn. An X screen
+        # the size of Wine's whole desktop keeps the two in step. Its window
+        # on the desktop (-W/-H) stays the size it was.
+        _nested=0
+        for _w in "${GS_ARGS[@]}"; do
+            case "$_w" in -w*|-h*|--nested-width*|--nested-height*) _nested=1 ;; esac
+        done
+        case "$WL" in /*) _wl="$WL" ;; *) _wl="$RT/$WL" ;; esac
+        if [ "$_nested" = 0 ]; then
+            if _size="$(python3 -I -c "$WINE_DESKTOP_SIZE" "$_wl" 2>/dev/null)" \
+                    && [[ "$_size" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+                GS_ARGS+=( -w "${BASH_REMATCH[1]}" -h "${BASH_REMATCH[2]}" )
+            else
+                echo "sandbox-game: could not read the desktop's monitor layout; X11 windows" \
+                     "outside gamescope's 1280x720 screen will not take clicks where they are drawn" >&2
+            fi
+        fi
     fi
     GS_CMD=( env WAYLAND_DISPLAY="$HOST_WL" gamescope "${GS_ARGS[@]}" )
     # gamescope serves no Wayland socket to its children unless asked, and

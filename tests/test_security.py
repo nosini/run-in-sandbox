@@ -1826,6 +1826,117 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         args = self.recorded_args("--proton=" + str(proton), "--gamescope=-f -W 1920 -H 1080")
         self.assertIn("-f", args[args.index("gamescope"):])
 
+    def fake_compositor(self, outputs):
+        """Serve wl_output and xdg-output for OUTPUTS on the test's Wayland socket.
+
+        Each output is (mode width, mode height, transform, logical x, y, w, h).
+        """
+        import socket, threading
+        path = self.runtime / "wayland-0"
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen()
+        self.addCleanup(server.close)
+
+        def event(obj, opcode, payload=b""):
+            return struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload
+
+        def string(text):
+            raw = text.encode() + b"\0"
+            return struct.pack("=I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
+
+        def serve(conn):
+            data, registry, bound = b"", None, {}
+            with conn:
+                while True:
+                    while len(data) < 8 or len(data) < struct.unpack_from("=II", data)[1] >> 16:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            return
+                        data += chunk
+                    obj, word = struct.unpack_from("=II", data)
+                    body, data = data[8:word >> 16], data[word >> 16:]
+                    opcode, out = word & 0xffff, b""
+                    if obj == 1 and opcode == 1:                 # get_registry
+                        registry = struct.unpack_from("=I", body)[0]
+                        for i in range(len(outputs)):
+                            out += event(registry, 0, struct.pack("=I", i + 1) + string("wl_output")
+                                         + struct.pack("=I", 4))
+                        out += event(registry, 0, struct.pack("=I", 100)
+                                     + string("zxdg_output_manager_v1") + struct.pack("=I", 3))
+                    elif obj == 1 and opcode == 0:               # sync
+                        out = event(struct.unpack_from("=I", body)[0], 0, struct.pack("=I", 0))
+                    elif obj == registry:                        # bind
+                        name = struct.unpack_from("=I", body)[0]
+                        size = struct.unpack_from("=I", body, 4)[0]
+                        new = struct.unpack_from("=I", body, 8 + (size + 3) // 4 * 4 + 4)[0]
+                        bound[new] = name
+                        if name <= len(outputs):
+                            w, h, transform = outputs[name - 1][:3]
+                            out = event(new, 0, struct.pack("=5i", 0, 0, 600, 340, 0) + string("Make")
+                                        + string("Model") + struct.pack("=i", transform))
+                            out += event(new, 1, struct.pack("=Iiii", 3, w, h, 60000))
+                            out += event(new, 2)
+                    elif bound.get(obj) == 100 and opcode == 1:  # get_xdg_output
+                        new, output = struct.unpack_from("=II", body)
+                        lx, ly, lw, lh = outputs[bound[output] - 1][3:]
+                        out = event(new, 0, struct.pack("=ii", lx, ly)) + event(new, 1, struct.pack("=ii", lw, lh))
+                    conn.sendall(out)
+
+        def accept():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                threading.Thread(target=serve, args=(conn,), daemon=True).start()
+        threading.Thread(target=accept, daemon=True).start()
+
+    def test_split_display_x11_screen_covers_wines_desktop(self):
+        # Wine's Wayland driver sets the monitors out at their own pixel sizes;
+        # X11 windows placed on that desktop must lie on gamescope's X screen
+        # too, or clicks land away from where the pointer is drawn.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        def nested(*options):
+            args = self.recorded_args("--wayland-x11", "--proton=" + str(proton), *options)
+            gs = args[args.index("gamescope") + 1:]
+            return gs[:gs.index("--")]
+        # Two 4K monitors at 150%, side by side: 2560 logical pixels apart, but
+        # 3840 real ones each.
+        self.fake_compositor([(3840, 2160, 0, 2560, 0, 2560, 1440),
+                              (3840, 2160, 0, 0, 0, 2560, 1440)])
+        self.assertEqual(nested(), ["-w", "7680", "-h", "2160"])
+        self.assertEqual(nested("--gamescope=-W 1920 -H 1080"), ["-W", "1920", "-H", "1080", "-w", "7680", "-h", "2160"])
+        # A size set by hand is left alone.
+        self.assertEqual(nested("--gamescope=-w 2560 -h 1440"), ["-w", "2560", "-h", "1440"])
+        # Not split display: gamescope's screen is the game's, as before.
+        args = self.recorded_args("--gamescope", "--proton=" + str(proton))
+        self.assertNotIn("-w", args[args.index("gamescope"):])
+
+    def test_split_display_x11_screen_turns_with_its_monitor(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        # A 1920x1080 panel turned upright beside a 2560x1440 one, both at 100%.
+        self.fake_compositor([(2560, 1440, 0, 0, 0, 2560, 1440),
+                              (1920, 1080, 1, 2560, 0, 1080, 1920)])
+        args = self.recorded_args("--wayland-x11", "--proton=" + str(proton))
+        gs = args.index("gamescope")
+        self.assertEqual(args[gs + 1:gs + 5], ["-w", "3640", "-h", "1920"])
+
+    def test_split_display_without_monitor_layout_still_starts(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        # recorded_args' socket accepts no connections: no layout, no -w.
+        args = self.recorded_args("--wayland-x11", "--proton=" + str(proton))
+        self.assertEqual(args[args.index("gamescope") + 1], "--")
+
     def test_split_executable_option_needs_a_value(self):
         for options in (["--x11-exe", "--net"], ["--x11-exe", ""]):
             with self.subTest(options=options):
@@ -1844,9 +1955,13 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         listener.listen()
         listener.settimeout(8)
         def serve():
-            connection, _ = listener.accept()
-            with connection:
-                connection.sendall(b"wayland")
+            # The first connection asks for the monitor layout before the
+            # sandbox starts, and gets no answer it can use; the second is the
+            # game's.
+            for _ in range(2):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.sendall(b"wayland")
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
         self.env["WAYLAND_DISPLAY"] = "wayland-split"

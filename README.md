@@ -409,7 +409,18 @@ game's. Closing it ends the X11 programs in it, such as a launcher, but not
 the game, and the next X11 program opens it again. It stays a window:
 fullscreen, it would cover the game, so the fullscreen setting is ignored in
 this mode. Gamescope's resolution applies to the X11 windows; the native
-Wayland game uses its own window and display settings. MangoHud wraps the
+Wayland game uses its own window and display settings.
+
+Wine places the X11 windows on the same desktop as the game: your monitors
+side by side at their full pixel size, so two 4K monitors at 150% scaling make
+a 7680×2160 desktop. Gamescope's X screen is made that size at launch, read
+from the compositor's monitor layout, so every window lies on it and clicks
+land where the pointer is drawn. The size of gamescope's own window does not
+change. Monitors added or rearranged while the game runs only take effect at
+the next launch. A nested size set by hand (`-w`/`-h` in gamescope's
+arguments) is kept as is.
+
+MangoHud wraps the
 whole Proton command in this mode, so X11 launcher windows can show the
 overlay too. Its shortcut polling normally keeps an X11 connection open even
 inside a native Wayland game, which terminates the game when gamescope closes.
