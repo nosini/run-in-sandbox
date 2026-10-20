@@ -720,6 +720,10 @@ PY
                 found[where] = False
         return found
 
+    def uses_proton(self, entry):
+        return entry.get("kind") == "windows" or entry.get("engine") == "proton" \
+            or self.settings(entry["name"]).get("launch_with") == "proton"
+
     def shortcut_text(self, entry, icon=None):
         manager = self.backend.with_name("sandbox-manager")
         return "".join(line + "\n" for line in (
@@ -730,27 +734,35 @@ PY
             # Hidden from menus once the manager is uninstalled.
             "TryExec=" + desktop_string(str(manager)),
             "Icon=" + desktop_string(str(icon) if icon else "applications-games"),
-            "Terminal=false", "Categories=Game;"))
+            "Terminal=false", "Categories=Game;",
+            # The app ID sandbox-game has Proton's Wine give the game's
+            # windows, so the desktop shows them as this game.
+            *(["StartupWMClass=steam_app_" + entry["name"]] if self.uses_proton(entry) else [])))
 
     # Kept up to date in a shortcut that exists; anything else in it, such as
     # a StartupWMClass added by hand, is the user's.
     MANAGED_KEYS = ("Name", "Exec", "TryExec", "Icon")
+    # Added to a shortcut that lacks them, never changed.
+    ADDED_KEYS = ("StartupWMClass",)
 
     def merged_shortcut(self, current, text, name):
-        """TEXT's managed keys over CURRENT, a shortcut as it is now. An icon
-        set by hand stays: only the generic one or a cached one is replaced."""
+        """TEXT's managed keys over CURRENT, a shortcut as it is now, and its
+        added keys where CURRENT has none. An icon set by hand stays: only the
+        generic one or a cached one is replaced."""
         lines = current.splitlines()
         start = next((i for i, line in enumerate(lines) if line.strip() == "[Desktop Entry]"), None)
         if start is None:
             return text
         end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
-        wanted = dict(line.split("=", 1) for line in text.splitlines()
-                      if line.split("=", 1)[0] in self.MANAGED_KEYS)
+        generated = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        wanted = {key: value for key, value in generated.items() if key in self.MANAGED_KEYS}
         icons = self.capture(name) / "icons"
         group, seen = [], set()
         for line in lines[start + 1:end]:
             key, sep, value = line.partition("=")
             key = key.strip()
+            if sep and not line.lstrip().startswith("#") and key in self.ADDED_KEYS:
+                seen.add(key)
             if not sep or key not in wanted or line.lstrip().startswith("#"):
                 group.append(line)
             elif key in seen:
@@ -764,7 +776,8 @@ PY
         at = len(group)
         while at and not group[at - 1].strip():
             at -= 1
-        group[at:at] = [f"{key}={value}" for key, value in wanted.items() if key not in seen]
+        group[at:at] = [f"{key}={value}" for key, value in generated.items()
+                        if key in (*self.MANAGED_KEYS, *self.ADDED_KEYS) and key not in seen]
         return "".join(line + "\n" for line in lines[:start + 1] + group + lines[end:])
 
     def write_shortcut(self, path, text, where, name):

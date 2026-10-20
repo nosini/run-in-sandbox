@@ -122,10 +122,15 @@ A shortcut starts the game as **Play** does, with the game's icon and display
 name, and both follow later changes the manager makes. Deleting the sandbox
 in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
-`sandbox-manager --launch NAME`, which you can also use from a shell. You can
-edit these files, for example to add a `StartupWMClass` line: the manager
-updates only the name, the `Exec` and `TryExec` lines, and the icon (unless
-you chose another one), and leaves every other line as you wrote it.
+`sandbox-manager --launch NAME`, which you can also use from a shell. For a
+game run with Proton, the shortcut's `StartupWMClass=steam_app_NAME` matches
+the app ID its windows get (see [Windows games — Proton](#windows-games--proton)),
+so the desktop shows a game window drawn on it directly with the game's icon
+and name. Windows inside gamescope's window always show as gamescope. You can
+edit these files: the manager updates only the name, the `Exec` and `TryExec`
+lines, and the icon (unless you chose another one), adds a missing
+`StartupWMClass` without changing one that is there, and leaves every other
+line as you wrote it.
 
 Choose **Add game → Add an existing game** for an unpacked game. Select its
 folder or launcher; its original files stay in place, and saves and changes
@@ -357,6 +362,12 @@ keep that window closed. The sandbox sets `ShowSystray=0` under
 setting applies from the first launch after the prefix exists. Turning it off
 removes that value again, but a value you set yourself, for example with
 `regedit`, stays.
+
+Proton's Wine gives every game's windows the same app ID, `steam_proton`, so
+the desktop cannot tell which game a window belongs to. The sandbox sets
+`WINE_WMCLASS` to the sandbox name, which builds that read it, such as
+DWProton, turn into `steam_app_NAME`; others ignore it. An `env=` entry of
+your own still wins.
 
 Proton games also get `/dev/ntsync` where the kernel has it (6.14 and newer):
 Windows' thread synchronisation done in the kernel instead of by wineserver or

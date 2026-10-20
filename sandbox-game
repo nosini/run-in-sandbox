@@ -1139,6 +1139,11 @@ if [ -n "$PROTON_SPEC" ]; then
     # instead, and turn the bridge off, once UMU_ID is set; others ignore it.
     # No numeric ID, so nothing takes it for a Steam app. --env still wins.
     [ "$STEAM" = 1 ] || PROTON_ARGS+=( --setenv UMU_ID umu-default )
+    # Proton's Wine gives every game's windows the app ID (WM_CLASS on X11)
+    # steam_proton, so a desktop cannot tell which shortcut a window is from.
+    # With WINE_WMCLASS it is steam_app_ and that; the manager's shortcuts
+    # name steam_app_NAME as their StartupWMClass. --env still wins.
+    PROTON_ARGS+=( --setenv WINE_WMCLASS "$NAME" )
     # Proton's GStreamer plugins are built for Steam's runtime. Outside it some
     # cannot load -- its FFmpeg wants a libvpx.so.9 no current system has --
     # and a game's videos fail, often reported as a network error. This

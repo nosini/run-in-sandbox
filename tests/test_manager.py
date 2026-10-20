@@ -818,8 +818,10 @@ class LibraryTests(unittest.TestCase):
         library.set_shortcut(name, "menu", True, icon)
         menu = self.home / f"data/applications/sandbox-game-{name}.desktop"
         generated = menu.read_text()
-        # A window class, a translated name and an action, added by hand.
-        menu.write_text(generated.replace("Terminal=false\n", "Terminal=false\nStartupWMClass=game.exe\n")
+        # Proton's windows are given steam_app_NAME as their app ID.
+        self.assertIn(f"StartupWMClass=steam_app_{name}\n", generated)
+        # A window class, a translated name and an action, set by hand.
+        menu.write_text(generated.replace(f"StartupWMClass=steam_app_{name}\n", "StartupWMClass=game.exe\n")
                         .replace("Name=Game name\n", "Name=Game name\nName[de]=Spielname\n")
                         + "\n[Desktop Action extra]\nName=Extra\nExec=true\n")
         edited = menu.read_text()
@@ -841,10 +843,30 @@ class LibraryTests(unittest.TestCase):
         self.assertIn("StartupWMClass=game.exe\n", text)
         self.assertEqual(text.count("TryExec="), 1)
         self.assertLess(text.index("TryExec="), text.index("[Desktop Action extra]"))
+        self.assertEqual(text.count("StartupWMClass="), 1)
+        # One made before shortcuts named the app ID gets it.
+        menu.write_text(library.shortcut_text(renamed, icon).replace(f"StartupWMClass=steam_app_{name}\n", ""))
+        library.refresh_shortcuts(renamed, icon)
+        self.assertEqual(menu.read_text(), library.shortcut_text(renamed, icon))
         # Not a desktop entry at all any more: written afresh.
         menu.write_text("garbage\n")
         library.refresh_shortcuts(renamed, icon)
         self.assertEqual(menu.read_text(), library.shortcut_text(renamed, icon))
+
+    def test_only_proton_games_shortcuts_name_its_app_id(self):
+        library = self.library
+        game = self.home / "Native Game"
+        game.mkdir()
+        (game / "play.sh").write_text("#!/bin/sh\n")
+        native = library.add_existing(game)
+        self.assertNotIn("StartupWMClass", library.shortcut_text(native))
+        library.update_settings(native["name"], {"launch_with": "proton"})
+        self.assertIn(f"StartupWMClass=steam_app_{native['name']}\n", library.shortcut_text(native))
+        windows = self.home / "Windows Game"
+        windows.mkdir()
+        (windows / "Game.exe").write_text("game")
+        detected = library.add_existing(windows / "Game.exe")
+        self.assertIn(f"StartupWMClass=steam_app_{detected['name']}\n", library.shortcut_text(detected))
 
     def test_shortcuts_quote_the_manager_only_when_they_must(self):
         # Menu editors take a quoted program for a missing one.

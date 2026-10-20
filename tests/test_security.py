@@ -1473,6 +1473,21 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(umu_ids("--env", "UMU_ID=umu-123"), ["umu-default", "umu-123"])
         self.assertNotIn("UMU_ID", self.recorded_args())
 
+    def test_proton_windows_are_named_after_the_sandbox(self):
+        # Proton's Wine gives every window the app ID steam_proton unless
+        # WINE_WMCLASS names one; the manager's shortcuts expect steam_app_NAME.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        def classes(*options):
+            args = self.recorded_args("--proton=" + str(proton), "--name", "named", *options)
+            return [args[i + 2] for i, a in enumerate(args)
+                    if a == "--setenv" and args[i + 1] == "WINE_WMCLASS"]
+        self.assertEqual(classes(), ["named"])
+        self.assertEqual(classes("--env", "WINE_WMCLASS=mine"), ["named", "mine"])
+        self.assertNotIn("WINE_WMCLASS", self.recorded_args())
+
     def test_hide_tray_sets_and_takes_back_wines_tray_window_setting(self):
         # With no tray to dock into, Wine's explorer shows tray icons in a
         # window of its own unless the prefix says ShowSystray=0. The setting
