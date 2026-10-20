@@ -2413,14 +2413,15 @@ if [ "$GS" = 1 ]; then
         # This explicit mode grants the same desktop compositor access as
         # --wayland. Only X11 windows go through gamescope. The sandbox's
         # environment names the desktop's socket to gamescope alone, so the
-        # game's Wayland connection is set here, after the inner starter.
+        # game's Wayland connection is set here, for the inner starter and so
+        # for what sandbox-attach starts too, which may connect there as well.
         # Connecting to that one socket, nothing else in gamescope's folder.
         INNER_DISPLAY_RULES=( --unix-connect "$HOST_WL" )
         INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
     fi
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach "${GS_START[@]}" \
-        /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" --unix-connect-where-writable \
-        --no-abstract-scope --attach /run/sandbox-attach -- "${INNER_DISPLAY_ENV[@]}" "$@"
+        "${INNER_DISPLAY_ENV[@]}" /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" \
+        --unix-connect-where-writable --no-abstract-scope --attach /run/sandbox-attach -- "$@"
 else
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --attach /run/sandbox-attach -- "$@"
 fi

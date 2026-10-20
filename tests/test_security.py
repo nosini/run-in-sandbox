@@ -1892,7 +1892,11 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(rules[rules.index("--unix-connect") + 1], "/run/host-wayland/wayland-0")
         self.assertFalse([r for k, r in enumerate(rules[1:]) if rules[k] == "--rw"
                           and r.startswith("/run/host-wayland")])
-        self.assertIn("WAYLAND_DISPLAY=/run/host-wayland/wayland-0", args[inner:])
+        # Set for the game's starter, which is also what sandbox-attach asks
+        # to start a program: that one can then find the socket it may use.
+        starter = args.index("/run/sandbox-landlock", args.index("gamescope"))
+        self.assertEqual(args[starter - 2:starter], ["env", "WAYLAND_DISPLAY=/run/host-wayland/wayland-0"])
+        self.assertNotIn("WAYLAND_DISPLAY=/run/host-wayland/wayland-0", args[inner:])
         # Gamescope's WSI layer hooks nothing beside the desktop's socket, and
         # would only ask about every swapchain: it stays out of the game, and
         # out of what sandbox-attach starts, which gets the environment gamescope
@@ -2143,6 +2147,59 @@ sys.exit(int(sys.argv[2]))
         result = split("split-crashed", "crash", "1")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("gamescope ended with status 2", result.stderr)
+
+    def test_programs_attached_to_split_display_find_the_desktop_socket(self):
+        # The game's Wayland connection is what a program attached to check on
+        # the game (vulkaninfo, say) needs to see as well.
+        import socket
+        import threading
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.runtime / "wayland-attach"))
+        listener.listen()
+        listener.settimeout(8)
+        def serve():
+            # The monitor layout query before the sandbox starts, then the
+            # attached program's.
+            for _ in range(2):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.sendall(b"wayland")
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.env["WAYLAND_DISPLAY"] = "wayland-attach"
+        self.env["DISPLAY"] = ":123"
+        # Never started: nothing here connects to X11.
+        gamescope = self.game / "gamescope"
+        gamescope.write_text("#!/bin/sh\nexit 99\n")
+        gamescope.chmod(0o755)
+        self.env["PATH"] = str(self.game) + ":/usr/bin:/bin"
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        (proton / "proton").chmod(0o755)
+        name = "split-attach-" + self.base.name
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--wayland-x11", "--proton=" + str(proton), "--name", name,
+             str(self.game), "/bin/sh", "-c", "echo ready; exec sleep 30"],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop():
+            if proc.poll() is None:
+                proc.terminate()
+            proc.communicate(timeout=10)
+        self.addCleanup(stop)
+        self.assertEqual(proc.stdout.readline().strip(), "ready", proc.stderr.read()
+                         if proc.poll() is not None else "")
+        result = self.attach(name, "--exec", "--", "/usr/bin/python3", "-c",
+                             "import os, socket\n"
+                             "s = socket.socket(socket.AF_UNIX)\n"
+                             "s.settimeout(3)\n"
+                             "s.connect(os.environ['WAYLAND_DISPLAY'])\n"
+                             "print(os.environ['WAYLAND_DISPLAY'], s.recv(64).decode())\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "/run/host-wayland/wayland-0 wayland")
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
 
     def test_split_mangohud_keeps_config_but_disables_x11_shortcut_polling(self):
         self.recorded_args()  # command recorders and the validated Wayland socket

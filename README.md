@@ -846,7 +846,9 @@ loads DLLs and settings from), or through the terminal of `--shell`. Doing
 so gets the game nothing it did not have.
 
 It starts with the game's environment as the sandbox gave it, plus `TERM`;
-a Windows program also takes Proton's run-time settings from `wineserver`.
+a Windows program also takes Proton's run-time settings from `wineserver`. In
+split display that includes the desktop's Wayland socket, which the program
+may use as the game does.
 The `--shell` reads no `.bashrc` or profile. In a terminal, the program gets
 a terminal of the sandbox's own, which `sandbox-attach` relays, so your own
 is never handed to it; elsewhere it gets `sandbox-attach`'s stdin, stdout
