@@ -727,7 +727,7 @@ class LibraryTests(unittest.TestCase):
         (config / "games" / entry["name"]).write_text(
             "gamescope=0\nwayland=0\ngamescope_args=-W 1280 -H 720 -f\nnet=1\nlan_allow=10.0.0.5\n"
             "private_hosts=1\nhosts=10.0.0.5 a.example, 10.0.0.6 b.example\nproton=GE-Test\nmod_loaders=1\n"
-            "steam=1\nmac_vendor=1\n")
+            "steam=1\nhide_tray=1\nmac_vendor=1\n")
         recorded = self.home / "recorded"
         stub = self.home / "sandbox-game"
         stub.write_text(f'#!/bin/sh\n[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
@@ -749,6 +749,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(sorted(launched[:-2]), sorted(flags[1:]))
         self.assertIn("--gamescope=-W 1280 -H 720 -f", flags)
         self.assertIn("--steam", flags)
+        self.assertIn("--hide-tray", flags)
         self.assertIn("--mac-vendor", flags)
         # The launcher's log is the one the manager shows.
         self.assertTrue(library.log_path(entry["name"]).exists())

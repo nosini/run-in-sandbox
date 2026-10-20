@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-#              [--proton[=VER] [--mod-loaders] [--steam]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
+#              [--proton[=VER] [--mod-loaders] [--steam] [--hide-tray]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
@@ -64,6 +64,8 @@
 #   --steam     with --proton: start CMD through Proton's steam.exe, which
 #               stands in for a running Steam client. Without it, Proton
 #               builds with umu's non-Steam mode start CMD with plain Wine.
+#   --hide-tray with --proton: hide the window Wine opens for tray icons when
+#               it has no tray to put them in (ShowSystray=0 in the prefix).
 #   --mkxp      run an RPG Maker XP/VX/VX Ace game natively under mkxp-z, no
 #               Wine involved. CMD is optional and normally omitted: the
 #               runtime is the program. =DIR names the mkxp-z install, else
@@ -581,6 +583,7 @@ Runtimes
                         (BepInEx, MelonLoader, UE4SS, ASI loaders)
   --steam               with --proton: start it through Proton's steam.exe,
                         as Steam does, rather than as a non-Steam program
+  --hide-tray           with --proton: hide Wine's window for tray icons
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
   --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
   --dotnet[=DIR]        the host's .NET runtime, for a .NET program that does
@@ -642,7 +645,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
-GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; MAC_VENDOR=0
+GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; HIDE_TRAY=0; MAC_VENDOR=0
 WAYLAND_X11=0; X11_EXE=""
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
@@ -678,6 +681,7 @@ while [ "$#" -gt 0 ]; do
         --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
         --mod-loaders) MODS=1; shift ;;
         --steam)     STEAM=1; shift ;;
+        --hide-tray) HIDE_TRAY=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
         --pgmmv)     PGMMV_SPEC="auto"; shift ;;
@@ -721,6 +725,8 @@ done
     echo "--mod-loaders is for Windows games: it needs --proton" >&2; exit 1; }
 [ "$STEAM" = 0 ] || [ -n "$PROTON_SPEC" ] || {
     echo "--steam is for Windows games: it needs --proton" >&2; exit 1; }
+[ "$HIDE_TRAY" = 0 ] || [ -n "$PROTON_SPEC" ] || {
+    echo "--hide-tray is for Windows games: it needs --proton" >&2; exit 1; }
 [ -z "$WITH_PROTON_SPEC" ] || [ -z "$PROTON_SPEC" ] || {
     echo "--with-proton is for native programs; --proton already brings Proton along" >&2; exit 1; }
 [ "$NET" = 1 ] || { [ "${#LAN_ALLOW[@]}" = 0 ] && [ "$LAN_ALL" = 0 ]; } || {
@@ -1015,11 +1021,90 @@ keep_registry() {
     done
 }
 
+# With no tray to put icons in -- always so here: no host X11, no D-Bus --
+# Wine's explorer shows them in a window of its own, which only a registry
+# value hides: HKCU\Software\Wine\Explorer ShowSystray=0, read when it starts.
+# Set in user.reg while nothing runs, and taken out again when the setting is
+# turned off, if it was this that put it there ($CAP/tray-hidden says so):
+# one set some other way stays. A prefix not made yet gets it next time.
+TRAY_HELPER='
+import os, stat, sys
+path, hide = sys.argv[1], sys.argv[2] == "1"
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+with os.fdopen(fd, "rb") as f:
+    info = os.fstat(f.fileno())
+    data = f.read()
+if not stat.S_ISREG(info.st_mode) or not data.startswith(b"WINE REGISTRY Version 2\n"):
+    sys.exit(1)
+lines = data.split(b"\n")
+value = b"\"ShowSystray\"=dword:00000000"
+# Key and value names are case-insensitive. A key ends at the next one; a
+# value line ending in a backslash goes on to the next line.
+start = next((i for i, line in enumerate(lines)
+              if line.lower().startswith(b"[software\\\\wine\\\\explorer]")), None)
+found = None
+if start is not None:
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(b"[")), len(lines))
+    i = start + 1
+    while i < end:
+        last = i
+        while lines[last].endswith(b"\\") and last + 1 < end:
+            last += 1
+        if lines[i].lower().startswith(b"\"showsystray\"="):
+            found = (i, last)
+        i = last + 1
+if hide:
+    if found and found[0] == found[1] and lines[found[0]] == value:
+        sys.exit(0)
+    if found:
+        lines[found[0]:found[1] + 1] = [value]
+    elif start is not None:
+        at = start + 1
+        while at < len(lines) and lines[at].startswith(b"#"):
+            at += 1                   # its #time= line comes first
+        lines.insert(at, value)
+    else:
+        if lines[-1]:
+            lines.append(b"")         # so the file still ends in a new line
+        lines[-1:-1] = [b"", b"[Software\\\\Wine\\\\Explorer] %d" % int(info.st_mtime), value]
+else:
+    if not found or found[0] != found[1] or lines[found[0]].lower() != value.lower():
+        sys.exit(0)
+    del lines[found[0]]
+directory, name = os.path.split(path)
+directory = directory or "."
+tmp = os.path.join(directory, ".%s.tray-%d" % (name, os.getpid()))
+out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IMODE(info.st_mode))
+try:
+    with os.fdopen(out, "wb") as f:
+        f.write(b"\n".join(lines))
+        f.flush()
+        os.fsync(f.fileno())      # wineserver does not; an empty registry stops Wine
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(dirfd)
+finally:
+    os.close(dirfd)
+'
+tray_window() {
+    local pfx="$CAP/compat/pfx" marker="$CAP/tray-hidden"
+    [ "$HIDE_TRAY" = 1 ] || [ -e "$marker" ] || return 0
+    # The prefix is the game's to write in: never follow a link it put there.
+    [ ! -L "$CAP/compat" ] && [ ! -L "$pfx" ] && [ -d "$pfx" ] && valid_registry "$pfx/user.reg" || return 0
+    python3 -I -c "$TRAY_HELPER" "$pfx/user.reg" "$HIDE_TRAY" || return 0
+    if [ "$HIDE_TRAY" = 1 ]; then : > "$marker"; else rm -f -- "$marker"; fi
+}
+
 PROTON=""; PROTON_ARGS=()
 if [ -n "$PROTON_SPEC" ]; then
     PROTON="$(need_proton "$PROTON_SPEC")" || exit 1
     mkdir -p "$CAP/compat" "$CAP/steam"
     keep_registry || true             # never what stops a game from starting
+    tray_window || true
     # STEAM_COMPAT_CLIENT_INSTALL_PATH is read unconditionally by proton's
     # setup_prefix(), so it has to exist -- but it is only mined for optional
     # legacycompat/steamclient*.dll, which a non-Steam game does not want.

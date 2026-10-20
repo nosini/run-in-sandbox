@@ -155,7 +155,7 @@ _sandbox_game()
     # completed.
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-exe --gamescope --host-x11 --headless
-            --proton --mod-loaders --steam --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
+            --proton --mod-loaders --steam --hide-tray --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
             --lan --mac-vendor --hosts --add-host --hosts-writable --ro --name --env --mangohud --list --stop
             --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
         return

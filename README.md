@@ -346,6 +346,15 @@ started the way Steam starts it can have **Start through Proton's Steam
 stand-in** turned on in its preferences (`steam=1`, or `--steam` from the
 shell). Valve's own Proton builds always use `steam.exe`.
 
+Games never get a tray to put icons in: there is no host X11 and no D-Bus in
+the sandbox. Wine then shows a game's tray icons in a small window of its own.
+Turn on **Hide Wine's tray icon window** (`hide_tray=1`, or `--hide-tray`) to
+keep that window closed. The sandbox sets `ShowSystray=0` under
+`HKCU\Software\Wine\Explorer` in the prefix before Wine starts, so the
+setting applies from the first launch after the prefix exists. Turning it off
+removes that value again, but a value you set yourself, for example with
+`regedit`, stays.
+
 Proton games also get `/dev/ntsync` where the kernel has it (6.14 and newer):
 Windows' thread synchronisation done in the kernel instead of by wineserver or
 fsync, which Wine and Proton builds that know it use on their own, to the
@@ -643,7 +652,7 @@ sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--dotnet[=DIR]] [--with-proton[=VER]] [--net [--allow-lan LIST|--lan]]
              [--hosts] [--add-host "ADDR NAME..."] [--hosts-writable]
-             [--proton[=VER] [--mod-loaders] [--steam]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
+             [--proton[=VER] [--mod-loaders] [--steam] [--hide-tray]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
 sandbox-game --list | --reset-install NAME | --delete NAME
 ```
@@ -686,6 +695,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
 | `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
 | `--steam` | with `--proton`: start the program through Proton's `steam.exe`, as Steam does, instead of as a non-Steam program; see [Windows games — Proton](#windows-games--proton) |
+| `--hide-tray` | with `--proton`: keep closed the window Wine shows tray icons in; see [Windows games — Proton](#windows-games--proton) |
 | `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
 | `--pgmmv[=DIR]` | run a Pixel Game Maker MV game natively; `CMD` is optional and supplies extra player arguments |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
@@ -1257,6 +1267,7 @@ mangohud=0|1
 net=0|1
 mod_loaders=0|1
 steam=0|1
+hide_tray=0|1
 launch_with=auto|proton
 casefold=0|1
 webgl=auto|vulkan

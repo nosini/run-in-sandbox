@@ -1091,6 +1091,12 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--steam", recorded.read_text().splitlines())
+        self.assertNotIn("--hide-tray", recorded.read_text().splitlines())
+        (config / name).write_text("hide_tray=1\n")
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--hide-tray", recorded.read_text().splitlines())
 
     def test_nwjs_runs_under_the_games_name_without_a_copy(self):
         # The runtime's nw, under the game's name beside links to the rest of
@@ -1445,6 +1451,57 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(umu_ids("--steam"), [])
         self.assertEqual(umu_ids("--env", "UMU_ID=umu-123"), ["umu-default", "umu-123"])
         self.assertNotIn("UMU_ID", self.recorded_args())
+
+    def test_hide_tray_sets_and_takes_back_wines_tray_window_setting(self):
+        # With no tray to dock into, Wine's explorer shows tray icons in a
+        # window of its own unless the prefix says ShowSystray=0. The setting
+        # puts that in while nothing runs, and turning it off takes back only
+        # a value it put there.
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        def launch(*options):
+            return self.cli("--headless", "--proton=" + str(proton), "--name", "tray", *options,
+                            self.game, "/game/game.exe")
+        capture = self.home / "game-sandboxes" / "tray"
+        user_reg, marker = capture / "compat" / "pfx" / "user.reg", capture / "tray-hidden"
+        # No prefix yet: nothing to write, and nothing claimed.
+        launch("--hide-tray")
+        self.assertFalse(marker.exists())
+        user_reg.parent.mkdir(parents=True)
+        explorer = '[Software\\\\Wine\\\\Explorer] 1700000000\n#time=1d\n"Desktop"="Default"\n'
+        before = ("WINE REGISTRY Version 2\n;; All keys relative to \\\\User\\\\S-1-5-21-0-0-0-1000\n\n"
+                  '[Software\\\\Wine] 1700000000\n"A"="b"\n\n' + explorer +
+                  '\n[Software\\\\Wine\\\\Explorer\\\\Desktops] 1700000000\n"ShowSystray"=dword:00000001\n')
+        user_reg.write_text(before)
+        launch("--hide-tray")
+        hidden = before.replace(explorer, explorer.replace("#time=1d\n", '#time=1d\n"ShowSystray"=dword:00000000\n'))
+        self.assertEqual(user_reg.read_text(), hidden)
+        self.assertTrue(marker.exists())
+        launch("--hide-tray")
+        self.assertEqual(user_reg.read_text(), hidden)
+        launch()
+        self.assertEqual(user_reg.read_text(), before)
+        self.assertFalse(marker.exists())
+        # One the user set some other way is theirs to keep.
+        user_reg.write_text(hidden)
+        launch()
+        self.assertEqual(user_reg.read_text(), hidden)
+        # A prefix without the key gets one.
+        user_reg.write_text("WINE REGISTRY Version 2\n\n[Software\\\\Wine] 1\n")
+        launch("--hide-tray")
+        self.assertRegex(user_reg.read_text(), r'\n\n\[Software\\\\Wine\\\\Explorer\] \d+\n"ShowSystray"=dword:00000000\n$')
+        # The prefix is the game's: nothing is written through a link it left.
+        victim = self.base / "victim.reg"
+        victim.write_text(before)
+        user_reg.unlink()
+        user_reg.symlink_to(victim)
+        launch("--hide-tray")
+        self.assertEqual(victim.read_text(), before)
+        result = self.cli("--headless", "--hide-tray", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs --proton", result.stderr)
 
     def test_wine_leaves_gnutls_a_default_priority(self):
         # Wine empties GnuTLS's system priority file unless one is set; where

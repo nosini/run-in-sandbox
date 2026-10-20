@@ -43,7 +43,7 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     wayland_x11 "$(cfg_wayland_x11)" x11_exe "$(cfg_get x11_exe '')" \
     host_x11 "$(cfg_get host_x11 0)" gamescope "$(cfg_get gamescope 0)" \
     mangohud "$(cfg_get mangohud 0)" net "$(cfg_get net 0)" \
-    proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" steam "$(cfg_get steam 0)" \
+    proton "$(cfg_get proton auto)" mod_loaders "$(cfg_get mod_loaders 0)" steam "$(cfg_get steam 0)" hide_tray "$(cfg_get hide_tray 0)" \
     casefold "$(cfg_get casefold 1)" webgl "$(cfg_get webgl auto)" \
     gamescope_args "$(cfg_get gamescope_args '')" \
     dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" \
