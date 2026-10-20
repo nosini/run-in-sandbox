@@ -19,7 +19,7 @@ class ManagerGuiTests(unittest.TestCase):
         except (ImportError, ValueError):
             self.skipTest("GTK 4 and libadwaita are not installed")
         script = r'''
-import json, os, runpy, subprocess, sys, traceback
+import json, os, runpy, subprocess, sys, threading, traceback
 from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
@@ -33,6 +33,7 @@ proton_scans = []
 icon_calls = []
 active_icons = [0]
 shortcuts = []
+search_release = threading.Event()
 
 def children(widget):
     yield widget
@@ -199,7 +200,9 @@ def tick():
             # Saving also adds a path that has been typed but not yet added.
             button(dialog, "Save and search").emit("clicked")
         elif stage == 4:
-            if len(manager.entries) != 3:
+            # Shown first, then again with what the background search reconnected.
+            if len(manager.entries) != 3 or manager.search_pending or manager.search_request \
+                    or manager.count.get_label() == "Refreshing library…":
                 return True
             menu, shortcut = shortcuts[0]
             assert shortcut.is_file(), shortcut
@@ -267,6 +270,23 @@ def tick():
         elif stage == 8:
             if manager.library.game_folders():
                 return True
+            # The library is shown before the game folder search finishes.
+            refresh = manager.library.refresh
+            def held_refresh():
+                search_release.wait(20)
+                return refresh()
+            manager.library.refresh = held_refresh
+            manager.reload(search=True)
+        elif stage == 9:
+            if manager.count.get_label() == "Refreshing library…":
+                return True
+            assert "searching game folders" in manager.count.get_label(), manager.count.get_label()
+            assert len(manager.rows) == 4 and manager.selected, manager.rows
+            search_release.set()
+        elif stage == 10:
+            if manager.search_request:
+                return True
+            assert manager.count.get_label() == "4 sandboxes", manager.count.get_label()
             manager.window.close()
             print("GUI lifecycle passed", flush=True)
             return False

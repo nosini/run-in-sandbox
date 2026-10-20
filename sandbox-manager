@@ -188,6 +188,7 @@ def main():
             self.selected = None
             self.pending = set()
             self.refreshing = False
+            self.search_pending, self.search_request = False, None
             self.window = Adw.ApplicationWindow(application=app, title="Sandbox Manager")
             self.window.set_default_size(1120, 760)
             self.window.set_size_request(740, 500)
@@ -376,23 +377,30 @@ def main():
             box.append(label)
             return label
 
+        def with_locations(self, entries):
+            # Where each game lives, found here once rather than on every keystroke,
+            # and whether its folder is there: never looked at on the main thread.
+            return [(entry, self.library.installation(entry), self.library.folder_state(entry))
+                    for entry in entries]
+
+        def show_count(self):
+            count = f"{len(self.entries)} sandbox{'es' if len(self.entries) != 1 else ''}"
+            self.count.set_label(count + (" · searching game folders…" if self.search_request else ""))
+
         def reload(self, select=None, rescan=False, search=False):
-            """SEARCH: look for missing games in the game folders too. Only when
-            opening, refreshing or changing those folders: it walks them all."""
+            """SEARCH: then look for missing games in the game folders too. Only
+            when opening, refreshing or changing those folders: it walks them all."""
             selected_name = select or (self.selected or {}).get("name")
             request = object()
             self.reload_request = request
+            # Started by whichever reload shows the library next, so a reload
+            # requested meanwhile does not drop the search.
+            self.search_pending = self.search_pending or search
             self.descriptions, self.program_lists = {}, {}
             if rescan:
                 with self.proton_lock:
                     self.proton_list = None
             self.count.set_label("Refreshing library…")
-            def refresh():
-                # Where each game lives, found here once rather than on every keystroke,
-                # and whether its folder is there: never looked at on the main thread.
-                entries = self.library.refresh() if search else self.library.entries()
-                return [(entry, self.library.installation(entry), self.library.folder_state(entry))
-                        for entry in entries]
             def loaded(located, error):
                 if self.reload_request is not request:
                     return
@@ -426,7 +434,10 @@ def main():
                     self.listbox.append(row)
                     self.rows[entry["name"]] = row
                     self.load_icon(entry)
-                self.count.set_label(f"{len(entries)} sandbox{'es' if len(entries) != 1 else ''}")
+                if self.search_pending:
+                    self.search_pending = False
+                    self.search_folders()
+                self.show_count()
                 self.selected = None
                 if entries:
                     self.listbox.select_row(self.rows.get(selected_name, self.rows[entries[0]["name"]]))
@@ -434,7 +445,25 @@ def main():
                     self.content.set_visible_child_name("empty")
                     self.window_title.set_title("Sandbox Manager")
                 self.poll(True)
-            self.work(refresh, loaded)
+            self.work(lambda: self.with_locations(self.library.entries()), loaded)
+
+        def search_folders(self):
+            """Reconnect missing games found in the game folders, with the library
+            already shown: walking them can take a while on a cold disk."""
+            request = object()
+            self.search_request = request
+            def searched(located, error):
+                if self.search_request is not request:
+                    return  # a newer search shows its own findings
+                self.search_request = None
+                self.show_count()
+                shown = [(entry, self.rows[entry["name"]].location, self.rows[entry["name"]].folder)
+                         for entry in self.entries]
+                if not error and located != shown:
+                    # Read again rather than shown as found: a game edited or
+                    # located since the search started keeps those changes.
+                    self.reload()
+            self.work(lambda: self.with_locations(self.library.refresh()), searched)
 
         def select_row(self, _, row):
             if row is None:

@@ -142,8 +142,8 @@ once the original is executable again.
 
 Open **Game folders…** in the manager menu to set default search locations for
 external games, then choose **Save and search**. On startup and library refresh,
-the manager searches those locations and up to three folder levels below them
-for missing games. A folder matches when `sandbox-game` would give it the same
+the manager shows your library straight away, then searches those locations
+and up to three folder levels below them for missing games in the background. A folder matches when `sandbox-game` would give it the same
 sandbox name as the game's original folder or, for older entries without a
 recorded location, as the sandbox itself (a sandbox named with `--name` cannot
 be matched this way). A folder that only one missing game matches, and no other
