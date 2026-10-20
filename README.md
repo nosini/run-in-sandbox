@@ -122,7 +122,10 @@ A shortcut starts the game as **Play** does, with the game's icon and display
 name, and both follow later changes the manager makes. Deleting the sandbox
 in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
-`sandbox-manager --launch NAME`, which you can also use from a shell.
+`sandbox-manager --launch NAME`, which you can also use from a shell. You can
+edit these files, for example to add a `StartupWMClass` line: the manager
+updates only the name, the `Exec` and `TryExec` lines, and the icon (unless
+you chose another one), and leaves every other line as you wrote it.
 
 Choose **Add game → Add an existing game** for an unpacked game. Select its
 folder or launcher; its original files stay in place, and saves and changes

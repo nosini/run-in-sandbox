@@ -810,6 +810,42 @@ class LibraryTests(unittest.TestCase):
             library.operate(name, "delete")
         self.assertFalse(desktop.exists())
 
+    def test_shortcut_refreshes_keep_what_was_added_by_hand(self):
+        library = self.shortcut_library()
+        entry = library.create("Game name")
+        name = entry["name"]
+        icon = library.capture(name) / "icons/abc.png"
+        library.set_shortcut(name, "menu", True, icon)
+        menu = self.home / f"data/applications/sandbox-game-{name}.desktop"
+        generated = menu.read_text()
+        # A window class, a translated name and an action, added by hand.
+        menu.write_text(generated.replace("Terminal=false\n", "Terminal=false\nStartupWMClass=game.exe\n")
+                        .replace("Name=Game name\n", "Name=Game name\nName[de]=Spielname\n")
+                        + "\n[Desktop Action extra]\nName=Extra\nExec=true\n")
+        edited = menu.read_text()
+        library.refresh_shortcuts(library.entry(name), icon)
+        self.assertEqual(menu.read_text(), edited)
+        # Renames and new icons still reach it, with the rest left as it is.
+        renamed = library.update_entry(name, title="Renamed", title_custom=True)
+        newer = library.capture(name) / "icons/def.png"
+        library.refresh_shortcuts(renamed, newer)
+        self.assertEqual(menu.read_text(), edited.replace("Name=Game name\n", "Name=Renamed\n")
+                         .replace(f"Icon={icon}\n", f"Icon={newer}\n"))
+        # An icon chosen by hand stays; a missing managed key comes back.
+        lines = [line for line in menu.read_text().splitlines() if not line.startswith("TryExec=")]
+        menu.write_text("\n".join(line if not line.startswith("Icon=") else "Icon=my-icon"
+                                  for line in lines) + "\n")
+        library.refresh_shortcuts(renamed, icon)
+        text = menu.read_text()
+        self.assertIn("Icon=my-icon\n", text)
+        self.assertIn("StartupWMClass=game.exe\n", text)
+        self.assertEqual(text.count("TryExec="), 1)
+        self.assertLess(text.index("TryExec="), text.index("[Desktop Action extra]"))
+        # Not a desktop entry at all any more: written afresh.
+        menu.write_text("garbage\n")
+        library.refresh_shortcuts(renamed, icon)
+        self.assertEqual(menu.read_text(), library.shortcut_text(renamed, icon))
+
     def test_shortcuts_quote_the_manager_only_when_they_must(self):
         # Menu editors take a quoted program for a missing one.
         library = core.Library(self.home / ".local/bin/sandbox-game", ROOT, ROOT / "Sandbox game",

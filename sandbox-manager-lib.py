@@ -732,9 +732,47 @@ PY
             "Icon=" + desktop_string(str(icon) if icon else "applications-games"),
             "Terminal=false", "Categories=Game;"))
 
-    def write_shortcut(self, path, text, where):
-        if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8", errors="replace") == text:
-            return
+    # Kept up to date in a shortcut that exists; anything else in it, such as
+    # a StartupWMClass added by hand, is the user's.
+    MANAGED_KEYS = ("Name", "Exec", "TryExec", "Icon")
+
+    def merged_shortcut(self, current, text, name):
+        """TEXT's managed keys over CURRENT, a shortcut as it is now. An icon
+        set by hand stays: only the generic one or a cached one is replaced."""
+        lines = current.splitlines()
+        start = next((i for i, line in enumerate(lines) if line.strip() == "[Desktop Entry]"), None)
+        if start is None:
+            return text
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+        wanted = dict(line.split("=", 1) for line in text.splitlines()
+                      if line.split("=", 1)[0] in self.MANAGED_KEYS)
+        icons = self.capture(name) / "icons"
+        group, seen = [], set()
+        for line in lines[start + 1:end]:
+            key, sep, value = line.partition("=")
+            key = key.strip()
+            if not sep or key not in wanted or line.lstrip().startswith("#"):
+                group.append(line)
+            elif key in seen:
+                continue                  # a duplicate key makes the entry invalid
+            else:
+                seen.add(key)
+                value = value.strip()
+                ours = key != "Icon" or value in ("", "applications-games") or Path(value).parent == icons
+                group.append(f"{key}={wanted[key]}" if ours else line)
+        # Missing ones go before the blank lines that end the group.
+        at = len(group)
+        while at and not group[at - 1].strip():
+            at -= 1
+        group[at:at] = [f"{key}={value}" for key, value in wanted.items() if key not in seen]
+        return "".join(line + "\n" for line in lines[:start + 1] + group + lines[end:])
+
+    def write_shortcut(self, path, text, where, name):
+        if path.is_file() and not path.is_symlink():
+            current = path.read_text(encoding="utf-8", errors="replace")
+            text = self.merged_shortcut(current, text, name)
+            if current == text:
+                return
         # Desktops start only executable launchers there, GNOME's only trusted ones too.
         atomic_write(path, text, mode=0o755 if where == "desktop" else 0o644)
         if where == "desktop":
@@ -747,7 +785,7 @@ PY
     def set_shortcut(self, name, where, enabled, icon=None):
         path = self.shortcut_path(name, where)
         if enabled:
-            self.write_shortcut(path, self.shortcut_text(self.entry(name), icon), where)
+            self.write_shortcut(path, self.shortcut_text(self.entry(name), icon), where, name)
         else:
             path.unlink(missing_ok=True)
 
@@ -756,7 +794,7 @@ PY
         for where, present in self.shortcuts(entry["name"]).items():
             if present:
                 self.write_shortcut(self.shortcut_path(entry["name"], where),
-                                    self.shortcut_text(entry, icon), where)
+                                    self.shortcut_text(entry, icon), where, entry["name"])
 
     def remove_shortcuts(self, name):
         for where, present in self.shortcuts(name).items():
