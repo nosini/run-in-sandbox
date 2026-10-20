@@ -358,6 +358,8 @@ pref_flags() {
         FLAG+=( --wayland )
     fi
     [ "$ALLOW_MANGOHUD" = 1 ] && [ "$(cfg_get mangohud 0)" = 1 ] && FLAG+=( --mangohud )
+    # X11 has no HDR: defaults that ask for it pass over a game on the host's.
+    [ "$host_x11" != 1 ] && [ "$(cfg_get hdr 0)" = 1 ] && FLAG+=( --hdr )
     if [ "$(cfg_get net 0)" = 1 ]; then
         FLAG+=( --net )
         [ "$(cfg_get mac_vendor 0)" != 1 ] || FLAG+=( --mac-vendor )
@@ -426,7 +428,7 @@ prefs_save() (
     parsed="$(python3 - "$out" <<'PY'
 import json, re, sys
 values = json.loads(sys.argv[1])
-keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud",
+keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud", "hdr",
         "wayland_x11", "x11_exe",
         "net", "proton", "mod_loaders", "steam", "hide_tray", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
@@ -512,7 +514,7 @@ PY
         fi
     fi
 
-    bools="wayland wayland_x11 host_x11 mangohud gamescope net launch_with mod_loaders steam hide_tray casefold webgl proton
+    bools="wayland wayland_x11 host_x11 mangohud hdr gamescope net launch_with mod_loaders steam hide_tray casefold webgl proton
            dotnet lan mac_vendor private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }

@@ -145,7 +145,7 @@ class Preferences:
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
-        for key in ("net", "mangohud", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
+        for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("with_proton", "lan_allow", "hosts"):
@@ -230,6 +230,11 @@ class Preferences:
         return self.display == "wayland-x11" and self.proton_controls
 
     @property
+    def hdr_controls(self):
+        """X11 has no HDR; every other display can pass it on."""
+        return self.display != "host-x11"
+
+    @property
     def uses_gamescope(self):
         return self.display in ("x11", "wayland-gamescope", "wayland-x11")
 
@@ -251,6 +256,8 @@ class Preferences:
             result["launch_with"] = self.runtime
         if self.engine != "nwjs":
             result["mangohud"] = self.values.get("mangohud", "0")
+        if self.hdr_controls:
+            result["hdr"] = self.values["hdr"]
         if self.proton_controls:
             if self.split_controls:
                 result["x11_exe"] = self.values.get("x11_exe", "").strip()
@@ -447,6 +454,9 @@ class Dialog:
         self.body.append(self.split_note)
         self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
                     lambda widget, *_: self.set_value("mangohud", "1" if widget.get_active() else "0"))
+        self.switch("hdr", "HDR, for games that offer it (turn it on in the desktop's display settings too)",
+                    self.state.values["hdr"] == "1",
+                    lambda widget, *_: self.set_value("hdr", "1" if widget.get_active() else "0"))
         protons = list(dict.fromkeys(["auto", *request.get("protons", [])]))
         pinned = self.state.values.get("proton", "auto")
         if pinned not in protons:
@@ -546,6 +556,7 @@ class Dialog:
     def refresh_visibility(self):
         self.rows["x11_exe"].set_visible(self.state.split_controls)
         self.split_note.set_visible(self.state.split_controls)
+        self.rows["hdr"].set_visible(self.state.hdr_controls)
         self.rows["proton"].set_visible(self.state.proton_controls)
         self.rows["mod_loaders"].set_visible(self.state.proton_controls)
         self.rows["steam"].set_visible(self.state.proton_controls)

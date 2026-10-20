@@ -1910,6 +1910,44 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertNotIn("STEAM_COMPAT_CONFIG", both)
         self.assertIn("WINE_GRAPHICS_DRIVER", both)
 
+    def test_hdr_reaches_dxvk_and_gamescope(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+
+        def setenv(args, key):
+            return [args[i + 2] for i, a in enumerate(args) if a == "--setenv" and args[i + 1] == key]
+
+        def gamescope(args):
+            gs = args.index("gamescope")
+            return args[gs + 1:args.index("--", gs)]
+
+        args = self.recorded_args("--hdr", "--proton=" + str(proton))
+        self.assertEqual(setenv(args, "DXVK_HDR"), ["1"])
+        self.assertEqual(gamescope(args).count("--hdr-enabled"), 1)
+        # Asked for by hand as well: once is enough.
+        args = self.recorded_args("--hdr", "--gamescope=--hdr-enabled -W 1920 -H 1080")
+        self.assertEqual(gamescope(args).count("--hdr-enabled"), 1)
+        # Native Wayland: the desktop's compositor, no gamescope to tell.
+        args = self.recorded_args("--hdr", "--wayland", "--proton=" + str(proton))
+        self.assertEqual(setenv(args, "DXVK_HDR"), ["1"])
+        self.assertNotIn("gamescope", args)
+        # Split display: the game is on the desktop, gamescope only shows launchers.
+        args = self.recorded_args("--hdr", "--wayland-x11", "--proton=" + str(proton))
+        self.assertEqual(setenv(args, "DXVK_HDR"), ["1"])
+        self.assertNotIn("--hdr-enabled", gamescope(args))
+        # A game's own --env still wins.
+        args = self.recorded_args("--hdr", "--env=DXVK_HDR=0", "--proton=" + str(proton))
+        self.assertEqual(setenv(args, "DXVK_HDR"), ["1", "0"])
+        # Off unless asked.
+        args = self.recorded_args("--proton=" + str(proton))
+        self.assertEqual(setenv(args, "DXVK_HDR"), [])
+        self.assertNotIn("--hdr-enabled", args)
+        # X11 has none: said, and left out.
+        self.assertEqual(setenv(self.recorded_args("--hdr", "--host-x11"), "DXVK_HDR"), [])
+        self.assertIn("X11 has no HDR", self.cli("--hdr", "--host-x11", self.game, "/bin/true").stderr)
+
     def test_split_display_keeps_gamescope_windowed(self):
         proton = self.base / "proton"
         proton.mkdir()

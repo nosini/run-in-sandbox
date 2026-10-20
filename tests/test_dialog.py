@@ -52,6 +52,17 @@ class PreferencePolicyTests(unittest.TestCase):
         state.display = "wayland"
         self.assertIsNone(state.error())
 
+    def test_hdr_is_offered_wherever_the_display_can_carry_it(self):
+        state = Preferences({"engine": "proton", "values": {"hdr": "1", "wayland": "1", "wayland_x11": "1"}})
+        self.assertEqual(state.result()["hdr"], "1")
+        for display in ("wayland", "x11"):
+            state.display = display
+            self.assertEqual(state.result()["hdr"], "1")
+        # Hidden on the host's X server, and the saved value left alone.
+        state.display = "host-x11"
+        self.assertNotIn("hdr", state.result())
+        self.assertEqual(Preferences({"engine": "native", "values": {}}).result()["hdr"], "0")
+
     def test_switching_runtime_preserves_edits_and_omits_hidden_settings(self):
         state = Preferences({"engine": "nwjs", "can_proton": True, "values": {
             "mangohud": "1", "proton": "GE-Test", "casefold": "0", "webgl": "vulkan", "steam": "1",
@@ -213,6 +224,18 @@ class GtkDialogTests(unittest.TestCase):
         self.assertFalse(light.appearance.manager.get_dark())
         light.save_preferences()
         self.assertEqual(self.theme_file.read_text(), "theme=light\n")
+
+    def test_hdr_switch_hides_for_host_x11(self):
+        dialog = self.create("preferences", {"engine": "native", "values": {"hdr": "1"}})
+        self.assertTrue(dialog.rows["hdr"].get_visible())
+        self.assertTrue(dialog.widgets["hdr"].get_active())
+        keys = [v for v, _ in dialog.choices["display"]]
+        dialog.widgets["display"].set_selected(keys.index("host-x11"))
+        self.assertFalse(dialog.rows["hdr"].get_visible())
+        dialog.widgets["display"].set_selected(keys.index("wayland"))
+        dialog.widgets["hdr"].set_active(False)
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["hdr"], "0")
 
     def test_launcher_changes_controls_inside_the_same_window(self):
         dialog = self.create("preferences", {"engine": "nwjs", "can_proton": True,

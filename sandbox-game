@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
-#              [--proton[=VER] [--mod-loaders] [--steam] [--hide-tray]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
+#              [--hdr] [--proton[=VER] [--mod-loaders] [--steam] [--hide-tray]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 #   Runs CMD inside an isolated bwrap sandbox:
 #     - no network (--unshare-all includes the net namespace), unless --net
 #     - no nested user namespaces, a seccomp filter (see sandbox-seccomp), and
@@ -43,6 +43,13 @@
 #               fps_limit and per-executable .conf files silently stop
 #               applying. Exporting MANGOHUD=1 opts in just the same.
 #               64-bit only unless mangohud-32bit is installed.
+#   --hdr       let the game show HDR where the display path has it: DXVK and
+#               vkd3d-proton tell Windows games about the screen's HDR
+#               (DXVK_HDR=1), and gamescope, when the game runs in it, gets
+#               --hdr-enabled. On native Wayland the desktop's compositor does
+#               the rest. HDR also has to be on in the desktop's display
+#               settings and in the game. In split display only the game's own
+#               window has it, not gamescope's. Not with --host-x11: X11 has none.
 #   --gamescope run the game inside gamescope's nested compositor. =ARGS passes
 #               options through, e.g. --gamescope='-f -W 2560 -H 1440' (word
 #               split, so quote the lot). Together with --mangohud this becomes
@@ -627,6 +634,8 @@ Other
   --name NAME           sandbox name, else derived from GAMEDIR
   --env K=V             set a variable inside; repeatable, applied last
   --mangohud            the MangoHud overlay (also: MANGOHUD=1)
+  --hdr                 HDR for games that offer it (DXVK_HDR=1; gamescope's
+                        --hdr-enabled); also turn it on in the desktop and game
 
 Managing sandboxes
   --list                every sandbox: size, time played, last played, running
@@ -665,7 +674,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; HIDE_TRAY=0; MAC_VENDOR=0
-WAYLAND_X11=0; X11_EXE=""
+WAYLAND_X11=0; X11_EXE=""; HDR=0
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
@@ -681,6 +690,7 @@ while [ "$#" -gt 0 ]; do
         --headless)  HEADLESS=1; shift ;;
         --net)       NET=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
+        --hdr)       HDR=1; shift ;;
         --gamescope) GS=1; shift ;;
         --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
@@ -843,6 +853,10 @@ elif [ "$WAYLAND" = 0 ] && [ "$HOST_X11" = 0 ]; then
 fi
 [ "$HOST_X11" = 0 ] || { [ "$GS" = 0 ] && [ "$WAYLAND" = 0 ]; } || {
     echo "--host-x11 cannot be combined with --gamescope or --wayland" >&2; exit 1; }
+if [ "$HDR" = 1 ] && [ "$HOST_X11" = 1 ]; then
+    echo "sandbox-game: note: X11 has no HDR; --hdr does nothing with --host-x11" >&2
+    HDR=0
+fi
 
 # Only stdin, stdout and stderr go into the sandbox. bwrap passes on every
 # descriptor it inherits, and one that names something outside -- a directory
@@ -1751,6 +1765,13 @@ if [ "$GS" = 1 ]; then
     if [ "$WAYLAND" = 1 ] && [[ " ${GS_ARGS[*]} " != *" --expose-wayland "* ]]; then
         GS_CMD+=( --expose-wayland )
     fi
+    # Without it gamescope tone-maps an HDR game down to SDR, and its Vulkan
+    # layer offers the game no HDR formats in the first place. Not in split
+    # display: the game draws on the desktop, and gamescope only shows the
+    # launchers beside it.
+    if [ "$HDR" = 1 ] && [ "$WAYLAND_X11" = 0 ] && [[ " ${GS_ARGS[*]} " != *" --hdr-enabled "* ]]; then
+        GS_CMD+=( --hdr-enabled )
+    fi
     # An inherited MANGOHUD=1 would light up MangoHud's Vulkan layer inside the
     # game as well, drawing the overlay a second time next to mangoapp's.
     [ "$MHUD_VIA_APP" = 1 ] && MANGOHUD_ARGS+=( --setenv MANGOHUD 0 )
@@ -1870,6 +1891,10 @@ elif [ "$WAYLAND" = 1 ]; then
         VIDEO_ENV+=( --setenv SDL_VIDEODRIVER wayland )
     fi
 fi
+# DXVK reports a screen without HDR to the game unless told otherwise, whatever
+# the screen can do; vkd3d-proton goes by DXVK's report. Other programs ignore
+# it. --env still wins.
+[ "$HDR" = 0 ] || VIDEO_ENV+=( --setenv DXVK_HDR 1 )
 # Playback only, when the sandbox sound server is running (install.sh
 # --restrict-audio; see audio/sandbox-pulse.conf): its socket alone, where Pulse
 # clients look, and no PipeWire socket at all -- that one would get around it.

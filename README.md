@@ -624,7 +624,7 @@ playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
 
 **Sandbox game preferences** — a single window for the launcher, display,
-MangoHud, network, gamescope resolution and fullscreen, and engine settings.
+MangoHud, HDR, network, gamescope resolution and fullscreen, and engine settings.
 When a Windows `.exe` is present, **Launch with** offers **Automatic** and
 **Proton (Windows .exe)**. Proton skips
 NW.js, mkxp-z, PGMMV and native `.sh` launchers and runs the Windows executable.
@@ -706,6 +706,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--host-x11` | use the host X server; permits observing/controlling other X clients, mutually exclusive with `--wayland` and `--gamescope` |
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
+| `--hdr` | HDR for games that offer it; see [HDR](#hdr) |
 | `--gamescope[=ARGS]` | run inside gamescope's nested compositor (default for X11 games); `ARGS` is word-split, so quote the lot |
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
 | `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
@@ -765,6 +766,34 @@ This guards against misclicks; it is not a boundary:
 To run something from the folder outside the sandbox on purpose,
 `sudo umount /path/to/Games` lifts the bind until `sudo mount /path/to/Games`
 puts it back.
+
+### HDR
+
+HDR has to be on in the desktop's display settings (GNOME: Settings →
+Displays → HDR) and in the game's own graphics options. Windows games, and
+any game under gamescope, also need **HDR** in the game's preferences
+(`--hdr`).
+
+What `--hdr` does depends on the display:
+
+| Display | |
+|---|---|
+| Native Wayland, split | `DXVK_HDR=1`: DXVK and vkd3d-proton tell a Windows game the screen has HDR. The desktop's compositor offers the HDR colour spaces to the game's Vulkan itself. In split display only the game's window has HDR, not gamescope's launcher windows. |
+| Gamescope (the X11 default) | `DXVK_HDR=1`, and gamescope gets `--hdr-enabled`, without which it offers the game no HDR formats and tone-maps it to SDR. Gamescope passes HDR on to the desktop through its colour-management protocol. |
+| Host X11 | nothing: X11 has no HDR |
+
+The rest is the driver's: its Vulkan has to offer HDR on Wayland, as RADV on
+recent Mesa does. To see what the game is offered, with it running:
+
+```sh
+sandbox-attach --exec -- sh -c 'vulkaninfo 2>/dev/null | grep -E "GPU id|HDR10" | sort -u'
+```
+
+`COLOR_SPACE_HDR10_ST2084_EXT` listed for a `VK_KHR_wayland_surface` means HDR
+reaches the sandbox. Under gamescope the surface is X11, and HDR10 appears
+there only with `--hdr-enabled` while the desktop has HDR on. `DXVK_HDR=0` in
+`env` turns DXVK's part back off for one game. NW.js, mkxp-z and the PGMMV
+player draw SDR only.
 
 ## Attaching to a running game
 
@@ -1282,6 +1311,7 @@ wayland=0|1
 wayland_x11=0|1
 x11_exe=Launcher.exe
 mangohud=0|1
+hdr=0|1
 net=0|1
 mod_loaders=0|1
 steam=0|1
@@ -1333,6 +1363,7 @@ fragments may contain spaces.
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
 
+`hdr` does nothing with `host_x11=1`.
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
 `with_proton` applies only when the game runs natively; empty means none.
 `lan` and `lan_allow` apply only with `net=1`.

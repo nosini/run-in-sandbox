@@ -617,6 +617,18 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.split("\0")[:-1]
 
+    def test_hdr_preference_is_saved_and_skipped_on_host_x11(self):
+        entry = self.library.create("game")
+        self.library.save_preferences(entry["name"], {"scope": "game", "hdr": "1"})
+        self.assertEqual(core.read_settings(self.library.config / "games" / entry["name"])["hdr"], "1")
+        self.assertIn("--hdr", self.pref_flags(entry, 1))
+        self.assertIn("--hdr", self.pref_flags(entry, 0))
+        # X11 has no HDR; sandbox-game would only drop it with a note.
+        self.library.update_settings(entry["name"], {"host_x11": "1"})
+        self.assertNotIn("--hdr", self.pref_flags(entry, 1))
+        self.library.update_settings(entry["name"], {"host_x11": "0", "hdr": "0"})
+        self.assertNotIn("--hdr", self.pref_flags(entry, 1))
+
     def test_split_display_in_the_defaults_leaves_a_game_with_its_own_display(self):
         entry = self.library.create("game")
         self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1", "gamescope": "1",
