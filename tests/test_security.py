@@ -2019,8 +2019,6 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                 connection, _ = listener.accept()
                 with connection:
                     connection.sendall(b"wayland")
-        thread = threading.Thread(target=serve, daemon=True)
-        thread.start()
         self.env["WAYLAND_DISPLAY"] = "wayland-split"
         self.env["DISPLAY"] = ":123"
         # Gamescope as far as the sandbox sees it: an Xwayland display of its
@@ -2049,9 +2047,9 @@ while True:
     client, _ = server.accept()
     clients.append(client)
     data, anc, _, _ = client.recvmsg(64, socket.CMSG_SPACE(4))
-    if data == b"close":
+    if data in (b"close", b"crash"):
         os.unlink(f"/tmp/.X{n}-lock")
-        os._exit(0)
+        os._exit(0 if data == b"close" else 2)
     fds = array.array("i")
     for _, _, raw in anc:
         fds.frombytes(raw)
@@ -2083,19 +2081,32 @@ r, w = os.pipe()
 os.write(w, b"descriptor")
 launcher = x11(b"launcher", r)
 print(launcher.recv(64).decode())
-print(x11(b"close").recv(64) == launcher.recv(64) == b"")
+print(x11(sys.argv[1].encode()).recv(64) == launcher.recv(64) == b"")
 print(x11(b"again").recv(64).decode().strip())
-sys.exit(3)
+sys.exit(int(sys.argv[2]))
 '''
-        result = self.cli("--wayland-x11", "--proton=" + str(proton), "--name", "split",
-                          "--env=PATH=/game:/usr/bin:/bin", self.game, "/usr/bin/python3", "-c", probe,
-                          check=False)
+        def split(name, end, code):
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            result = self.cli("--wayland-x11", "--proton=" + str(proton), "--name", name,
+                              "--env=PATH=/game:/usr/bin:/bin", self.game, "/usr/bin/python3", "-c", probe,
+                              end, code, check=False)
+            self.assertEqual(result.stdout.splitlines(), ["wayland", "launcher descriptor", "True", "again"],
+                             result.stderr)
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            log = (self.home / "game-sandboxes" / name / "home" / "gamescope.log").read_text()
+            self.assertEqual(log.splitlines(), ["started False /run/host-wayland/wayland-0"] * 2 + ["terminated"])
+            return result
+        result = split("split", "close", "3")
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["wayland", "launcher descriptor", "True", "again"])
-        thread.join(timeout=1)
-        self.assertFalse(thread.is_alive())
-        log = (self.home / "game-sandboxes" / "split" / "home" / "gamescope.log").read_text()
-        self.assertEqual(log.splitlines(), ["started False /run/host-wayland/wayland-0"] * 2 + ["terminated"])
+        # A launcher that Xlib ends with status 1 as its window closes has not
+        # failed; one that ends so as gamescope crashes still has.
+        result = split("split-closed", "close", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = split("split-crashed", "crash", "1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("gamescope ended with status 2", result.stderr)
 
     def test_split_mangohud_keeps_config_but_disables_x11_shortcut_polling(self):
         self.recorded_args()  # command recorders and the validated Wayland socket

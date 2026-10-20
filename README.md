@@ -415,7 +415,8 @@ sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Exam
 
 Gamescope's window opens when the first X11 program starts, beside the
 game's. Closing it ends the X11 programs in it, such as a launcher, but not
-the game, and the next X11 program opens it again. It stays a window:
+the game, and the next X11 program opens it again. A launcher closed this way
+counts as a normal exit, not a failure with exit code 1. It stays a window:
 fullscreen, it would cover the game, so the fullscreen setting is ignored in
 this mode. Gamescope's resolution applies to the X11 windows; the native
 Wayland game uses its own window and display settings.

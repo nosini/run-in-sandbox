@@ -53,7 +53,9 @@ its own, :0, whose connections it passes on to gamescope's Xwayland --
 bytes, and the descriptors DRI3, Present and MIT-SHM send along with them.
 Gamescope is started when an X11 program connects and none is running: the
 first time, and again after its window was closed, which ends only the X11
-programs that were in it. A display of our own because Wine keeps the
+programs that were in it. Xlib ends those with status 1; if the game's
+command ends that way after a window closed, as a launcher run alone does,
+this exits 0 instead. A display of our own because Wine keeps the
 DISPLAY a program started with, and a gamescope started afresh picks its
 display number itself. When the game ends, gamescope is stopped.
 
@@ -486,6 +488,8 @@ class OnDemand:
         self.listener, self.command = listener, command
         self.pid = self.pidfd = self.display = None
         self.shown = False              # whether this gamescope's display was ever found
+        self.served = False             # whether X11 programs were passed on to it
+        self.closed_on = False          # whether a window closed on X11 programs
         self.waiting = []               # accepted, not yet passed on
         self.links = set()
         self.sel.register(listener, selectors.EVENT_READ, self.accept)
@@ -498,7 +502,7 @@ class OnDemand:
             except OSError as e:
                 print(f"sandbox-landlock: {self.command[0]}: {e.strerror}", file=sys.stderr)
             os._exit(127)
-        self.pid, self.display, self.shown = pid, None, False
+        self.pid, self.display, self.shown, self.served = pid, None, False, False
         self.pidfd = os.pidfd_open(pid)
         self.sel.register(self.pidfd, selectors.EVENT_READ, lambda *_: self.ended(pid))
 
@@ -507,7 +511,14 @@ class OnDemand:
             return
         self.sel.unregister(self.pidfd)
         os.close(self.pidfd)
-        os.waitpid(pid, 0)
+        status = os.waitpid(pid, 0)[1]
+        # Its window closed, not a crash: the X11 programs in it end as Xlib
+        # ends them when their display goes, with status 1.
+        if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+            self.closed_on = self.closed_on or self.served
+        else:
+            print(f"sandbox-landlock: gamescope ended with status {os.waitstatus_to_exitcode(status)}",
+                  file=sys.stderr)
         # Programs that came as its window closed get a new one; those that
         # came while it was starting and failing do not get another try.
         again = self.shown and self.waiting
@@ -549,6 +560,7 @@ class OnDemand:
                 self.display = None
                 return
             self.links.add(Link(self, self.waiting.pop(0), server))
+            self.served = True
 
     def stop(self):
         if self.pid is None:
@@ -576,6 +588,10 @@ class OnDemand:
                 if key.data is None:
                     status = os.waitpid(game, 0)[1]
                     self.stop()
+                    # A launcher ended by closing its window, as asked, rather
+                    # than failing: Proton exits as it did.
+                    if self.closed_on and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 1:
+                        status = 0
                     finish(status)
                 key.data(key.fileobj, mask)
             if self.waiting and self.pid is not None:
