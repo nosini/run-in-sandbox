@@ -844,7 +844,8 @@ CAP="$HOME/game-sandboxes/$NAME"
 # One prefix/overlay may only have one owner, including during startup before
 # bwrap exists. The lock sits beside the capture rather than in it, so a
 # --delete removing the folder keeps the lock everyone else is waiting on,
-# and nothing in the capture is created before it is held. Everything
+# and nothing in the capture is created before it is held (but the launch
+# log, which the file manager's launcher and the manager open first). Everything
 # long-lived that is started from here (bwrap, fuse-overlayfs, pasta) closes
 # the host-only lock descriptor, so the lock ends with this script.
 mkdir -p "$HOME/game-sandboxes"

@@ -35,7 +35,7 @@
 # yours to edit -- that is where a soundfont, RTP paths or fontSub would go.
 # Errors show in a GTK dialog, warnings as a notification once the game is
 # up; full output logs to
-#   ~/game-sandboxes/<name>-lastrun.log
+#   ~/game-sandboxes/<name>/lastrun.log
 set -uo pipefail
 
 SANDBOX="${SANDBOX_BACKEND:-$HOME/.local/bin/sandbox-game}"
@@ -278,9 +278,11 @@ elif [ "$MKXP" = 1 ]; then
     FLAG+=( "--mkxp${MKXP_DIR:+=$MKXP_DIR}" )
 fi
 
-mkdir -p "$HOME/game-sandboxes"
-# Named after the sandbox, like its capture folder, so the manager finds it.
-LOG="$HOME/game-sandboxes/${NAME}-lastrun.log"
+# In the sandbox's folder, where the manager looks for it. The game never
+# sees that folder itself, only what sandbox-game mounts from inside it.
+mkdir -p "$HOME/game-sandboxes/$NAME"
+LOG="$HOME/game-sandboxes/$NAME/lastrun.log"
+rm -f -- "$HOME/game-sandboxes/${NAME}-lastrun.log"   # where it used to be
 
 # Withholding --mangohud is not enough to keep the overlay away from NW.js:
 # sandbox-game also opts in from an inherited MANGOHUD=1, and that variable

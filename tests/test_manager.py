@@ -753,6 +753,7 @@ class LibraryTests(unittest.TestCase):
         self.assertIn("--mac-vendor", flags)
         # The launcher's log is the one the manager shows.
         self.assertTrue(library.log_path(entry["name"]).exists())
+        self.assertEqual(library.log_path(entry["name"]).parent, library.capture(entry["name"]))
         self.assertFalse((self.home / "game-sandboxes/Windows Game-lastrun.log").exists())
 
     def test_starting_through_the_file_manager_launcher_keeps_its_log(self):
@@ -950,7 +951,7 @@ class LibraryTests(unittest.TestCase):
         second = self.library.create("Foo")
         self.assertNotEqual(second["name"], first["name"])
         self.assertNotIn("env", self.library.settings(second["name"]))
-        self.library.log_path("bar").write_text("old log")
+        self.library.old_log_path("bar").write_text("old log")
         self.assertNotEqual(self.library.create("Bar")["name"], "bar")
 
     def test_log_reading_tolerates_windows_encodings_and_bounds_large_logs(self):
@@ -959,6 +960,17 @@ class LibraryTests(unittest.TestCase):
         log = self.library.read_log(entry["name"])
         self.assertLessEqual(len(log), 256 * 1024)
         self.assertTrue(log.endswith("\ufffd error"))
+
+    def test_logs_live_in_the_sandbox_folder_and_older_ones_still_show(self):
+        entry = self.library.create("game")
+        self.assertEqual(self.library.log_path(entry["name"]),
+                         self.library.capture(entry["name"]) / "lastrun.log")
+        self.assertEqual(self.library.read_log(entry["name"]), "No launch log yet.")
+        # Left beside the folder by a launch before the move.
+        self.library.old_log_path(entry["name"]).write_text("older launch")
+        self.assertEqual(self.library.read_log(entry["name"]), "older launch")
+        self.library.log_path(entry["name"]).write_text("this launch")
+        self.assertEqual(self.library.read_log(entry["name"]), "this launch")
 
 
 if __name__ == "__main__":

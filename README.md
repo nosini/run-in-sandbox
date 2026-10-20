@@ -604,7 +604,7 @@ level first, then deeper — past a top level with nothing but junk
 (installers, uninstallers, crash handlers, redistributables) in it — and
 several candidates get a picker, with the junk filtered out.
 
-Full output goes to `~/game-sandboxes/<name>-lastrun.log`, and a failure opens
+Full output goes to `~/game-sandboxes/<name>/lastrun.log`, and a failure opens
 the last 80 lines in a window. Warnings from the launcher itself (no
 playback-only sound, limits it cannot set, a display mode it had to change)
 come up as a notification a few seconds into a launch that is going well.
@@ -859,12 +859,13 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── mac-address --net: the MAC address of the game's network card
 ├── mac-address-vendor  the same with --mac-vendor
 ├── hosts       --hosts-writable: the game's /etc/hosts
-└── playtime    one line per launch: when it started, seconds played
+├── playtime    one line per launch: when it started, seconds played
+└── lastrun.log the last launch's output, from the file manager or the manager
 ```
 
-Beside each folder, `<name>-lastrun.log` holds the last launch's output and
-`<name>.run-lock` lets only one launch, `--delete` or `--reset-install` use the
-sandbox at a time. Both stay when the sandbox is deleted.
+Beside each folder, `<name>.run-lock` lets only one launch, `--delete` or
+`--reset-install` use the sandbox at a time. It stays when the sandbox is
+deleted.
 
 ### Managing sandboxes
 

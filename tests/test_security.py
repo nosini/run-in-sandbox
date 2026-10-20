@@ -1086,10 +1086,15 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--mod-loaders", recorded.read_text().splitlines())
         self.assertNotIn("--steam", recorded.read_text().splitlines())
+        # The log goes in the sandbox's folder; one left beside it goes.
+        sandboxes = self.home / "game-sandboxes"
+        self.assertTrue((sandboxes / name / "lastrun.log").is_file())
+        (sandboxes / f"{name}-lastrun.log").write_text("older launch")
         (config / name).write_text("steam=1\n")
         result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((sandboxes / f"{name}-lastrun.log").exists())
         self.assertIn("--steam", recorded.read_text().splitlines())
         self.assertNotIn("--hide-tray", recorded.read_text().splitlines())
         (config / name).write_text("hide_tray=1\n")

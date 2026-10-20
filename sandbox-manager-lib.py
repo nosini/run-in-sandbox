@@ -526,9 +526,10 @@ class Library:
         for index in range(1, 10000):
             name = stem if index == 1 else f"{stem}-{index}"
             capture = self.capture(name)
-            # --delete keeps a sandbox's preferences, and its log stays too:
-            # a new sandbox must not pick up either under a reused name.
-            if (self.config / "games" / name).exists() or self.log_path(name).exists():
+            # --delete keeps a sandbox's preferences, and a log from before
+            # logs moved into the folder stays too: a new sandbox must not
+            # pick up either under a reused name.
+            if (self.config / "games" / name).exists() or self.old_log_path(name).exists():
                 continue
             try:
                 capture.mkdir()
@@ -895,12 +896,19 @@ PY
                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
     def log_path(self, name):
+        return self.capture(name) / "lastrun.log"
+
+    def old_log_path(self, name):
+        """Beside the folder, where launches before logs moved into it left them."""
         self.capture(name)
         return self.root / (name + "-lastrun.log")
 
     def read_log(self, name):
+        path = self.log_path(name)
+        if not path.exists():
+            path = self.old_log_path(name)
         try:
-            with self.log_path(name).open("rb") as stream:
+            with path.open("rb") as stream:
                 stream.seek(0, 2)
                 size = stream.tell()
                 stream.seek(max(0, size - 256 * 1024))
