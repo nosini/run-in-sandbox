@@ -260,7 +260,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                 process.kill()
             process.wait(timeout=8)
         self.addCleanup(stop_process)
-        lock = self.home / "game-sandboxes/exclusive.run-lock"
+        lock = self.home / "game-sandboxes/.locks/exclusive"
         deadline = time.monotonic() + 8
         locked = False
         while time.monotonic() < deadline:
@@ -293,13 +293,29 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
     def test_launch_refused_by_the_lock_creates_nothing(self):
         import fcntl
         sandboxes = self.home / "game-sandboxes"
-        sandboxes.mkdir()
-        # As --delete holds it while removing the capture folder.
-        with (sandboxes / "held.run-lock").open("a") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
-            result = self.cli("--headless", "--name", "held", self.game, "/bin/true", check=False)
-        self.assertIn("already running", result.stderr)
-        self.assertFalse((sandboxes / "held").exists())
+        (sandboxes / ".locks").mkdir(parents=True)
+        # As --delete holds it while removing the capture folder; and beside
+        # the folder, where a launch from before locks moved holds it.
+        for lock in (sandboxes / ".locks" / "held", sandboxes / "held.run-lock"):
+            with lock.open("a") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+                result = self.cli("--headless", "--name", "held", self.game, "/bin/true", check=False)
+                self.assertIn("already running", result.stderr)
+                self.assertFalse((sandboxes / "held").exists())
+            lock.unlink()
+        # One no launch holds any more goes; the new one stays, out of sight.
+        (sandboxes / "free.run-lock").write_text("")
+        self.cli("--headless", "--name", "free", self.game, "/bin/true")
+        self.assertFalse((sandboxes / "free.run-lock").exists())
+        self.assertEqual(sorted(p.name for p in sandboxes.iterdir() if not p.name.startswith(".")), ["free"])
+        self.assertTrue((sandboxes / ".locks" / "free").is_file())
+        # .locks is no sandbox, and no game folder is named after it.
+        result = self.cli("--headless", "--name", ".locks", self.game, "/bin/true", check=False)
+        self.assertIn("invalid sandbox name", result.stderr)
+        self.assertNotIn(".locks", self.cli("--list").stdout)
+        folder = self.base / ".locks"
+        folder.mkdir()
+        self.assertEqual(self.cli("--print-name", folder).stdout.strip(), "locks")
 
     def test_only_the_launcher_holds_the_sandbox_lock(self):
         # fuse-overlayfs daemonizes, so it must not take the lock along.
@@ -313,7 +329,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
-        lock = str(self.home / "game-sandboxes/held.run-lock")
+        lock = str(self.home / "game-sandboxes/.locks/held")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             running = subprocess.run([str(ROOT / "sandbox-attach"), "--list"], env=self.env,

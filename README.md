@@ -863,9 +863,9 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 └── lastrun.log the last launch's output, from the file manager or the manager
 ```
 
-Beside each folder, `<name>.run-lock` lets only one launch, `--delete` or
-`--reset-install` use the sandbox at a time. It stays when the sandbox is
-deleted.
+In the hidden `.locks/` folder beside them, a file named after each sandbox
+lets only one launch, `--delete` or `--reset-install` use it at a time. It
+stays when the sandbox is deleted.
 
 ### Managing sandboxes
 

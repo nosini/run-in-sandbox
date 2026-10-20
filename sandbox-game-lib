@@ -81,6 +81,7 @@ derive_name() {
     base="${base//[^a-z0-9._-]/-}"
     while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
     base="${base#-}"; base="${base%-}"
+    [ "$base" != .locks ] || base=locks   # where sandbox-game keeps its locks
     R_NAME="${base:-game}"
 }
 

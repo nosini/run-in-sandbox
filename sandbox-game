@@ -241,8 +241,28 @@ stop_sandboxes() {                    # $1 = NAME, empty for all
 # managing that folder -- never while the game runs, since the overlay is
 # mounted on it then.
 SANDBOXES="$HOME/game-sandboxes"
+LOCKS="$SANDBOXES/.locks"
 
-valid_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$1" != . ] && [ "$1" != .. ]; }
+# .locks is where the locks are kept, not a sandbox.
+valid_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$1" != . ] && [ "$1" != .. ] && [ "$1" != .locks ]; }
+
+# One prefix/overlay may only have one owner, including during startup before
+# bwrap exists, and nothing may launch it while --delete or --reset-install
+# changes it. Taken on descriptor 18 and held until this script ends:
+# everything long-lived started from here (bwrap, fuse-overlayfs, pasta)
+# closes it. Kept out of the capture, which --delete removes while holding
+# it, and out of sight, in .locks/. The files stay: removed after use, one a
+# waiting launch already has open could be locked again by it while a new
+# file is locked by another. $1 = NAME.
+lock_sandbox() {
+    mkdir -p "$LOCKS" && exec 18>"$LOCKS/$1" && flock -n 18 || return 1
+    # Beside the capture, as NAME.run-lock, for launches before locks moved:
+    # one may still be running. Unheld, it goes.
+    local old="$SANDBOXES/$1.run-lock"
+    [ -e "$old" ] || return 0
+    flock -n "$old" true 2>/dev/null || return 1
+    rm -f -- "$old"
+}
 
 # An existing, stopped sandbox, or say why not. $1 = NAME.
 stopped_sandbox() {
@@ -252,8 +272,7 @@ stopped_sandbox() {
         echo "'$1' is running; stop it first: sandbox-game --stop $1" >&2; return 1; }
     # Also covers startup, before the outer bwrap has appeared, and holds
     # launches off for the whole delete/reset operation.
-    exec 18>"$SANDBOXES/$1.run-lock"
-    flock -n 18 || {
+    lock_sandbox "$1" || {
         echo "'$1' is running or being changed; stop it first" >&2; return 1; }
 }
 
@@ -796,8 +815,8 @@ shift
 [ "$#" -ge 1 ] || [ -n "$MKXP_SPEC" ] || [ -n "$PGMMV_SPEC" ] || [ "$PRINT_NAME" = 1 ] || {
     echo "need a command to run" >&2; exit 1; }
 [ -n "$NAME" ] || { derive_name "$GAMEDIR"; NAME="$R_NAME"; }
-[[ "$NAME" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$NAME" != . ] && [ "$NAME" != .. ] || {
-    echo "invalid sandbox name: use letters, digits, underscores, dots and hyphens (not . or ..)" >&2
+valid_name "$NAME" || {
+    echo "invalid sandbox name: use letters, digits, underscores, dots and hyphens (not ., .. or .locks)" >&2
     exit 1
 }
 # The sandbox name doubles as the key everything else files a game under, so
@@ -840,17 +859,10 @@ for fd in /proc/self/fd/*; do
     eval "exec $fd>&-"
 done
 
-CAP="$HOME/game-sandboxes/$NAME"
-# One prefix/overlay may only have one owner, including during startup before
-# bwrap exists. The lock sits beside the capture rather than in it, so a
-# --delete removing the folder keeps the lock everyone else is waiting on,
-# and nothing in the capture is created before it is held (but the launch
-# log, which the file manager's launcher and the manager open first). Everything
-# long-lived that is started from here (bwrap, fuse-overlayfs, pasta) closes
-# the host-only lock descriptor, so the lock ends with this script.
-mkdir -p "$HOME/game-sandboxes"
-exec 18>"$CAP.run-lock"
-flock -n 18 || { echo "'$NAME' is already running" >&2; exit 1; }
+CAP="$SANDBOXES/$NAME"
+# Nothing in the capture is created before the lock is held (but the launch
+# log, which the file manager's launcher and the manager open first).
+lock_sandbox "$NAME" || { echo "'$NAME' is already running" >&2; exit 1; }
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
 python3 - "$CAP/source.json" "$GAMEDIR" <<'PY'
 import json, os, sys, tempfile

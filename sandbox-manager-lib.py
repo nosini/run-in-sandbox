@@ -22,7 +22,8 @@ REMOVABLE_ROOTS = (Path("/run/media"), Path("/media"), Path("/mnt"))
 
 
 def valid_name(name):
-    return bool(NAME.fullmatch(name)) and name not in (".", "..")
+    # .locks holds sandbox-game's locks.
+    return bool(NAME.fullmatch(name)) and name not in (".", "..", ".locks")
 
 
 def read_json(path):

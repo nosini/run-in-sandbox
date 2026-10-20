@@ -961,6 +961,14 @@ class LibraryTests(unittest.TestCase):
         self.assertLessEqual(len(log), 256 * 1024)
         self.assertTrue(log.endswith("\ufffd error"))
 
+    def test_the_lock_folder_is_no_sandbox(self):
+        entry = self.library.create("game")
+        (self.library.root / ".locks").mkdir()
+        (self.library.root / ".locks" / entry["name"]).write_text("")
+        self.assertEqual([e["name"] for e in self.library.entries()], [entry["name"]])
+        with self.assertRaises(ValueError):
+            self.library.capture(".locks")
+
     def test_logs_live_in_the_sandbox_folder_and_older_ones_still_show(self):
         entry = self.library.create("game")
         self.assertEqual(self.library.log_path(entry["name"]),
