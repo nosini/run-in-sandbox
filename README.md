@@ -140,8 +140,10 @@ game locations, **Locate game** reconnects the original folder to its saves.
 Native Linux exports, including Godot games with a standalone `.x86_64` or
 extensionless executable, can be selected by their folder or executable. A
 Linux program beside Windows ones only counts when it is named like one of them
-(`Game.x86_64` beside `Game.exe`), so a Windows game's Linux server or helper
-does not decide how it runs. If an archive lost a launcher's executable bit, it
+(`Game.x86_64` beside `Game.exe`) or is a .NET program's starter (`Launcher`
+beside `Launcher.runtimeconfig.json`, a launcher that may start its Windows
+programs through Wine), so a Windows game's Linux server or helper does not
+decide how it runs. If an archive lost a launcher's executable bit, it
 still runs, and the install stays as it is. A script runs through its
 interpreter. A program runs from a copy in the sandbox's install changes; on
 Btrfs or XFS, with the game on the same filesystem as the sandbox, that copy

@@ -184,10 +184,12 @@ native_scripts() {                             # $1 = dir
 # Standalone Linux programs at the top of a game folder (a Godot .x86_64,
 # an extensionless binary), best guess first, with or without their
 # executable bit. Beside Windows programs, only one named as one of them is
-# (Game.x86_64 beside Game.exe): a Windows game's Linux server or helper must
+# (Game.x86_64 beside Game.exe), or a .NET program's Linux starter (NAME
+# beside NAME.runtimeconfig.json, a launcher that may run the Windows
+# programs through Wine itself): a Windows game's Linux server or helper must
 # not turn it into a native game.
 native_binaries() {                            # $1 = dir
-    local dir="$1" files=() list exes compat
+    local dir="$1" files=() list stems compat
     mapfile -d '' files < <(find "$dir" -maxdepth 1 -type f ! -name '*.sh' ! -iname '*.exe' \
         ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null)
     [ "${#files[@]}" -gt 0 ] || return 0
@@ -196,11 +198,12 @@ native_binaries() {                            # $1 = dir
         [ -z "$list" ] || break
     done
     [ -n "$list" ] || return 0
-    exes="$(find "$dir" -maxdepth 1 -type f -iname '*.exe' -printf '%f\n' 2>/dev/null)"
-    if [ -n "$exes" ]; then
-        list="$(awk -F'\t' 'NR == FNR { s[tolower(substr($0, 1, length($0) - 4))]; next }
+    if [ -n "$(find "$dir" -maxdepth 1 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]; then
+        stems="$(find "$dir" -maxdepth 1 -type f \( -iname '*.exe' -o -name '*.runtimeconfig.json' \) \
+            -printf '%f\n' 2>/dev/null | sed -E 's/(\.runtimeconfig\.json|\.[eE][xX][eE])$//')"
+        list="$(awk -F'\t' 'NR == FNR { s[tolower($0)]; next }
             { n = $2; sub(/.*\//, "", n); n = tolower(n); m = n; sub(/\.[^.]*$/, "", m)
-              if ((n in s) || (m in s)) print }' <(printf '%s\n' "$exes") - <<<"$list")"
+              if ((n in s) || (m in s)) print }' <(printf '%s\n' "$stems") - <<<"$list")"
     fi
     rank_launchers "$dir" "$NATIVE_JUNK" strict <<<"$list"
 }

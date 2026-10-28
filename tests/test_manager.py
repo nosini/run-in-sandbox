@@ -539,6 +539,16 @@ class LibraryTests(unittest.TestCase):
         self.elf(windows / "Game.x86_64")
         self.assertEqual(self.library.describe(windows, "t")["engine"], "native")
         self.assertEqual(self.native_binaries(windows), ["Game.x86_64"])
+        # A .NET launcher that runs a Windows helper through Wine itself: native.
+        launcher = self.home / "Games/Launcher"
+        launcher.mkdir()
+        (launcher / "Helper.exe").write_bytes(b"MZ")
+        self.elf(launcher / "Launcher")
+        self.assertEqual(self.library.describe(launcher, "t")["engine"], "proton")
+        (launcher / "Launcher.runtimeconfig.json").write_text(
+            '{"runtimeOptions": {"framework": {"name": "Microsoft.NETCore.App"}}}')
+        self.assertEqual(self.library.describe(launcher, "t")["engine"], "native")
+        self.assertEqual(self.native_binaries(launcher), ["Launcher"])
 
     def test_native_binaries_skip_other_architectures_and_helpers_and_rank_the_game_first(self):
         game = self.home / "Games/Foo"
