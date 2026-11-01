@@ -1071,6 +1071,12 @@ are left in place between launches, so a rule never meets a running `pasta`
 whose file has gone (`... (deleted)`); they go at logout with the rest of the
 runtime directory.
 
+The host proxy sees pasta's executable, so these process rules apply to the
+whole sandbox, including launchers and helpers. Socketowner's
+[Wine attribution experiment](https://github.com/nosini/socketowner/tree/wine-process-attribution/experiments/wine)
+documents work toward identifying individual Windows programs. It does not yet
+provide per-program mihomo rules through pasta.
+
 What it does not do: stop the game talking to whatever it likes on the
 internet, or sending off what it can read — its own capture folder and the
 hardware details listed above, less the identifiers already hidden. Give it to
