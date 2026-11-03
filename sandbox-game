@@ -1158,20 +1158,6 @@ if [ -n "$PROTON_SPEC" ]; then
     # With WINE_WMCLASS it is steam_app_ and that; the manager's shortcuts
     # name steam_app_NAME as their StartupWMClass. --env still wins.
     PROTON_ARGS+=( --setenv WINE_WMCLASS "$NAME" )
-    # Proton's GStreamer plugins are built for Steam's runtime. Outside it some
-    # cannot load -- its FFmpeg wants a libvpx.so.9 no current system has --
-    # and a game's videos fail, often reported as a network error. This
-    # system's own plugins are built against its own libraries: list them
-    # first (Proton's script sets only the system path, after them), as the
-    # Flatpak apps use their runtime's. GStreamer refuses plugins built for a
-    # newer release series than Proton's, and takes Proton's copy of any that
-    # do not load. A game's own --env still wins.
-    _gst=""
-    for d in /usr/lib64/gstreamer-1.0 /usr/lib/x86_64-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0 \
-             /usr/lib32/gstreamer-1.0 /usr/lib/i386-linux-gnu/gstreamer-1.0; do
-        [ ! -d "$d" ] || _gst="${_gst:+$_gst:}$d"
-    done
-    [ -z "$_gst" ] || PROTON_ARGS+=( --setenv GST_PLUGIN_PATH_1_0 "$_gst" )
     # Mod loaders get into a game through a DLL named after a system one,
     # dropped beside the .exe: BepInEx's winhttp.dll, MelonLoader's
     # version.dll, UE4SS's dwmapi.dll, an ASI loader's dinput8.dll. Windows
@@ -1400,6 +1386,14 @@ WITH_PROTON=""; WITH_PROTON_ARGS=()
 if [ -n "$WITH_PROTON_SPEC" ]; then
     WITH_PROTON="$(need_proton "$WITH_PROTON_SPEC")" || exit 1
     WITH_PROTON_ARGS=( --ro-bind "$WITH_PROTON" /proton )
+    # Proton keeps Wine's vkd3d DLLs outside its normal builtin directory.
+    # Its script adds both directories; a launcher calling Wine directly
+    # needs them too, or wined3d, dxgi and d3d11 fail to load. --env wins.
+    _wine_dlls=""
+    for d in files/lib/vkd3d files/lib/wine; do
+        [ ! -d "$WITH_PROTON/$d" ] || _wine_dlls="${_wine_dlls:+$_wine_dlls:}/proton/$d"
+    done
+    [ -z "$_wine_dlls" ] || WITH_PROTON_ARGS+=( --setenv WINEDLLPATH "$_wine_dlls" )
     # Said in the log only: it is where the program has to be pointed.
     for w in files/bin/wine dist/bin/wine; do
         [ ! -x "$WITH_PROTON/$w" ] || {
@@ -1408,21 +1402,38 @@ if [ -n "$WITH_PROTON_SPEC" ]; then
     done
 fi
 
-# Wine's crypt32 points GNUTLS_SYSTEM_PRIORITY_FILE at /dev/null for its whole
-# process, unless it is set already, so that no distribution's crypto policy
-# narrows what Windows programs may connect with. Where GnuTLS is built with
-# @SYSTEM as its default (openSUSE, Fedora), that leaves the default meaning
-# nothing: Wine's own TLS names its ciphers and works, but anything else in
-# the process that takes the default -- GStreamer streaming a game's video,
-# through GLib -- fails with "No or insufficient priorities were set". GLib
-# gets GnuTLS's own NORMAL by name instead, the way it would add %COMPAT to
-# the default. The variable itself must stay Wine's: set to any other file,
-# Wine's schannel drops its own priorities for the default, with TLS 1.3 on
-# whatever protocols the program asked for, and Edge's updater (WebView2's
-# installer) then fails with "A TLS fatal alert has been received".
-WINE_TLS_ARGS=()
+# Both Proton launch paths need the same media environment, including native
+# launchers that start Wine directly without Proton's script.
+WINE_ENV_ARGS=()
 if [ -n "$PROTON$WITH_PROTON" ]; then
-    WINE_TLS_ARGS=( --setenv G_TLS_GNUTLS_PRIORITY NORMAL:%COMPAT )
+    # Proton's GStreamer plugins are built for Steam's runtime. Outside it some
+    # cannot load -- its FFmpeg wants a libvpx.so.9 no current system has --
+    # and a game's videos fail, often reported as a network error. This
+    # system's own plugins are built against its own libraries: list them
+    # first (Proton's script sets only the system path, after them), as the
+    # Flatpak apps use their runtime's. GStreamer refuses plugins built for a
+    # newer release series than Proton's, and takes Proton's copy of any that
+    # do not load. A game's own --env still wins.
+    _gst=""
+    for d in /usr/lib64/gstreamer-1.0 /usr/lib/x86_64-linux-gnu/gstreamer-1.0 /usr/lib/gstreamer-1.0 \
+             /usr/lib32/gstreamer-1.0 /usr/lib/i386-linux-gnu/gstreamer-1.0; do
+        [ ! -d "$d" ] || _gst="${_gst:+$_gst:}$d"
+    done
+    [ -z "$_gst" ] || WINE_ENV_ARGS+=( --setenv GST_PLUGIN_PATH_1_0 "$_gst" )
+
+    # Wine's crypt32 points GNUTLS_SYSTEM_PRIORITY_FILE at /dev/null for its whole
+    # process, unless it is set already, so that no distribution's crypto policy
+    # narrows what Windows programs may connect with. Where GnuTLS is built with
+    # @SYSTEM as its default (openSUSE, Fedora), that leaves the default meaning
+    # nothing: Wine's own TLS names its ciphers and works, but anything else in
+    # the process that takes the default -- GStreamer streaming a game's video,
+    # through GLib -- fails with "No or insufficient priorities were set". GLib
+    # gets GnuTLS's own NORMAL by name instead, the way it would add %COMPAT to
+    # the default. The variable itself must stay Wine's: set to any other file,
+    # Wine's schannel drops its own priorities for the default, with TLS 1.3 on
+    # whatever protocols the program asked for, and Edge's updater (WebView2's
+    # installer) then fails with "A TLS fatal alert has been received".
+    WINE_ENV_ARGS+=( --setenv G_TLS_GNUTLS_PRIORITY NORMAL:%COMPAT )
 fi
 
 # ---- private hosts file ----------------------------------------------------
@@ -2361,7 +2372,7 @@ BWRAP=( "${SCOPE[@]}" env -i "$(command -v bwrap)"
     "${PGMMV_ARGS[@]}"
     "${DOTNET_ARGS[@]}"
     "${WITH_PROTON_ARGS[@]}"
-    "${WINE_TLS_ARGS[@]}"
+    "${WINE_ENV_ARGS[@]}"
     "${MANGOHUD_ARGS[@]}"
     "${NET_ARGS[@]}"
     "${ENV_ARGS[@]}"                  # last, so these win over the above

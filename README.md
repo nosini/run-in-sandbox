@@ -393,9 +393,10 @@ load.
 Videos go through GStreamer. Proton brings its own plugins, built for Steam's
 runtime, and outside it some cannot load: its FFmpeg plugin, which decodes most
 video, needs a `libvpx.so.9` that current distributions no longer ship. A game
-then fails to play its videos, and may blame the network. So Proton games get
-your system's GStreamer plugins too, searched before Proton's, as Flatpak apps
-use their runtime's. Install your distribution's GStreamer plugin packages
+then fails to play its videos, and may blame the network. So both Proton games
+and native launchers using **With Proton** get your system's GStreamer plugins
+too, searched before Proton's, as Flatpak apps use their runtime's. Install
+your distribution's GStreamer plugin packages
 (good, bad, ugly and libav) for the formats games use. For H.264, the most
 common one, you may need FFmpeg with H.264 from an extra repository (Packman on
 openSUSE, RPM Fusion on Fedora) or the OpenH264 plugin with Cisco's library.
@@ -1374,6 +1375,12 @@ when launching from the file manager.
 `hdr` does nothing with `host_x11=1`.
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
 `with_proton` applies only when the game runs natively; empty means none.
+It mounts the runner at `/proton` and sets `WINEDLLPATH` so Wine can find the
+runner's separate DLLs. Point the native launcher at `/proton/files/bin/wine`.
+When switching an existing prefix from another Wine, run that binary with
+`wineboot -u` and `WINEPREFIX` set to the launcher's prefix before starting the
+Windows game. This refreshes the prefix's builtin DLLs, including dependencies
+needed by Direct3D; the native launcher manages its own prefix.
 `lan` and `lan_allow` apply only with `net=1`.
 `hosts` and `hosts_writable` apply only with `private_hosts=1`; commas separate
 the entries in `hosts`.

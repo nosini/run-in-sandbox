@@ -1564,17 +1564,26 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
 
     def test_proton_finds_this_systems_gstreamer_plugins_first(self):
         # Proton's own plugins are built for Steam's runtime and some cannot
-        # load outside it; the system's come first, where it has any.
+        # load outside it; the system's come first, including when a native
+        # launcher starts Wine directly instead of using Proton's script.
         proton = self.base / "proton"
-        proton.mkdir()
-        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
-        (proton / "proton").chmod(0o755)
-        args = self.recorded_args("--proton=" + str(proton))
+        (proton / "files" / "bin").mkdir(parents=True)
+        for f in (proton / "proton", proton / "files" / "bin" / "wine"):
+            f.write_text("#!/bin/sh\nexit 0\n")
+            f.chmod(0o755)
         found = [d for d in ("/usr/lib64/gstreamer-1.0", "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
                              "/usr/lib/gstreamer-1.0", "/usr/lib32/gstreamer-1.0",
                              "/usr/lib/i386-linux-gnu/gstreamer-1.0") if os.path.isdir(d)]
-        values = [args[i + 2] for i, a in enumerate(args) if a == "--setenv" and args[i + 1] == "GST_PLUGIN_PATH_1_0"]
-        self.assertEqual(values, [":".join(found)] if found else [])
+        for mode in ("--proton=", "--with-proton="):
+            with self.subTest(mode=mode):
+                args = self.recorded_args(mode + str(proton))
+                values = [args[i + 2] for i, a in enumerate(args)
+                          if a == "--setenv" and args[i + 1] == "GST_PLUGIN_PATH_1_0"]
+                self.assertEqual(values, [":".join(found)] if found else [])
+                args = self.recorded_args(mode + str(proton), "--env", "GST_PLUGIN_PATH_1_0=/game/plugins")
+                values = [args[i + 2] for i, a in enumerate(args)
+                          if a == "--setenv" and args[i + 1] == "GST_PLUGIN_PATH_1_0"]
+                self.assertEqual(values[-1], "/game/plugins")
         self.assertNotIn("GST_PLUGIN_PATH_1_0", self.recorded_args())
         result = self.cli("--headless", "--steam", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
@@ -1784,6 +1793,22 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         refused = self.cli("--headless", "--with-proton", "--proton", self.game, "game.exe", check=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("--proton already", refused.stderr)
+
+    def test_native_proton_finds_its_separate_builtin_dlls(self):
+        proton = self.base / "GE-Test"
+        (proton / "files" / "bin").mkdir(parents=True)
+        for f in (proton / "proton", proton / "files" / "bin" / "wine"):
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        for d in ("vkd3d", "wine"):
+            (proton / "files" / "lib" / d).mkdir(parents=True)
+        self.env["PROTON_DIR"] = str(proton)
+        probe = 'printf "%s\\n" "${WINEDLLPATH-unset}"'
+        expected = "/proton/files/lib/vkd3d:/proton/files/lib/wine"
+        self.assertEqual(self.run_guest(probe, "--with-proton").stdout.strip(), expected)
+        self.assertEqual(self.run_guest(probe).stdout.strip(), "unset")
+        self.assertEqual(self.run_guest(probe, "--with-proton", "--env", "WINEDLLPATH=/game/dlls").stdout.strip(),
+                         "/game/dlls")
 
     def test_lan_allowances_need_the_internet(self):
         for option in (["--lan"], ["--allow-lan", "10.0.50.105"]):
