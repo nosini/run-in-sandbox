@@ -455,6 +455,12 @@ class Library:
     def icon(self, entry):
         sources, roots = self.icon_files(entry)
         fingerprint = []
+        helper = self.helpers / "sandbox-game-icon"
+        try:
+            info = helper.stat()
+            fingerprint.append([str(helper), info.st_size, info.st_mtime_ns])
+        except OSError:
+            return None
         for path in sources:
             try:
                 info = path.stat()
@@ -469,7 +475,6 @@ class Library:
             return cached
         if metadata.get("key") == key and metadata.get("found") is False:
             return None
-        helper = self.helpers / "sandbox-game-icon"
         if not helper.is_file():
             return None
         result = None

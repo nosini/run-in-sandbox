@@ -193,7 +193,9 @@ def decode(GdkPixbuf, kind, data):
 
 
 def main():
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024,) * 2)
+    # GLib worker stacks and Glycin's decoder mappings need virtual address
+    # space beyond the image buffer itself, even for a small output icon.
+    resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024,) * 2)
     resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     # A missing or broken GdkPixbuf says nothing about the file: not NO_ICON.
@@ -204,15 +206,23 @@ def main():
     try:
         with open(path, "rb", closefd=path != 0) as stream:
             kind, images = extract(stream)
+            decoder_error = None
             for data in images:
                 try:
                     output = decode(GdkPixbuf, kind, data)
                     break
-                except (GLib.Error, ValueError, struct.error):
+                except GLib.Error as error:
+                    decoder_error = error
+                    continue   # try the other frames before reporting a decoder failure
+                except (ValueError, struct.error):
                     continue   # a smaller image may still decode
             else:
+                if decoder_error is not None:
+                    # This can also mean a missing loader or a failed Glycin
+                    # subprocess. Do not cache it as proof the file has no icon.
+                    raise RuntimeError(f"Image decoder failed: {decoder_error}")
                 raise NoIcon("No icon could be decoded")
-    except (NoIcon, ValueError, struct.error, MemoryError) as error:
+    except (NoIcon, ValueError, struct.error) as error:
         print(f"sandbox-game-icon: {error}", file=sys.stderr)
         sys.exit(NO_ICON)
     sys.stdout.buffer.write(output)

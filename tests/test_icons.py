@@ -132,6 +132,24 @@ class IconTests(unittest.TestCase):
         self.assertTrue(result.stdout.startswith(b"\x89PNG\r\n\x1a\n"))
 
     @unittest.skipUnless(HAVE_PIXBUF, "needs GdkPixbuf")
+    def test_valid_large_image_has_room_for_decoder_threads_and_buffers(self):
+        width = 4096
+        pixels = (b"\0" + b"\xff\0\0\xff" * width) * width
+        data = png_header(width, width, png_chunk(b"IDAT", zlib.compress(pixels))
+                          + png_chunk(b"IEND", b""))
+        result = self.helper(data)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    @unittest.skipUnless(HAVE_PIXBUF, "needs GdkPixbuf")
+    def test_decoder_errors_are_retryable_when_no_frame_succeeds(self):
+        data = png_header(64, 64, png_chunk(b"IDAT", b"not zlib") + png_chunk(b"IEND", b""))
+        result = self.helper(ico((64, data)))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(b"Image decoder failed", result.stderr)
+        self.assertEqual(result.stdout, b"")
+
+    @unittest.skipUnless(HAVE_PIXBUF, "needs GdkPixbuf")
     def test_oversized_and_missing_icons_are_refused_before_decoding(self):
         for data in (png_header(20000, 20000, png_chunk(b"IEND", b"")), b"not an icon",
                      ico((0, png_header(5000, 5000)))):

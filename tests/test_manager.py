@@ -420,6 +420,16 @@ class LibraryTests(unittest.TestCase):
             path = library.icon(entry)
         self.assertEqual(path.read_bytes(), b"png")
 
+    def test_updating_the_extractor_retries_a_cached_missing_icon(self):
+        library, entry = self.icon_library()
+        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)):
+            self.assertIsNone(library.icon(entry))
+        helper = library.helpers / "sandbox-game-icon"
+        helper.write_text("updated decoder")
+        with patch("subprocess.run", return_value=self.finished(0, b"png")) as run:
+            self.assertEqual(library.icon(entry).read_bytes(), b"png")
+            run.assert_called_once()
+
     def test_deleted_and_outdated_icon_images_are_made_again(self):
         library, entry = self.icon_library()
         with patch("subprocess.run", return_value=self.finished(0, b"first")):
