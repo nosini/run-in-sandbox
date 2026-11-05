@@ -159,6 +159,8 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                     mock.patch("shutil.which", return_value="ip"), \
                     mock.patch("os.open", return_value=31), \
                     mock.patch("fcntl.ioctl", return_value=32), \
+                    mock.patch("os.fstat", return_value=os.stat("/proc/self/ns/user")), \
+                    mock.patch("os.close"), \
                     mock.patch("subprocess.run", side_effect=run):
                 exec(compile(helper, "NET_HELPER", "exec"), {})
                 for address in addresses:
@@ -205,6 +207,15 @@ class SecurityTests(unittest.TestCase):
         # A tools folder of the test's own, never the real one.
         self.tools = self.base / "tools"
         self.env["SANDBOX_TOOLS_DIR"] = str(self.tools)
+        # Run before the folder's cleanup: under a uid of their own the
+        # sandboxes' files are not ours to remove.
+        self.addCleanup(self.reclaim)
+
+    def reclaim(self):
+        for uid in self.base.glob("**/game-sandboxes/*/uid"):
+            subprocess.run([str(ROOT / "sandbox-uid"), "run", str(uid.parent), "--",
+                            "chown", "-hR", "0:0", str(uid.parent)],
+                           env=self.env, capture_output=True, timeout=30)
 
     def cli(self, *args, check=True):
         # No terminal on stdin, or anything that asks first (--delete,
@@ -3626,6 +3637,126 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         lib.rename(real)
         lib.symlink_to("real")
         self.assertIn("gamescope", self.recorded_args("--wayland"))
+
+
+def separate_uid_missing():
+    """Why SANDBOX_SEPARATE_UID cannot run here, or None."""
+    for tool in ("newuidmap", "newgidmap", "unshare", "nsenter", "setfacl", "fuse-overlayfs"):
+        if not shutil.which(tool):
+            return f"{tool} is not installed"
+    if Path("/proc/self/uid_map").read_text().split() != ["0", "0", "4294967295"]:
+        return "already in a user namespace"
+    import pwd
+    me = pwd.getpwuid(os.getuid()).pw_name
+    for path in ("/etc/subuid", "/etc/subgid"):
+        try:
+            lines = Path(path).read_text().splitlines()
+        except OSError:
+            lines = []
+        if not any(l.split(":")[0] in (me, str(os.getuid())) and int(l.split(":")[2]) > 50064
+                   for l in lines if l.count(":") == 2):
+            return f"no subordinate range for {me} in {path}"
+    return None
+
+
+@unittest.skipIf(separate_uid_missing(), separate_uid_missing())
+class SeparateUidTests(unittest.TestCase):
+    """SANDBOX_SEPARATE_UID=1: the game runs as a subordinate uid of its own."""
+    reclaim = SecurityTests.reclaim
+    cli = SecurityTests.cli
+    run_guest = SecurityTests.run_guest
+    launch_named = SecurityTests.launch_named
+    attach = SecurityTests.attach
+
+    def setUp(self):
+        SecurityTests.setUp(self)
+        self.env["SANDBOX_SEPARATE_UID"] = "1"
+
+    def sandbox_uid(self, name):
+        capture = self.home / "game-sandboxes" / name
+        out = subprocess.run([str(ROOT / "sandbox-uid"), "ids", str(capture)], env=self.env,
+                             capture_output=True, text=True, check=True).stdout.split()
+        return int(out[0])
+
+    def test_game_runs_as_a_user_of_its_own(self):
+        (self.game / "original").write_text("original")
+        secret = self.base / "secret"
+        secret.write_text("private")
+        secret.chmod(0o600)
+        # A file of ours that reaches the game anyway -- here bound in on
+        # purpose, standing in for a slip in the mounts -- is still ours alone.
+        result = self.run_guest(
+            'id -u; ! cat /mnt-secret 2>/dev/null; '
+            'printf changed > /game/original; mkdir /game/new; printf save > "$HOME/save"',
+            "--ro", str(secret), "/mnt-secret")
+        self.assertEqual(result.stdout.split(), [str(os.getuid())])
+        name = self.cli("--print-name", self.game).stdout.strip()
+        uid = self.sandbox_uid(name)
+        self.assertNotEqual(uid, os.getuid())
+        capture = self.home / "game-sandboxes" / name
+        for f in ("home/save", "rw/original", "rw/new"):
+            self.assertEqual((capture / f).stat().st_uid, uid, f)
+        self.assertEqual((capture / "rw" / "original").read_text(), "changed")
+        self.assertEqual((self.game / "original").read_text(), "original")
+        self.assertFalse((self.game / "new").exists())
+        # Nothing of ours was opened up to let it through: no ACL entries on
+        # the folders on the way, the game's own included.
+        for path in (self.base, self.home, self.game, self.game / "original"):
+            acl = subprocess.run(["getfacl", "-cp", str(path)], capture_output=True,
+                                 text=True, check=True).stdout
+            self.assertNotRegex(acl, r"(?m)^(user|group):[^:]+:", path)
+
+    def test_game_can_reopen_its_output_and_write_its_hosts_file(self):
+        out = self.base / "out"
+        with out.open("w") as f:
+            rc = subprocess.run(
+                [str(ROOT / "sandbox-game"), "--headless", "--hosts-writable", str(self.game),
+                 "/bin/sh", "-ec", "echo 192.0.2.1 x.example >> /etc/hosts; "
+                 "echo reopened > /dev/stdout"],
+                env=self.env, stdout=f, stderr=subprocess.DEVNULL, timeout=15).returncode
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.read_text(), "reopened\n")
+
+    def test_stop_list_attach_and_delete(self):
+        name = "uid-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        listed = self.cli("--list").stdout
+        self.assertRegex(listed, rf"{name}.*running")
+        result = self.attach(name, "--exec", "--", "/bin/sh", "-c",
+                             'id -u; printf attached > "$HOME/attached"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [str(os.getuid())])
+        capture = self.home / "game-sandboxes" / name
+        self.assertEqual((capture / "home" / "attached").stat().st_uid, self.sandbox_uid(name))
+        self.assertIn(f"stopped {name}", self.cli("--stop", name).stdout)
+        self.assertNotRegex(self.cli("--list").stdout, rf"{name}.*running")
+        self.cli("--delete", name)
+        self.assertFalse(capture.exists())
+
+    def test_turning_it_off_gives_the_capture_back(self):
+        self.run_guest('printf save > "$HOME/save"')
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        self.assertNotEqual((capture / "home" / "save").stat().st_uid, os.getuid())
+        del self.env["SANDBOX_SEPARATE_UID"]
+        self.run_guest('printf again >> "$HOME/save"')
+        self.assertEqual((capture / "home" / "save").read_text(), "saveagain")
+        self.assertEqual({p.stat().st_uid for p in capture.rglob("*")}, {os.getuid()})
+        self.assertFalse((capture / "uid").exists())
+
+    def test_two_sandboxes_get_two_users(self):
+        other = self.base / "games" / "Other"
+        other.mkdir()
+        self.run_guest("true")
+        self.cli("--headless", other, "/bin/true")
+        names = [self.cli("--print-name", g).stdout.strip() for g in (self.game, other)]
+        uids = [self.sandbox_uid(n) for n in names]
+        self.assertNotEqual(uids[0], uids[1])
+
+    def test_network_still_works(self):
+        # pasta's interface, in the game's own network namespace.
+        result = self.run_guest("grep -v -e 'lo:' -e '|' /proc/net/dev", "--net")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

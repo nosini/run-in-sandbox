@@ -58,6 +58,25 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Under a uid of its own (SANDBOX_SEPARATE_UID) the outer bwrap runs in the
+# sandbox's namespace instead, as sandbox-uid left it; but its parent is still
+# the sandbox-game that started it, here in ours, which nothing inside any
+# sandbox can be. (A read builtin, not a process, per entry.) Anything of
+# ours could make such a child, though, so sandbox_user checks the rest once
+# the name is known: it runs as the uid that owns that capture's home, which
+# is not ours.
+started_by_us() {                     # $1 = PID
+    local s
+    { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
+    s="${s##*) }"; s="${s#* }"
+    [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
+}
+sandbox_user() {                      # $1 = PID, $2 = NAME
+    local u
+    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
+    [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
+}
+
 # ---- find the running sandboxes -------------------------------------------
 # As sandbox-game --stop finds them: by the outer bwrap, which runs in our own
 # user namespace -- where nothing a game starts can be -- and binds the
@@ -69,10 +88,11 @@ done
 # Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
 SB_PIDS=(); SB_NAMES=(); SB_PROTON=()
 scan() {
-    local p args i name child
+    local p args i name child ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
-        [[ "/proc/$p/ns/user" -ef /proc/self/ns/user ]] || continue
+        ours=1
+        [[ "/proc/$p/ns/user" -ef /proc/self/ns/user ]] || { ours=0; started_by_us "$p"; } || continue
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
@@ -83,8 +103,17 @@ scan() {
             name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
         done
         [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        [ "$ours" = 1 ] || sandbox_user "$p" "$name" || continue
         # No newline after the last PID, so read fails even when it got one.
-        child=""; { read -r child _ < "/proc/$p/task/$p/children"; } 2>/dev/null || true
+        # The one in a user namespace of the sandbox's: under a uid of its own,
+        # sandbox-uid's fuse-overlayfs daemons are children too, in bwrap's.
+        local kids=() k
+        { read -r -a kids < "/proc/$p/task/$p/children"; } 2>/dev/null || true
+        child=""
+        for k in ${kids[@]+"${kids[@]}"}; do
+            ! [[ "/proc/$k/ns/user" -ef "/proc/$p/ns/user" ]] || continue
+            child="$k"; break
+        done
         [ -n "$child" ] && ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]] || continue
         SB_PIDS+=( "$child" ); SB_NAMES+=( "$name" )
         [[ " ${args[*]} " == *" STEAM_COMPAT_DATA_PATH "* ]] && SB_PROTON+=( 1 ) || SB_PROTON+=( 0 )
@@ -307,10 +336,19 @@ finally:
 sys.exit(status)
 EOF
 
+# Under a uid of its own the socket is that user's, and only takes requests
+# from it: ask from its namespace, as it -- still outside the sandbox's PIDs.
+# We own that namespace, so we may enter it; the outer bwrap is pid 1's parent.
+ENTER=()
+{ read -r PSTAT < "/proc/$TARGET/stat"; } 2>/dev/null || PSTAT=""
+OUTER="${PSTAT##*) }"; OUTER="${OUTER#* }"; OUTER="${OUTER%% *}"
+if [[ "$OUTER" =~ ^[0-9]+$ ]] && ! [[ "/proc/$OUTER/ns/user" -ef /proc/self/ns/user ]]; then
+    ENTER=( nsenter "--user=/proc/$OUTER/ns/user" "--setuid=$(id -u)" "--setgid=$(id -g)" -- )
+fi
 # On the sandbox's own root, where sandbox-game made it; a sandbox started by
 # an older sandbox-game has none.
 SOCK="/proc/$TARGET/root/run/sandbox-attach/socket"
-[ -S "$SOCK" ] || {
+"${ENTER[@]}" test -S "$SOCK" || {
     echo "$SELF: '$TNAME' was started by an older sandbox-game; restart it to attach" >&2
     exit 1; }
-exec python3 -I -c "$CLIENT" "$SOCK" /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}
+exec "${ENTER[@]}" python3 -I -c "$CLIENT" "$SOCK" /bin/bash -c "$INNER" "$SELF" "$MODE" ${ARGS[@]+"${ARGS[@]}"}

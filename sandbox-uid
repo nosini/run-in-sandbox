@@ -1,0 +1,509 @@
+#!/usr/bin/env -S python3 -I
+"""sandbox-uid: run a sandbox as a user of its own, as Android runs each app.
+
+Opt-in (SANDBOX_SEPARATE_UID=1, read by sandbox-game). Everything else keeps
+the game away from what is yours: its own mounts, PIDs and network, Landlock,
+the seccomp filter. All of that still runs as your uid, though, and to the
+kernel the game is you: any file of yours it can name, any socket of yours it
+can reach -- the session bus, the user manager, ssh-agent, PipeWire's full
+socket -- takes it for you. Under a uid of its own a slip in any of those
+layers lands on ordinary permissions that are not yours, and those services
+turn it away.
+
+An unprivileged process can map only its own uid into a user namespace; any
+other takes newuidmap/newgidmap and a subordinate range in /etc/subuid and
+/etc/subgid, the same as rootless Podman. So the sandbox gets a namespace of
+its own, around bwrap's:
+
+  outer uid  YOUR_UID  = subordinate uid  BASE + OFFSET + INDEX  (the game)
+  outer uid  0         = your uid         (sets up, then is dropped)
+  outer gid  YOUR_GID  = subordinate gid  BASE + OFFSET + INDEX
+  outer gid  CLIENTS   = subordinate gid  BASE + OFFSET          (every sandbox)
+  outer gid  RENDER    = the GPU's render group, when /etc/subgid lists it
+
+The game keeps the uid number it always saw -- bwrap maps it to itself -- but
+on the host its files and processes belong to a uid that owns nothing else.
+INDEX is per sandbox (CAP/uid), so no two sandboxes share one either. OFFSET
+keeps clear of the uids rootless Podman's containers use, which are the same
+range read from the bottom.
+
+As outer root, before dropping to that uid:
+  - The capture's writable folders become the sandbox user's (chown).
+  - Folders it may not traverse on the way to anything bwrap binds -- your
+    0700 home, /run/user/UID -- are covered, in this namespace only, by an
+    empty tmpfs holding just those paths, so bwrap finds them while the rest
+    stays as closed to that uid as your permissions make it. Nothing on the
+    disk changes.
+  - bwrap's overlays become fuse-overlayfs mounts served as the sandbox user
+    (see overlays()), and standard output and error a pipe of its own when
+    they are yours (see relay_output()).
+
+Sockets it must connect to (Wayland for gamescope, the sandbox sound server)
+need write permission for the CLIENTS group; sandbox-game grants that with an
+ACL entry, which the socket's owner may add without root.
+
+Commands:
+  sandbox-uid index CAP            print CAP's index, allocating it once
+  sandbox-uid ids CAP              print "UID CLIENTS_GID" on the host
+  sandbox-uid launch CAP -- BWRAP...
+  sandbox-uid run CAP -- CMD...    CMD as outer root: owner of your files and
+                                   the sandbox's alike (like `podman unshare`)
+"""
+import ctypes
+import fcntl
+import json
+import os
+import pwd
+import stat
+import sys
+import time
+
+OFFSET = 50000
+MS_BIND, MS_REC, MS_NOSUID, MS_NODEV, MS_NOEXEC = 4096, 16384, 2, 4, 8
+# Outer gids for the groups that are not the sandbox's own. Above anything a
+# desktop allocates, and checked against your own gid below.
+CLIENTS_OUTER, RENDER_OUTER = 4000000000, 4000000001
+
+
+def fail(msg):
+    sys.stderr.write(f"sandbox-uid: {msg}\n")
+    sys.exit(1)
+
+
+def subordinate(path, need):
+    """(start, count) of the first range for this user covering NEED ids."""
+    me = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        lines = []
+    ranges = []
+    for line in lines:
+        parts = line.strip().split(":")
+        if len(parts) == 3 and parts[0] in (me, str(os.getuid())) \
+           and parts[1].isdigit() and parts[2].isdigit():
+            ranges.append((int(parts[1]), int(parts[2])))
+    return ranges, next(((s, c) for s, c in ranges if c >= need), None)
+
+
+def listed(ranges, gid):
+    return any(s <= gid < s + c for s, c in ranges)
+
+
+def index_of(cap):
+    """CAP/uid, allocated under a lock on the sandboxes' folder."""
+    path = os.path.join(cap, "uid")
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+        if value.isdigit() and int(value) > 0:
+            return int(value)
+    except FileNotFoundError:
+        pass
+    root = os.path.dirname(os.path.abspath(cap))
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        used = set()
+        for name in os.listdir(root):
+            try:
+                with open(os.path.join(root, name, "uid")) as f:
+                    value = f.read().strip()
+            except OSError:
+                continue
+            if value.isdigit():
+                used.add(int(value))
+        n = 1
+        while n in used:
+            n += 1
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{n}\n")
+        os.replace(tmp, path)
+        return n
+    finally:
+        os.close(fd)
+
+
+def layout(cap):
+    """Everything about this sandbox's ids, from /etc/sub[ug]id."""
+    n = index_of(cap)
+    _, uids = subordinate("/etc/subuid", OFFSET + n + 1)
+    granges, gids = subordinate("/etc/subgid", OFFSET + n + 1)
+    if not uids or not gids:
+        fail(f"no subordinate range of at least {OFFSET + n + 1} ids for "
+             f"{pwd.getpwuid(os.getuid()).pw_name} in /etc/subuid and /etc/subgid "
+             "(see \"A uid of its own\" in the README)")
+    if os.getgid() in (CLIENTS_OUTER, RENDER_OUTER):
+        fail("your gid collides with the outer group ids")
+    lay = {"uid": uids[0] + OFFSET + n, "gid": gids[0] + OFFSET + n,
+           "clients": gids[0] + OFFSET, "groups": []}
+    # The render nodes' group, but never root's: that one owns far more than
+    # devices. Only when an administrator listed it for you in /etc/subgid.
+    render = {os.stat(f"/dev/dri/{d}").st_gid for d in sorted(os.listdir("/dev/dri"))
+              if d.startswith("renderD")} if os.path.isdir("/dev/dri") else set()
+    render = [g for g in render if g != 0 and listed(granges, g)]
+    if render:
+        lay["render"] = render[0]
+    return lay
+
+
+def unshare_argv(lay):
+    u, g = os.getuid(), os.getgid()
+    argv = ["unshare", "--user", "--mount", "--propagation=private",
+            f"--map-users=0:{u}:1", f"--map-users={u}:{lay['uid']}:1",
+            f"--map-groups=0:{g}:1", f"--map-groups={g}:{lay['gid']}:1",
+            f"--map-groups={CLIENTS_OUTER}:{lay['clients']}:1"]
+    if "render" in lay:
+        argv.append(f"--map-groups={RENDER_OUTER}:{lay['render']}:1")
+    return argv + ["--setgroups=allow", "--"]
+
+
+# ---- inside the outer namespace, as its root ------------------------------
+
+# bwrap's options and how many arguments each takes; the sources are what
+# bwrap opens on the host side, and the writable ones need to be the game's.
+ARITY = {
+    "--args": 1, "--argv0": 1, "--userns": 1, "--userns2": 1, "--pidns": 1,
+    "--uid": 1, "--gid": 1, "--hostname": 1, "--chdir": 1, "--unsetenv": 1,
+    "--lock-file": 1, "--sync-fd": 1, "--remount-ro": 1, "--exec-label": 1,
+    "--file-label": 1, "--proc": 1, "--dev": 1, "--tmpfs": 1, "--mqueue": 1,
+    "--dir": 1, "--seccomp": 1, "--add-seccomp-fd": 1, "--block-fd": 1,
+    "--userns-block-fd": 1, "--info-fd": 1, "--json-status-fd": 1,
+    "--cap-add": 1, "--cap-drop": 1, "--perms": 1, "--size": 1, "--chmod": 2,
+    "--overlay-src": 1, "--tmp-overlay": 1, "--ro-overlay": 1, "--overlay": 3,
+    "--setenv": 2, "--symlink": 2, "--file": 2, "--bind-data": 2,
+    "--ro-bind-data": 2, "--bind": 2, "--bind-try": 2, "--dev-bind": 2,
+    "--dev-bind-try": 2, "--ro-bind": 2, "--ro-bind-try": 2, "--bind-fd": 2,
+    "--ro-bind-fd": 2,
+}
+
+
+def sources(argv):
+    """[(path, writable)] of what bwrap will open on the host."""
+    out, i = [], 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            break
+        if not a.startswith("--"):
+            break
+        n = ARITY.get(a, 0)
+        if a in ("--bind", "--bind-try"):
+            out.append((argv[i + 1], True))
+        elif a in ("--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try",
+                   "--overlay-src"):
+            out.append((argv[i + 1], False))
+        elif a == "--overlay":
+            out += [(argv[i + 1], True), (argv[i + 2], True)]
+        i += 1 + n
+    return [(p, w) for p, w in out if os.path.lexists(p)]
+
+
+def overlays(argv, mounts):
+    """bwrap's overlays, which it cannot mount for this uid: overlayfs keeps
+    a copied-up file's owner, which is you, and you do not exist in the
+    sandbox's namespace (EOVERFLOW). Each becomes a --bind of MOUNTS/N, where
+    fuse-overlayfs, running as the sandbox user, shows the layers as that
+    user's. Returns (new argv, [(mountpoint, lowers, upper, work)]); an upper
+    of None is a throwaway layer, in a tmpfs."""
+    out, specs, lowers, i = argv[:1], [], [], 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--" or not a.startswith("--"):
+            out += argv[i:]
+            break
+        n = ARITY.get(a, 0)
+        if a == "--overlay-src":
+            lowers.append(argv[i + 1])
+        elif a in ("--overlay", "--tmp-overlay"):
+            upper, work, dest = (argv[i + 1:i + 4] if a == "--overlay"
+                                 else (None, None, argv[i + 1]))
+            mp = os.path.join(mounts, str(len(specs)))
+            specs.append((mp, lowers, upper, work))
+            out += ["--bind", mp, dest]
+            lowers = []
+        elif a == "--ro-overlay":
+            fail("--ro-overlay is not supported under a uid of its own")
+        else:
+            out += argv[i:i + 1 + n]
+        i += 1 + n
+    return out, specs
+
+
+PR_SET_PDEATHSIG, PR_SET_NO_NEW_PRIVS = 1, 38
+
+
+def fuse_overlay(mp, lowers, upper, work, uid, gid):
+    """Mount MP as fuse-overlayfs, served by a daemon that is the sandbox
+    user and nothing more. Root here mounts /dev/fuse (the daemon could not),
+    the daemon gets the descriptor and the layers as descriptors -- no paths
+    to traverse or to parse commas and colons in -- and ends with bwrap."""
+    dev = os.open("/dev/fuse", os.O_RDWR)
+    mount("fuse-overlayfs", mp, "fuse.fuse-overlayfs", MS_NOSUID | MS_NODEV,
+          f"fd={dev},rootmode=40000,user_id={uid},group_id={gid},default_permissions")
+    # bwrap names the bottom layer first, fuse-overlayfs the top one.
+    layers = list(reversed(lowers))
+    parent = os.getpid()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            keep = [dev, *layers, *(fd for fd in (upper, work) if isinstance(fd, int))]
+            for fd in keep:
+                os.set_inheritable(fd, True)
+            os.closerange(3, min(keep))
+            for lo, hi in zip(sorted(keep), sorted(keep)[1:] + [1 << 20]):
+                os.closerange(lo + 1, hi)
+            # It answers the game's every file request, from outside the
+            # sandbox's namespaces, filter and Landlock: should the game take
+            # it over, it is the sandbox user still, with no network either.
+            os.unshare(os.CLONE_NEWNET | os.CLONE_NEWIPC)
+            libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+            os.setgroups([])
+            os.setgid(gid)
+            os.setuid(uid)
+            # After the uid change, which clears it; bwrap is this pid soon.
+            libc.prctl(PR_SET_PDEATHSIG, 15, 0, 0, 0)
+            if os.getppid() != parent:
+                os._exit(1)
+            opts = ["lowerdir=" + ":".join(f"/proc/self/fd/{fd}" for fd in layers),
+                    f"upperdir=/proc/self/fd/{upper}", f"workdir=/proc/self/fd/{work}",
+                    f"squash_to_uid={uid}", f"squash_to_gid={gid}"]
+            os.execvp("fuse-overlayfs", ["fuse-overlayfs", "-f", "-o", ",".join(opts),
+                                         f"/dev/fd/{dev}"])
+        except BaseException as e:
+            os.write(2, f"sandbox-uid: fuse-overlayfs: {e}\n".encode())
+        os._exit(127)
+    os.close(dev)
+    # A daemon that cannot start would leave every access to MP hanging.
+    for _ in range(20):
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            fail(f"fuse-overlayfs could not serve {mp}")
+        time.sleep(0.01)
+    return pid
+
+
+def own(cap, srcs, uid, gid):
+    """The capture's writable folders become the sandbox user's."""
+    cap = os.path.realpath(cap)
+    for path, writable in srcs:
+        real = os.path.realpath(path)
+        if not writable or not (real == cap or real.startswith(cap + "/")):
+            continue
+        st = os.lstat(real)
+        if not stat.S_ISDIR(st.st_mode):
+            if st.st_uid == 0:
+                os.lchown(real, uid, gid)
+            continue
+        dev = st.st_dev
+        for top, dirs, files in os.walk(real):
+            for name in [None, *dirs, *files]:
+                p = top if name is None else os.path.join(top, name)
+                st = os.lstat(p)
+                # Not into anything mounted there; only what is yours (outer
+                # 0), never something of a stranger's.
+                if st.st_dev == dev and st.st_uid == 0:
+                    os.lchown(p, uid, gid)
+            dirs[:] = [d for d in dirs if os.lstat(os.path.join(top, d)).st_dev == dev]
+
+
+def blocked(paths, uid, gid, groups):
+    """For each path, the first folder on the way the sandbox user cannot
+    traverse -- checked as that user, in a child that becomes it."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            os.setgroups(groups)
+            os.setgid(gid)
+            os.setuid(uid)
+            out = {}
+            for p in paths:
+                parts, d = os.path.abspath(p).split("/")[1:], ""
+                for part in parts[:-1]:
+                    d += "/" + part
+                    if not os.access(d, os.X_OK):
+                        out[p] = d
+                        break
+            os.write(w, json.dumps(out).encode())
+            os._exit(0)
+        except BaseException as e:
+            os.write(2, f"sandbox-uid: checking paths: {e}\n".encode())
+            os._exit(1)
+    os.close(w)
+    data = b""
+    while chunk := os.read(r, 65536):
+        data += chunk
+    os.close(r)
+    if os.waitpid(pid, 0)[1] != 0:
+        sys.exit(1)
+    return json.loads(data)
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+def mount(src, dst, fstype, flags, data=None):
+    if libc.mount(src and src.encode(), dst.encode(), fstype and fstype.encode(),
+                  flags, data and data.encode()) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e), dst)
+
+
+def stage(paths, block):
+    """Cover each blocked folder with a tmpfs holding only PATHS."""
+    tops = sorted(set(block.values()), key=len)
+    tops = [t for t in tops if not any(t.startswith(o + "/") for o in tops if o != t)]
+    # Every one opened before any folder is covered: a link under one may
+    # lead under another.
+    opened = []
+    for top in tops:
+        under = sorted({p for p in paths if p.startswith(top + "/")}, key=len)
+        # Parents first; a source inside another bound one comes along with it.
+        keep = []
+        for p in under:
+            if not any(p.startswith(k + "/") for k in keep):
+                keep.append(p)
+        # Links followed: bwrap would, and their targets may be no nearer.
+        opened.append((top, {p: os.open(p, os.O_PATH | os.O_CLOEXEC) for p in keep}))
+    for top, fds in opened:
+        mount("tmpfs", top, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0711")
+        for p, fd in fds.items():
+            d = top
+            for part in os.path.relpath(os.path.dirname(p), top).split("/"):
+                if part in ("", "."):
+                    continue
+                d = os.path.join(d, part)
+                if not os.path.isdir(d):
+                    os.mkdir(d, 0o711)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                os.mkdir(p, 0o711)
+            else:
+                os.close(os.open(p, os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC, 0o600))
+            mount(f"/proc/self/fd/{fd}", p, None, MS_BIND | MS_REC)
+            os.close(fd)
+
+
+def relay_output(uid):
+    """Standard output and error, when they are a file or pipe of yours open
+    for writing: the game may reopen them through /proc/self/fd -- the file
+    manager's log file reaches it that way -- and reopening is checked
+    against their owner. Put a pipe of the sandbox user's in between, and a
+    process copying from it, which ends when the last writer has. The pipe
+    is write-only even to its owner, so it reopens as far as the descriptor
+    went: written, not read back."""
+    seen = {}
+    for fd in (1, 2):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        if (not (stat.S_ISREG(st.st_mode) or stat.S_ISFIFO(st.st_mode)) or st.st_uid == uid
+                or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY):
+            continue
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            os.dup2(seen[key], fd)
+            continue
+        r, w = os.pipe()
+        if os.fork() == 0:
+            try:
+                out = os.dup(fd)
+                for x in range(3, 1 << 16):
+                    if x not in (r, out):
+                        try:
+                            os.close(x)
+                        except OSError:
+                            pass
+                os.dup2(os.open("/dev/null", os.O_RDWR), 0)
+                os.dup2(0, 1)
+                os.dup2(0, 2)
+                while data := os.read(r, 65536):
+                    while data:
+                        data = data[os.write(out, data):]
+            except BaseException:
+                pass
+            os._exit(0)
+        os.close(r)
+        os.fchmod(w, 0o200)
+        os.dup2(w, fd)
+        seen[key] = fd
+        os.close(w)
+
+
+def inside_launch(cap, argv):
+    lay = json.loads(os.environ.pop("SANDBOX_UID_LAYOUT"))
+    g_uid, g_gid = lay["outer_uid"], lay["outer_gid"]
+    groups = [CLIENTS_OUTER] + ([RENDER_OUTER] if "render" in lay else [])
+    own(cap, sources(argv), g_uid, g_gid)
+    # The overlays' mount points: a tmpfs in this namespace alone, on a
+    # folder of the capture's, which also holds the throwaway layers.
+    mounts = os.path.join(cap, ".mounts")
+    argv, specs = overlays(argv, mounts)
+    layers = []
+    if specs:
+        os.makedirs(mounts, exist_ok=True)
+        mount("tmpfs", mounts, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755")
+        for mp, lowers, upper, work in specs:
+            os.mkdir(mp)
+            if upper is None:
+                upper, work = mp + ".upper", mp + ".work"
+                for d in (upper, work):
+                    os.mkdir(d, 0o700)
+                    os.chown(d, g_uid, g_gid)
+            layers.append((mp, lowers, upper, work))
+    # fuse-overlayfs follows its layers' descriptors back to paths, which it
+    # must be able to reach as well; upper and work as one, to rename across.
+    paths = [os.path.abspath(p) for p, _ in sources(argv)] + [os.path.abspath(argv[0])]
+    for mp, lowers, upper, work in layers:
+        paths += [os.path.abspath(p) for p in lowers]
+        paths.append(os.path.commonpath([os.path.abspath(upper), os.path.abspath(work)]))
+    stage(paths, blocked(paths, g_uid, g_gid, groups))
+    # Opened only now, through the staged paths: upper and work on one mount.
+    for mp, lowers, upper, work in layers:
+        fds = [os.open(p, os.O_PATH | os.O_DIRECTORY) for p in (*lowers, upper, work)]
+        fuse_overlay(mp, fds[:-2], fds[-2], fds[-1], g_uid, g_gid)
+        for fd in fds:
+            os.close(fd)
+    os.chdir("/")
+    os.setgroups(groups)
+    os.setgid(g_gid)
+    os.setuid(g_uid)                        # drops every capability with root
+    relay_output(g_uid)
+    os.execv(argv[0], argv)
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) >= 2 and args[0] == "--inside":
+        cap, rest = args[1], args[2:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        inside_launch(cap, rest)
+    if len(args) < 2:
+        fail(__doc__.split("Commands:")[1])
+    cmd, cap, rest = args[0], args[1], args[2:]
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    if cmd == "index":
+        print(index_of(cap))
+        return
+    lay = layout(cap)
+    if cmd == "ids":
+        print(lay["uid"], lay["clients"])
+        return
+    if not rest:
+        fail(f"{cmd}: no command")
+    if cmd == "run":
+        os.execvp("unshare", unshare_argv(lay) + rest)
+    if cmd == "launch":
+        lay.update(outer_uid=os.getuid(), outer_gid=os.getgid())
+        os.environ["SANDBOX_UID_LAYOUT"] = json.dumps(lay)
+        os.execvp("unshare", unshare_argv(lay)
+                  + [sys.executable, "-I", os.path.realpath(__file__), "--inside", cap, "--"] + rest)
+    fail(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

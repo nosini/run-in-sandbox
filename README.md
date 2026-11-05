@@ -258,6 +258,7 @@ working directory.
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
+| `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, util-linux 2.38+, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own-experimental) |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | `--dotnet` | a .NET runtime | your distribution's package, or Microsoft's install script into `~/.dotnet` |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
@@ -1305,6 +1306,106 @@ forbidden here, and a page with Node.js in it could not be sandboxed anyway,
 since it can open files and start programs. NW.js 0.110 runs the same without
 the flag — none of its processes carry a seccomp filter beyond this one — so
 it is passed only so that no build goes looking for a setuid helper.
+
+## A uid of its own (experimental)
+
+Everything above runs the game as you. Its own mounts, process list and
+network, Landlock and the seccomp filter keep it from your files and your
+desktop, but to the kernel it is still your user. If one of those layers
+slips, the game is you: any file of yours it can name is open to it, and so is
+anything that trusts your uid — the session bus, the systemd user manager,
+ssh-agent, the full PipeWire socket.
+
+With `SANDBOX_SEPARATE_UID=1` each sandbox runs as a user of its own instead,
+much as Android gives each app one: a subordinate uid from your range in
+`/etc/subuid`, the same mechanism rootless Podman uses, and a different one
+for every sandbox. The game still sees its usual uid, but on the system its
+processes and files belong to a uid that owns nothing else. A slip in the
+other layers then meets ordinary file permissions that are not yours, and
+services that check who is calling turn it away. Two sandboxes cannot read
+each other's files either.
+
+No setuid program of this project's is involved. `newuidmap` and `newgidmap`
+(from shadow, which your distribution already ships setuid for Podman) set up
+the uid. Your files are not changed to let the sandbox in: your home stays as
+closed to that uid as its permissions make it.
+
+### Setting it up
+
+1. A subordinate range for your user of at least 50,100 ids. Most
+   distributions give every new user 65,536:
+
+   ```sh
+   grep "^$USER:" /etc/subuid /etc/subgid
+   ```
+
+   With no line for you in either file:
+
+   ```sh
+   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+   ```
+
+2. The GPU. Render nodes are usually open to the group `render` and to the
+   logged-in user, and a sandbox's uid is neither. List the group for you as
+   well, and the sandbox gets it:
+
+   ```sh
+   g="$(stat -c %g /dev/dri/renderD128)"
+   sudo usermod --add-subgids "$g-$g" "$USER"
+   ```
+
+   Without this line the game starts, but software rendering is all it gets.
+
+3. Turn it on, for one launch from a terminal:
+
+   ```sh
+   SANDBOX_SEPARATE_UID=1 sandbox-game ~/Games/SomeGame /game/start.sh
+   ```
+
+   or for everything you start after logging in again, Nautilus and the
+   manager included:
+
+   ```sh
+   mkdir -p ~/.config/environment.d
+   echo SANDBOX_SEPARATE_UID=1 > ~/.config/environment.d/sandbox-game.conf
+   ```
+
+It also needs `unshare` and `nsenter` from util-linux 2.38 or newer,
+`setfacl` (`acl`) and `fuse-overlayfs`.
+
+### What changes
+
+- A capture's `home/`, `rw/` and Wine prefix belong to the sandbox's user:
+  `ls -l` shows a number such as `150001` as their owner. You can still read
+  them. `--delete` and `--reset-install` take care of the rest, and every
+  launch gives the capture back to you for its own preparations before
+  handing it over again. Turning the setting off gives it back for good.
+  To change something in there by hand, run the command as the owner of both
+  you and the sandbox:
+
+  ```sh
+  ~/.local/lib/sandbox-game/sandbox-uid run ~/game-sandboxes/NAME -- rm ~/game-sandboxes/NAME/home/some-file
+  ```
+
+- The game's own folder and Proton's are shown through `fuse-overlayfs`
+  rather than the kernel's overlay, which cannot copy up a file that belongs
+  to you for a user who is not you. Reading game files is slower through it.
+  The `fuse-overlayfs` process runs as the sandbox's user, with no network,
+  but outside the seccomp filter and Landlock.
+- The desktop's Wayland socket and the playback-only sound server are opened
+  to the sandboxes with an ACL entry for one group that all of them share.
+  The desktop's full PipeWire and Pulse sockets are not bound in at all:
+  without `install.sh --restrict-audio` the game has no sound.
+
+### Rough edges
+
+- `--host-x11` does not work: the X authority file is yours alone.
+- `/dev/ntsync` is usually open only to the logged-in user. Proton falls back
+  to its other synchronisation without it.
+- A `--stop` in the first moment of a launch, before the game is running,
+  does not see the sandbox yet.
+- Handing the capture back and forth costs a pass over its files on each
+  launch, which shows on large Wine prefixes.
 
 ## Preferences file format
 

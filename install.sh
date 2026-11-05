@@ -41,6 +41,7 @@ each() {
     "$@" 755 sandbox-manager          "$BIN"
     "$@" 755 sandbox-seccomp          "$HELPERS"
     "$@" 755 sandbox-landlock         "$HELPERS"
+    "$@" 755 sandbox-uid              "$HELPERS"
     "$@" 644 sandbox-game-lib         "$HELPERS"
     "$@" 755 sandbox-game-dialog      "$HELPERS"
     "$@" 644 sandbox-manager-lib.py   "$HELPERS"
