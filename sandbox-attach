@@ -36,6 +36,15 @@
 set -euo pipefail
 
 SELF="${0##*/}"
+# Shared with sandbox-game, which has to agree on what is a sandbox: beside
+# this script (a checkout of the repo), then where install.sh puts it.
+LIB=""
+for d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
+    [ -e "$d/sandbox-game-lib" ] && { LIB="$d/sandbox-game-lib"; break; }
+done
+[ -n "$LIB" ] || { echo "$SELF: sandbox-game-lib not found; run install.sh" >&2; exit 1; }
+# shellcheck source=sandbox-game-lib
+. "$LIB"
 usage() {
     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; $d'
     exit "${1:-0}"
@@ -57,25 +66,6 @@ while [ "$#" -gt 0 ]; do
         *)        break ;;
     esac
 done
-
-# Under a uid of its own (SANDBOX_SEPARATE_UID) the outer bwrap runs in the
-# sandbox's namespace instead, as sandbox-uid left it; but its parent is still
-# the sandbox-game that started it, here in ours, which nothing inside any
-# sandbox can be. (A read builtin, not a process, per entry.) Anything of
-# ours could make such a child, though, so sandbox_user checks the rest once
-# the name is known: it runs as the uid that owns that capture's home, which
-# is not ours.
-started_by_us() {                     # $1 = PID
-    local s
-    { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
-    s="${s##*) }"; s="${s#* }"
-    [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
-}
-sandbox_user() {                      # $1 = PID, $2 = NAME
-    local u
-    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
-    [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
-}
 
 # ---- find the running sandboxes -------------------------------------------
 # As sandbox-game --stop finds them: by the outer bwrap, which runs in our own
@@ -111,7 +101,8 @@ scan() {
         { read -r -a kids < "/proc/$p/task/$p/children"; } 2>/dev/null || true
         child=""
         for k in ${kids[@]+"${kids[@]}"}; do
-            ! [[ "/proc/$k/ns/user" -ef "/proc/$p/ns/user" ]] || continue
+            # (Not one whose namespace is closed to us: that is not the sandbox.)
+            [ -e "/proc/$k/ns/user" ] && ! [[ "/proc/$k/ns/user" -ef "/proc/$p/ns/user" ]] || continue
             child="$k"; break
         done
         [ -n "$child" ] && ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]] || continue

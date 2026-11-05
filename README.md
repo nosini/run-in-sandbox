@@ -258,7 +258,7 @@ working directory.
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
-| `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, util-linux 2.38+, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own-experimental) |
+| `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, `nsenter`, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own-experimental) |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | `--dotnet` | a .NET runtime | your distribution's package, or Microsoft's install script into `~/.dotnet` |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
@@ -1370,18 +1370,21 @@ closed to that uid as its permissions make it.
    echo SANDBOX_SEPARATE_UID=1 > ~/.config/environment.d/sandbox-game.conf
    ```
 
-It also needs `unshare` and `nsenter` from util-linux 2.38 or newer,
-`setfacl` (`acl`) and `fuse-overlayfs`.
+   A sandbox that has run this way keeps doing so, also when started from
+   somewhere the variable does not reach. Only `SANDBOX_SEPARATE_UID=0`
+   turns it off again, for that sandbox: it then runs as you, and its files
+   are given back to you.
+
+It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 ### What changes
 
 - A capture's `home/`, `rw/` and Wine prefix belong to the sandbox's user:
-  `ls -l` shows a number such as `150001` as their owner. You can still read
-  them. `--delete` and `--reset-install` take care of the rest, and every
-  launch gives the capture back to you for its own preparations before
-  handing it over again. Turning the setting off gives it back for good.
-  To change something in there by hand, run the command as the owner of both
-  you and the sandbox:
+  `ls -l` shows a number such as `150001` as their owner. You can read what
+  the game left open to others. `--delete` and `--reset-install` take care
+  of the rest, and so does `SANDBOX_SEPARATE_UID=0`, which gives the files
+  back for good. To change something in there by hand, run the command as
+  the owner of both you and the sandbox:
 
   ```sh
   ~/.local/lib/sandbox-game/sandbox-uid run ~/game-sandboxes/NAME -- rm ~/game-sandboxes/NAME/home/some-file
@@ -1404,8 +1407,18 @@ It also needs `unshare` and `nsenter` from util-linux 2.38 or newer,
   to its other synchronisation without it.
 - A `--stop` in the first moment of a launch, before the game is running,
   does not see the sandbox yet.
-- Handing the capture back and forth costs a pass over its files on each
-  launch, which shows on large Wine prefixes.
+- The game's folder has to be readable to other users: the sandbox's user
+  is one of them. A folder open to you alone (`chmod -R o+rX` it), or one on
+  an NTFS or exFAT drive mounted with `dmask=077` or `fmask=177`, as desktops
+  often mount them, stops the launch with a message. Anything else bound in
+  that the sandbox's user cannot read is left out with a warning.
+- The first launch, and one after `sandbox-uid run` or a change sandbox-game
+  makes itself (an executable copy, a registry put back), hands the capture
+  over file by file, which shows on large Wine prefixes.
+- Should the sandbox's uid go -- its range in `/etc/subuid` changed or
+  removed -- its files are left with an owner nobody can act for but root.
+  The launch says so, with the command that gives them back to you:
+  `sudo chown -R "$USER": ~/game-sandboxes/NAME`.
 
 ## Preferences file format
 

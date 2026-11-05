@@ -3641,7 +3641,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
 
 def separate_uid_missing():
     """Why SANDBOX_SEPARATE_UID cannot run here, or None."""
-    for tool in ("newuidmap", "newgidmap", "unshare", "nsenter", "setfacl", "fuse-overlayfs"):
+    for tool in ("newuidmap", "newgidmap", "nsenter", "setfacl", "fuse-overlayfs"):
         if not shutil.which(tool):
             return f"{tool} is not installed"
     if Path("/proc/self/uid_map").read_text().split() != ["0", "0", "4294967295"]:
@@ -3737,12 +3737,97 @@ class SeparateUidTests(unittest.TestCase):
         self.run_guest('printf save > "$HOME/save"')
         name = self.cli("--print-name", self.game).stdout.strip()
         capture = self.home / "game-sandboxes" / name
-        self.assertNotEqual((capture / "home" / "save").stat().st_uid, os.getuid())
+        uid = self.sandbox_uid(name)
+        self.assertEqual((capture / "home" / "save").stat().st_uid, uid)
+        # Started from somewhere the variable does not reach: still its own uid.
         del self.env["SANDBOX_SEPARATE_UID"]
         self.run_guest('printf again >> "$HOME/save"')
-        self.assertEqual((capture / "home" / "save").read_text(), "saveagain")
-        self.assertEqual({p.stat().st_uid for p in capture.rglob("*")}, {os.getuid()})
+        self.assertEqual((capture / "home" / "save").stat().st_uid, uid)
+        self.env["SANDBOX_SEPARATE_UID"] = "0"
+        result = self.run_guest('printf more >> "$HOME/save"')
+        self.assertIn("runs as you from now on", result.stderr)
+        self.assertEqual((capture / "home" / "save").read_text(), "saveagainmore")
+        self.assertEqual({p.lstat().st_uid for p in capture.rglob("*")}, {os.getuid()})
         self.assertFalse((capture / "uid").exists())
+        del self.env["SANDBOX_SEPARATE_UID"]
+        self.run_guest("true")
+        self.assertEqual((capture / "home" / "save").stat().st_uid, os.getuid())
+
+    def test_the_capture_stays_the_sandboxes_between_runs(self):
+        # Not given back and handed over again at each launch: no pass over
+        # every file, which a large Wine prefix makes slow.
+        self.run_guest('printf save > "$HOME/save"')
+        name = self.cli("--print-name", self.game).stdout.strip()
+        save = self.home / "game-sandboxes" / name / "home" / "save"
+        before = save.stat()
+        self.run_guest("true")
+        self.assertEqual((save.stat().st_uid, save.stat().st_ctime_ns),
+                         (before.st_uid, before.st_ctime_ns))
+
+    def test_its_own_changes_reach_the_sandboxes_files(self):
+        # An executable copy in rw/, made by sandbox-game: the capture comes
+        # back to us for it, and goes to the sandbox again for the game.
+        self.run_guest('printf save > "$HOME/save"')
+        name = self.cli("--print-name", self.game).stdout.strip()
+        uid, capture = self.sandbox_uid(name), self.home / "game-sandboxes" / name
+        (self.game / "bin").mkdir()
+        shutil.copyfile("/bin/true", self.game / "bin" / "Game")
+        self.cli("--headless", self.game, "/game/bin/Game")
+        self.assertTrue((capture / "rw" / "bin" / "Game").stat().st_mode & 0o100)
+        for f in ("home/save", "rw/bin", "rw/bin/Game"):
+            self.assertEqual((capture / f).stat().st_uid, uid, f)
+
+    def test_damaged_registry_is_put_back_after_the_run(self):
+        proton = self.base / "proton"
+        proton.mkdir()
+        def launch(script):
+            (proton / "proton").write_text("#!/bin/sh\n" + script)
+            (proton / "proton").chmod(0o755)
+            return self.cli("--headless", "--proton=" + str(proton), "--name", "registry",
+                            self.game, "/game/game.exe")
+        pfx = self.home / "game-sandboxes" / "registry" / "compat" / "pfx"
+        whole = "WINE REGISTRY Version 2\n;; user.reg\n"
+        launch("mkdir -p /compat/pfx\n"
+               'for f in system user userdef; do printf "WINE REGISTRY Version 2\\n;; %s.reg\\n" $f'
+               " > /compat/pfx/$f.reg; done\n")
+        # Emptied as the game ends, as a crash right after a save leaves it.
+        result = launch(": > /compat/pfx/user.reg\n")
+        self.assertIn("user.reg was damaged", result.stderr)
+        self.assertEqual((pfx / "user.reg").read_text(), whole)
+
+    def test_a_link_into_a_closed_folder_is_followed(self):
+        # Bound in through a link from an open folder, it leads into one the
+        # sandbox's user may not enter (the test's 0700 folder, like a home).
+        shared = self.base / "shared"
+        shared.mkdir()
+        (shared / "data").write_text("seen")
+        open_dir = Path(tempfile.mkdtemp(prefix="sandbox-uid-test-"))
+        self.addCleanup(shutil.rmtree, open_dir)
+        open_dir.chmod(0o755)
+        (open_dir / "link").symlink_to(shared)
+        result = self.run_guest("cat /mnt-data/data", "--ro", str(open_dir / "link"), "/mnt-data")
+        self.assertEqual(result.stdout, "seen")
+
+    def test_a_game_folder_open_to_us_alone_is_refused(self):
+        (self.game / "data").write_text("data")
+        for closed, mode in ((self.game, 0o700), (self.game / "data", 0o600)):
+            with self.subTest(closed=closed.name):
+                closed.chmod(mode)
+                result = self.cli("--headless", self.game, "/bin/true", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"cannot read {closed}", result.stderr)
+                closed.chmod(0o755 if closed.is_dir() else 0o644)
+
+    def test_a_try_bind_that_leads_nowhere_is_left_out(self):
+        capture = self.home / "game-sandboxes" / "nowhere"
+        capture.mkdir(parents=True)
+        link = self.base / "dangling"
+        link.symlink_to(self.base / "missing")
+        result = subprocess.run(
+            [str(ROOT / "sandbox-uid"), "launch", str(capture), "--", shutil.which("bwrap"),
+             "--ro-bind", "/", "/", "--ro-bind-try", str(link), "/mnt", "--", "/bin/true"],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_two_sandboxes_get_two_users(self):
         other = self.base / "games" / "Other"

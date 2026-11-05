@@ -185,25 +185,6 @@ list_protons() {                      # every install found, newest first
     done < <(proton_roots) | sort -rn -k1,1 | cut -f2 | awk '!seen[$0]++'
 }
 
-# Under a uid of its own (SANDBOX_SEPARATE_UID) the outer bwrap runs in the
-# sandbox's namespace instead, as sandbox-uid left it; but its parent is still
-# the sandbox-game that started it, here in ours, which nothing inside any
-# sandbox can be. (A read builtin, not a process, per entry.) Anything of
-# ours could make such a child, though, so sandbox_user checks the rest once
-# the name is known: it runs as the uid that owns that capture's home, which
-# is not ours.
-started_by_us() {                     # $1 = PID
-    local s
-    { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
-    s="${s##*) }"; s="${s#* }"
-    [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
-}
-sandbox_user() {                      # $1 = PID, $2 = NAME
-    local u
-    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
-    [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
-}
-
 # ---- stop ------------------------------------------------------------------
 # A sandbox's outer bwrap runs in our own namespaces and is the parent of its
 # pid 1. Killing it lets --die-with-parent take pid 1 down, and the kernel
@@ -322,8 +303,14 @@ unlock_work() { chmod -R u+rwx "$1/work" 2>/dev/null || true; }
 reclaim() {                           # $1 = capture folder
     [ -f "$1/uid" ] || return 0
     local u; u="$(helper sandbox-uid)"
+    [ -n "$u" ] && "$u" run "$1" -- chown -hR 0:0 "$1" && return 0
+    # Without the sandbox's uid any more -- its range gone from /etc/subuid,
+    # say -- only root can. Once it has, there is nothing left to do.
+    [ -n "$(find "$1" ! -user "$(id -u)" -print -quit 2>/dev/null)" ] || return 0
     [ -n "$u" ] || { echo "sandbox-uid not found; run install.sh" >&2; return 1; }
-    "$u" run "$1" -- chown -hR 0:0 "$1"
+    echo "could not give $1 back to you from the sandbox's uid; as root:" >&2
+    echo "  sudo chown -R $(id -un): '$1'" >&2
+    return 1
 }
 
 played() {                            # seconds -> "3h 12m"
@@ -910,13 +897,30 @@ CAP="$SANDBOXES/$NAME"
 # Nothing in the capture is created before the lock is held (but the launch
 # log, which the file manager's launcher and the manager open first).
 lock_sandbox "$NAME" || { echo "'$NAME' is already running" >&2; exit 1; }
-# A capture that ran under a uid of its own comes back to us first: what is
-# done to it from here on -- an executable copy in rw/, the registry and tray
-# settings in the prefix -- is done as us. sandbox-uid hands it over again
-# right before the game starts; with SANDBOX_SEPARATE_UID off, it stays ours,
-# and the sandbox's uid goes (it gets the next free one if turned on again).
-reclaim "$CAP" || exit 1
-[ "${SANDBOX_SEPARATE_UID:-0}" = 1 ] || rm -f "$CAP/uid"
+# A uid of its own (SANDBOX_SEPARATE_UID=1; see sandbox-uid) stays with a
+# capture until SANDBOX_SEPARATE_UID=0 says otherwise: a launch from somewhere
+# the variable did not reach -- a shell older than the login that set it --
+# must not quietly run the game as you. Turned off, the capture is given back
+# to you for good, and the sandbox's uid goes (it gets the next free one if
+# turned on again).
+case "${SANDBOX_SEPARATE_UID:-}" in
+    1) SEPARATE_UID=1 ;;
+    "") SEPARATE_UID=0; [ ! -f "$CAP/uid" ] || SEPARATE_UID=1 ;;
+    *) SEPARATE_UID=0 ;;
+esac
+if [ "$SEPARATE_UID" = 0 ] && [ -f "$CAP/uid" ]; then
+    echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
+    reclaim "$CAP" || exit 1
+    rm -f "$CAP/uid" "$CAP/.handed-over"
+fi
+# Under it, the capture stays the sandbox's between runs. sandbox-game's own
+# changes to it -- an executable copy in rw/, a registry put back -- are rare,
+# and take it back first (mine); the launch hands it over again.
+RECLAIMED=0
+mine() {
+    [ "$SEPARATE_UID" = 1 ] && [ "$RECLAIMED" = 0 ] || return 0
+    reclaim "$CAP" && RECLAIMED=1
+}
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
 python3 - "$CAP/source.json" "$GAMEDIR" <<'PY'
 import json, os, sys, tempfile
@@ -952,6 +956,7 @@ exec_bit() {                          # $1 = the command's /game/... path
     if [ "$ours" = 1 ]; then
         # Still the install's current program, still without its bit.
         [ -x "$host" ] || [ "$(stat -c '%s %Y' -- "$host")" != "$(cat -- "$stamp")" ] || return 0
+        if [ "$SEPARATE_UID$RECLAIMED" = 10 ]; then mine && exec_bit "$1"; return 0; fi
         rm -f -- "$copy"              # gone stale: updated, or has its bit back
     fi
     rm -f -- "$stamp"                 # a copy the game has changed since is its own
@@ -976,6 +981,9 @@ exec_bit() {                          # $1 = the command's /game/... path
         return 0
     fi
     [ -n "$(elf_programs "$visible")" ] || return 0
+    # Under a uid of its own rw/ is the sandbox's, and not all of it need be
+    # readable to us: taken back, and then looked at again.
+    if [ "$SEPARATE_UID$RECLAIMED" = 10 ]; then mine && exec_bit "$1"; return 0; fi
     if [ "$visible" = "$copy" ]; then
         chmod u+x -- "$copy" || true  # the game's own copy, already in rw/
         return 0
@@ -1073,9 +1081,11 @@ keep_registry() {
             else
                 rm -f -- "$tmp"
             fi
-        elif [ -f "$f" ] && [ ! -L "$f" ] && valid_registry "$b"; then
+        elif [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] && valid_registry "$b"; then
             # Damaged, most likely emptied: the last copy that was whole goes
             # back, the damaged file is kept beside it as $name.damaged.
+            # (One only unreadable to us, in the sandbox's prefix, is left be.)
+            mine || continue
             tmp="$(mktemp -p "$pfx" ".$name.XXXXXX")" || continue
             if cp --reflink=auto -- "$b" "$tmp" && sync -- "$tmp" \
                && mv -fT -- "$f" "$f.damaged" && mv -fT -- "$tmp" "$f"; then
@@ -1138,6 +1148,8 @@ else:
     if not found or found[0] != found[1] or lines[found[0]].lower() != value.lower():
         sys.exit(0)
     del lines[found[0]]
+if sys.argv[3:] == ["check"]:
+    sys.exit(2)                       # would change it
 directory, name = os.path.split(path)
 directory = directory or "."
 tmp = os.path.join(directory, ".%s.tray-%d" % (name, os.getpid()))
@@ -1162,6 +1174,13 @@ tray_window() {
     [ "$HIDE_TRAY" = 1 ] || [ -e "$marker" ] || return 0
     # The prefix is the game's to write in: never follow a link it put there.
     [ ! -L "$CAP/compat" ] && [ ! -L "$pfx" ] && [ -d "$pfx" ] && valid_registry "$pfx/user.reg" || return 0
+    # Under a uid of its own the prefix is the sandbox's: taken back only for
+    # a change.
+    if [ "$SEPARATE_UID$RECLAIMED" = 10 ]; then
+        local rc=0
+        python3 -I -c "$TRAY_HELPER" "$pfx/user.reg" "$HIDE_TRAY" check || rc=$?
+        [ "$rc" != 2 ] || mine || return 0
+    fi
     python3 -I -c "$TRAY_HELPER" "$pfx/user.reg" "$HIDE_TRAY" || return 0
     if [ "$HIDE_TRAY" = 1 ]; then : > "$marker"; else rm -f -- "$marker"; fi
 }
@@ -1958,7 +1977,7 @@ if [ -S "$SANDBOX_PULSE" ]; then
     AUDIO_ARGS=( --ro-bind "$SANDBOX_PULSE" "$RT/pulse/native"
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 else
-    [ "${SANDBOX_SEPARATE_UID:-0}" = 1 ] || {   # it gets none of these then
+    [ "$SEPARATE_UID" = 1 ] || {      # it gets none of these then
     echo "sandbox-game: warning: no playback-only sound server; the game can record and load sound server modules" >&2
     echo "                       (./install.sh --restrict-audio sets one up)" >&2; }
     AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
@@ -1984,18 +2003,19 @@ if [ "$HEADLESS" = 0 ] && command -v gsettings >/dev/null \
 fi
 
 # ---- overlay for the game's own install dir --------------------------------
-AS_OWNER=(); OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
+OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
 # Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
 # when the mount goes away. That is deliberate while mounted -- it holds
 # in-flight temporary files and nothing should look inside -- but afterwards it
 # is just an inaccessible directory you own, and it is what makes the whole
 # capture folder refuse to delete in a file manager until you chmod it by hand.
 # It is disposable once unmounted, so take it away.
+# (Under a uid of its own it is fuse-overlayfs's, not closed, and the whole
+# capture the sandbox's anyway: --delete takes care of it.)
 unwork() {
-    [ -d "$CAP/work/work" ] || return 0
-    # Under a uid of its own, the sandbox user's: removed from its namespace.
-    "${AS_OWNER[@]}" chmod u+rwx "$CAP/work/work" 2>/dev/null || return 0
-    "${AS_OWNER[@]}" rm -rf "$CAP/work/work" 2>/dev/null || true
+    [ "$SEPARATE_UID" = 0 ] && [ -d "$CAP/work/work" ] || return 0
+    chmod u+rwx "$CAP/work/work" 2>/dev/null || return 0
+    rm -rf "$CAP/work/work" 2>/dev/null || true
 }
 # fuse-overlayfs's throwaway layer for Proton, never while still mounted.
 rm_proton_layer() {
@@ -2044,7 +2064,7 @@ fuse_overlay() {                     # lower, upper, work, mountpoint
 }
 # Under a uid of its own, sandbox-uid mounts these itself (see there), from
 # the same options, whatever this bwrap supports.
-if [ "${SANDBOX_SEPARATE_UID:-0}" = 1 ] || [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
+if [ "$SEPARATE_UID" = 1 ] || [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
     [ -z "$PROTON" ] || OVERLAY_ARGS+=( --overlay-src "$PROTON" --tmp-overlay /proton )
 else
@@ -2385,7 +2405,7 @@ fi
 # to -- they are yours, and connecting takes write permission -- to the group
 # every sandbox user is in, with an ACL entry their owner may add.
 UID_WRAP=()
-if [ "${SANDBOX_SEPARATE_UID:-0}" = 1 ]; then
+if [ "$SEPARATE_UID" = 1 ]; then
     UIDHELPER="$(helper sandbox-uid)"
     [ -n "$UIDHELPER" ] || { echo "sandbox-uid not found; run install.sh" >&2; exit 1; }
     command -v setfacl >/dev/null || { echo "SANDBOX_SEPARATE_UID needs setfacl (the acl package)" >&2; exit 1; }
@@ -2404,7 +2424,7 @@ if [ "${SANDBOX_SEPARATE_UID:-0}" = 1 ]; then
         echo "                       (./install.sh --restrict-audio sets one up)" >&2
     fi
     UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" launch "$CAP" -- )
-    AS_OWNER=( "$UIDHELPER" run "$CAP" -- )
+    RECLAIMED=0                       # handed over again at launch
 fi
 
 # Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find

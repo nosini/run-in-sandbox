@@ -564,3 +564,25 @@ PY
     } > "$TARGET.tmp" || { echo "Cannot write $TARGET" >&2; exit 1; }
     mv -- "$TARGET.tmp" "$TARGET" || { echo "Cannot save $TARGET" >&2; exit 1; }
 )
+
+# How sandbox-game --stop and sandbox-attach, which must agree, find a sandbox
+# that runs under a uid of its own.
+#
+# Under a uid of its own (SANDBOX_SEPARATE_UID) the outer bwrap runs in the
+# sandbox's namespace instead, as sandbox-uid left it; but its parent is still
+# the sandbox-game that started it, here in ours, which nothing inside any
+# sandbox can be. (A read builtin, not a process, per entry.) Anything of
+# ours could make such a child, though, so sandbox_user checks the rest once
+# the name is known: it runs as the uid that owns that capture's home, which
+# is not ours.
+started_by_us() {                     # $1 = PID
+    local s
+    { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
+    s="${s##*) }"; s="${s#* }"
+    [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
+}
+sandbox_user() {                      # $1 = PID, $2 = NAME
+    local u
+    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
+    [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
+}
