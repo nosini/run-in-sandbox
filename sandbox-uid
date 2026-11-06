@@ -29,7 +29,8 @@ range read from the bottom.
 
 As outer root, before dropping to that uid:
   - The capture's writable folders become the sandbox user's (see own()),
-    and stay so between runs.
+    and stay so between runs, with ACL entries that let you change them by
+    hand all the same, also while it runs (see share()).
   - Folders it may not traverse on the way to anything bwrap binds -- your
     0700 home, /run/user/UID -- are covered, in this namespace only, by an
     empty tmpfs holding just those paths, so bwrap finds them while the rest
@@ -51,6 +52,8 @@ Commands:
   sandbox-uid run CAP -- CMD...    CMD as outer root: owner of your files and
                                    the sandbox's alike (like `podman unshare`);
                                    only for a CAP that has an index
+  sandbox-uid share CAP            after a run: open what the game changed in
+                                   its own folder (CAP/rw) to you again
 """
 import ctypes
 import fcntl
@@ -58,6 +61,8 @@ import json
 import os
 import pwd
 import stat
+import struct
+import subprocess
 import sys
 import time
 
@@ -67,10 +72,10 @@ MS_PRIVATE = 1 << 18
 CLONE_NEWNS, CLONE_NEWUSER = 0x20000, 0x10000000
 CLONE_NEWNET, CLONE_NEWIPC = 0x40000000, 0x8000000
 PR_SET_PDEATHSIG, PR_SET_NO_NEW_PRIVS = 1, 38
-# In CAP once own() has handed all of it over; whatever may give some of it
-# back -- `run`, sandbox-game's reclaim -- removes it, and the next launch
-# looks everything over again.
-HANDED_OVER = ".handed-over"
+# In CAP once own() has handed all of it over and shared it with you; `run`,
+# which may change any of that, removes it, and the next launch does it all
+# again. (".handed-over" was the same before the sharing.)
+HANDED_OVER, OLD_HANDED_OVER = ".shared", ".handed-over"
 # Outer gids for the groups that are not the sandbox's own. Above anything a
 # desktop allocates, and checked against your own gid below.
 CLIENTS_OUTER, RENDER_OUTER = 4000000000, 4000000001
@@ -370,12 +375,14 @@ def served(mounts, uid, gid):
 
 
 def own(cap, srcs, uid, gid, user):
-    """The capture's writable folders become the sandbox user's: in full the
-    first time, and again whenever HANDED_OVER is gone; otherwise only those
-    still wholly yours, which are new."""
+    """The capture's writable folders become the sandbox user's, and are
+    shared with you: in full the first time, and again whenever HANDED_OVER is
+    gone; otherwise only what has become yours since -- a file you moved in,
+    which has no ACL of its own."""
     cap = os.path.realpath(cap)
     stamp = os.path.join(cap, HANDED_OVER)
     whole = not os.path.exists(stamp)
+    shared, given = [], []
     for path, writable in srcs:
         real = os.path.realpath(path)
         if not writable or not (real == cap or real.startswith(cap + "/")) \
@@ -388,17 +395,187 @@ def own(cap, srcs, uid, gid, user):
                  f"capture back to you, as root: chown -R {user}: {cap}")
         if st.st_uid == 0:
             os.lchown(real, uid, gid)
-        elif not whole:
-            continue
+            given.append(real)
+        shared.append(real)
         if stat.S_ISDIR(st.st_mode):
-            hand_over(real, st.st_dev, uid, gid)
+            hand_over(real, st.st_dev, uid, gid, given)
     if whole:
+        share(shared, uid, recurse=True)
         os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o644))
+        try:
+            os.unlink(os.path.join(cap, OLD_HANDED_OVER))
+        except FileNotFoundError:
+            pass
+    else:
+        share(given, uid)
 
 
-def hand_over(top, dev, uid, gid):
+def share(paths, uid, recurse=False):
+    """PATHS -- with RECURSE, and all under them -- get an ACL entry each for
+    you (outer 0) and for the sandbox user, and folders the same as defaults,
+    which all that is made in them takes on: by the game, or by you. You can
+    then change its files by hand, while it runs too, and what you put there
+    it can change in turn.
+
+    It takes the game's umask to keep that up (see inside_launch()): through
+    fuse-overlayfs the mode a file is made with, after the umask, caps every
+    entry. What is copied up from the game's own folder keeps the mode it has
+    there, which keep_shared() makes up for during the run, and `share`
+    after it."""
+    spec = f"u:0:rwX,u:{uid}:rwX,m::rwX"
+    defaults = f",d:u::rwx,d:u:0:rwx,d:u:{uid}:rwx,d:g::rwx,d:m::rwx,d:o::r-x"
+    if recurse:
+        batches = [(["-R", "-m", spec + defaults], paths)]
+    else:
+        # Only folders can have defaults; links have no ACL at all.
+        kinds = [(p, os.lstat(p).st_mode) for p in paths]
+        batches = [(["-m", spec + defaults], [p for p, m in kinds if stat.S_ISDIR(m)]),
+                   (["-m", spec], [p for p, m in kinds if not stat.S_ISDIR(m)
+                                   and not stat.S_ISLNK(m)])]
+    for args, todo in batches:
+        for i in range(0, len(todo), 1000):
+            r = subprocess.run(["setfacl", "-P", *args, "--", *todo[i:i + 1000]])
+            if r.returncode:
+                fail("could not share the sandbox's files with you (setfacl)")
+
+
+ACL_ACCESS, ACL_DEFAULT = "system.posix_acl_access", "system.posix_acl_default"
+ACL_USER_OBJ, ACL_USER, ACL_GROUP_OBJ, ACL_MASK, ACL_OTHER = 1, 2, 4, 0x10, 0x20
+NO_ID = 0xFFFFFFFF
+IN_ATTRIB, IN_MOVED_TO, IN_CREATE = 0x4, 0x80, 0x100
+IN_Q_OVERFLOW, IN_IGNORED, IN_ISDIR = 0x4000, 0x8000, 0x40000000
+IN_ONLYDIR, IN_DONT_FOLLOW = 0x01000000, 0x02000000
+
+
+def acl_unpack(data):
+    """{(tag, id): perm} of an ACL attribute."""
+    return {(tag, i): perm for tag, perm, i in struct.iter_unpack("<HHI", data[4:])}
+
+
+def acl_pack(entries):
+    return struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, perm, i) for (tag, i), perm in sorted(entries.items()))
+
+
+def reshare(path, uid):
+    """share() for one entry of the sandbox user's, as that user: an owner
+    may set its own files' ACLs. One that is not its own -- yours, or a link
+    put in the way -- it cannot change, nor wants to."""
+    try:
+        st = os.lstat(path)
+        if st.st_uid != uid or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            return
+        is_dir = stat.S_ISDIR(st.st_mode)
+        want = 6 | (1 if is_dir or st.st_mode & 0o111 else 0)
+        try:
+            old = os.getxattr(path, ACL_ACCESS, follow_symlinks=False)
+            acl = acl_unpack(old)
+        except OSError:
+            old, m = None, st.st_mode
+            acl = {(ACL_USER_OBJ, NO_ID): m >> 6 & 7, (ACL_GROUP_OBJ, NO_ID): m >> 3 & 7,
+                   (ACL_OTHER, NO_ID): m & 7}
+        for key in ((ACL_USER, 0), (ACL_USER, uid), (ACL_MASK, NO_ID)):
+            acl[key] = acl.get(key, acl.get((ACL_GROUP_OBJ, NO_ID), 0) if key[0] == ACL_MASK
+                               else 0) | want
+        new = acl_pack(acl)
+        if new != old:
+            os.setxattr(path, ACL_ACCESS, new, follow_symlinks=False)
+        if is_dir:
+            try:
+                os.getxattr(path, ACL_DEFAULT, follow_symlinks=False)
+            except OSError:
+                os.setxattr(path, ACL_DEFAULT, acl_pack({
+                    (ACL_USER_OBJ, NO_ID): 7, (ACL_USER, 0): 7, (ACL_USER, uid): 7,
+                    (ACL_GROUP_OBJ, NO_ID): 7, (ACL_MASK, NO_ID): 7, (ACL_OTHER, NO_ID): 5}),
+                    follow_symlinks=False)
+    except OSError:
+        pass                                # gone again, or renamed: share after the run
+
+
+def keep_shared(rw, uid, gid):
+    """Beside the game, as the sandbox user: what appears in RW -- above all
+    what fuse-overlayfs copies up from the game's folder, with the mode it
+    has there -- is shared with you as it comes (see share()), so a save
+    you edit while the game runs may be in a folder the game shipped. Ends
+    with bwrap; the game starts once it watches, or it could miss the first."""
+    parent = os.getpid()
+    ready_r, ready = os.pipe()
+    if os.fork():
+        os.close(ready)
+        os.read(ready_r, 1)                 # or end of file: it gave up
+        os.close(ready_r)
+        return
+    try:
+        os.close(ready_r)
+        devnull = os.open("/dev/null", os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        close_others([ready])
+        unshare(CLONE_NEWNET | CLONE_NEWIPC)
+        libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+        libc.prctl(PR_SET_PDEATHSIG, 15, 0, 0, 0)
+        if os.getppid() != parent:
+            os._exit(0)
+        ino = libc.inotify_init1(os.O_CLOEXEC)
+        if ino < 0:
+            os._exit(0)
+        events = IN_ATTRIB | IN_MOVED_TO | IN_CREATE | IN_ONLYDIR | IN_DONT_FOLLOW
+        dirs = {}
+
+        def watch(top, fix):
+            # Each folder watched before it is read: what arrives in between
+            # is then in one or the other, or both.
+            todo = [top]
+            while todo:
+                d = todo.pop()
+                wd = libc.inotify_add_watch(ino, os.fsencode(d), events)
+                if wd >= 0:
+                    dirs[wd] = d
+                if fix:
+                    reshare(d, uid)
+                try:
+                    with os.scandir(d) as it:
+                        entries = list(it)
+                except OSError:
+                    continue
+                for e in entries:
+                    if e.is_dir(follow_symlinks=False):
+                        todo.append(e.path)
+                    elif fix:
+                        reshare(e.path, uid)
+
+        watch(rw, False)                    # the run before was shared after it
+        os.write(ready, b"1")
+        os.close(ready)
+        while True:
+            data = os.read(ino, 65536)
+            i = 0
+            while i < len(data):
+                wd, mask, _, size = struct.unpack_from("<iIII", data, i)
+                name = data[i + 16:i + 16 + size].rstrip(b"\0")
+                i += 16 + size
+                if mask & IN_Q_OVERFLOW:
+                    watch(rw, True)
+                elif mask & IN_IGNORED:
+                    dirs.pop(wd, None)
+                elif name and wd in dirs:
+                    path = os.path.join(dirs[wd], os.fsdecode(name))
+                    if mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
+                        watch(path, True)   # with whatever it holds already
+                    else:
+                        reshare(path, uid)
+    except BaseException:
+        pass
+    os._exit(0)
+
+
+def hand_over(top, dev, uid, gid, given):
     """Everything under TOP that is yours (outer 0) -- never a stranger's,
-    nor anything mounted there -- becomes the sandbox user's."""
+    nor anything mounted there -- becomes the sandbox user's, and is added
+    to GIVEN."""
     todo = [top]
     while todo:
         try:
@@ -412,6 +589,7 @@ def hand_over(top, dev, uid, gid):
                 continue
             if st.st_uid == 0:
                 os.lchown(e.path, uid, gid)
+                given.append(e.path)
             if stat.S_ISDIR(st.st_mode):
                 todo.append(e.path)
 
@@ -614,11 +792,16 @@ def inside_launch(cap, argv):
             os.close(fd)
     if layers:
         served([mp for mp, *_ in layers], g_uid, g_gid)
+    rw = os.path.join(os.path.realpath(cap), "rw")
+    if any(os.path.realpath(upper) == rw for _, _, upper, _ in layers):
+        keep_shared(rw, g_uid, g_gid)
     os.chdir("/")
     os.setgroups(groups)
     os.setgid(g_gid)
     os.setuid(g_uid)                        # drops every capability with root
     relay_output(g_uid)
+    # What it makes is then open to its group, and so to you (see share()).
+    os.umask(0o002)
     os.execv(argv[0], argv)
 
 
@@ -634,15 +817,24 @@ def main():
     cmd, cap, rest = args[0], args[1], args[2:]
     if rest[:1] == ["--"]:
         rest = rest[1:]
-    if cmd not in ("index", "ids", "run", "launch"):
+    if cmd not in ("index", "ids", "run", "launch", "share"):
         fail(f"unknown command: {cmd}")
     if cmd == "index":
         print(index_of(cap))
         return
-    # `run` gives no capture a uid it did not have: that is SANDBOX_SEPARATE_UID's.
-    lay = layout(cap, allocate=cmd != "run")
+    # `run` and `share` give no capture a uid it did not have: that is
+    # SANDBOX_SEPARATE_UID's.
+    lay = layout(cap, allocate=cmd not in ("run", "share"))
     if cmd == "ids":
         print(lay["uid"], lay["clients"])
+        return
+    if cmd == "share":
+        # Copied up during the run, those files have the mode of the game's
+        # own (see share()). The sandbox user is your uid in there.
+        rw, uid = os.path.join(os.path.realpath(cap), "rw"), os.getuid()
+        enter(lay)
+        if os.path.isdir(rw) and not os.path.islink(rw):
+            share([rw], uid, recurse=True)
         return
     if not rest:
         fail(f"{cmd}: no command")

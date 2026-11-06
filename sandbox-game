@@ -911,7 +911,7 @@ esac
 if [ "$SEPARATE_UID" = 0 ] && [ -f "$CAP/uid" ]; then
     echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
     reclaim "$CAP" || exit 1
-    rm -f "$CAP/uid" "$CAP/.handed-over"
+    rm -f "$CAP/uid" "$CAP/.shared" "$CAP/.handed-over"
 fi
 # Under it, the capture stays the sandbox's between runs. sandbox-game's own
 # changes to it -- an executable copy in rw/, a registry put back -- are rare,
@@ -2038,6 +2038,12 @@ cleanup() {
         # the cleanup here, playtime and exit status with it.
         [[ ! "$p" =~ ^[0-9]+$ ]] || kill "$p" 2>/dev/null || true
         rm -f "$PASTA_PID"
+    fi
+    # Under a uid of its own, what the game changed in its own folder, copied
+    # up with that folder's permissions, is opened to you again: see share in
+    # sandbox-uid.
+    if [ -n "$PLAY_START" ] && [ "$SEPARATE_UID" = 1 ]; then
+        "$UIDHELPER" share "$CAP" || true
     fi
     # One line per launch -- start, seconds played -- for --list. Here rather
     # than after the game, so a crash or a --stop still counts.

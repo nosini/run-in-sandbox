@@ -1024,6 +1024,25 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertIn(b"job-control", out)
         self.assertNotIn(b"no job control", out)
 
+    def test_attach_puts_a_file_where_the_running_game_sees_it(self):
+        name = "put-" + self.base.name
+        (self.game / "save").mkdir()
+        (self.game / "save" / "file1").write_text("shipped")
+        os.chmod(self.game / "save" / "file1", 0o640)
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        mine = self.base / "file1"
+        mine.write_text("edited")
+        result = self.attach(name, "--put", mine, "/game/save/file1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.attach(name, "--exec", "--", "/bin/sh", "-c",
+                             "cat /game/save/file1; stat -c %a /game/save/file1; ls -A /game/save")
+        self.assertEqual(result.stdout.split(), ["edited640", "file1"])
+        self.assertEqual((self.game / "save" / "file1").read_text(), "shipped")
+        # Only a full path inside; none of ours is taken for one.
+        result = self.attach(name, "--put", mine, "save/file1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("full path", result.stderr)
+
     def test_attach_cannot_be_steered_into_another_sandbox(self):
         # A process that names another sandbox's capture home on its command
         # line, the way that sandbox's bwrap does, and that comes first in
@@ -3763,6 +3782,66 @@ class SeparateUidTests(unittest.TestCase):
         self.run_guest("true")
         self.assertEqual((save.stat().st_uid, save.stat().st_ctime_ns),
                          (before.st_uid, before.st_ctime_ns))
+
+    def test_its_files_can_be_edited_by_hand_while_it_runs(self):
+        (self.game / "sv").mkdir()
+        (self.game / "sv" / "shipped").write_text("shipped")
+        name = "edit-" + self.base.name
+        capture = self.home / "game-sandboxes" / name
+        rw = capture / "rw"
+        # Games save in place, and from a loop: this one until told to stop.
+        proc = self.launch_named(name, "/bin/sh", "-c",
+            'printf save > "$HOME/save"; printf slot > /game/sv/slot1; '
+            'printf more >> /game/sv/shipped; echo ready; '
+            'until [ -e "$HOME/done" ]; do sleep 0.05; done; '
+            'printf 1 >> /game/sv/slot1; printf 2 >> /game/sv/added; printf 3 >> "$HOME/save"')
+        uid = self.sandbox_uid(name)
+        # Its files are the sandbox's, and still open to us -- also in a
+        # folder the game came with and one of its files, copied up with the
+        # install's permissions.
+        self.assertEqual((rw / "sv" / "slot1").stat().st_uid, uid)
+        shipped = rw / "sv" / "shipped"
+        for _ in range(100):                # opened to us beside the game
+            if os.access(shipped, os.W_OK) and os.access(shipped.parent, os.W_OK):
+                break
+            time.sleep(0.05)
+        with shipped.open("a") as f:
+            f.write("-edited")
+        # The home is live; the game's folder through --put, into the file a
+        # host path names or into a folder.
+        with (capture / "home" / "save").open("a") as f:
+            f.write("-edited")
+        edited, added = self.base / "slot1", self.base / "added"
+        edited.write_text("put")
+        added.write_text("added")
+        for args in ((edited, rw / "sv" / "slot1"), (added, "/game/sv/")):
+            result = self.attach(name, "--put", *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        (capture / "home" / "done").touch()
+        proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual((rw / "sv" / "slot1").read_text(), "put1")
+        self.assertEqual((rw / "sv" / "added").read_text(), "added2")
+        self.assertEqual((capture / "home" / "save").read_text(), "save-edited3")
+        for f in ("sv/slot1", "sv/added"):
+            self.assertEqual((rw / f).stat().st_uid, uid, f)
+            self.assertTrue(os.access(rw / f, os.W_OK), f)
+        # Straight in rw/, between runs: replaced as an editor does, and a
+        # file moved in from elsewhere, which is handed over at the launch.
+        tmp = rw / "sv" / ".slot1.tmp"
+        tmp.write_text("edited")
+        tmp.replace(rw / "sv" / "slot1")
+        moved = self.base / "moved"
+        moved.write_text("moved")
+        moved.replace(capture / "home" / "moved")
+        result = self.run_guest('cat /game/sv/shipped; printf 4 >> /game/sv/slot1; '
+                                'printf 5 >> "$HOME/moved"', "--name", name)
+        self.assertEqual(result.stdout, "shippedmore-edited")
+        self.assertEqual((rw / "sv" / "slot1").read_text(), "edited4")
+        self.assertEqual((capture / "home" / "moved").stat().st_uid, uid)
+        self.assertEqual((capture / "home" / "moved").read_text(), "moved5")
+        with (capture / "home" / "moved").open("a") as f:
+            f.write("-edited")
 
     def test_its_own_changes_reach_the_sandboxes_files(self):
         # An executable copy in rw/, made by sandbox-game: the capture comes

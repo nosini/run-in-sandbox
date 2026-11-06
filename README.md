@@ -851,6 +851,7 @@ folder; set it for `sandbox-game` and `sandbox-attach` alike.
 sandbox-attach --list                       # what is running
 sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/regedit-fix.exe
 sandbox-attach --shell                      # a shell inside, to look around
+sandbox-attach --put edited.rpgsave /game/www/save/file1.rpgsave
 ```
 
 | Option | |
@@ -859,11 +860,25 @@ sandbox-attach --shell                      # a shell inside, to look around
 | `--name NAME` | which one to attach to; without it, the only one running, or a menu of them |
 | `--shell` | an interactive shell inside, to look around |
 | `--exec CMD...` | run a native Linux command inside instead of a Windows one |
+| `--put FILE DEST` | write FILE over DEST inside, as the game sees it (into DEST when it is a folder); see below |
 
 Host paths under `~/game-sandboxes/<name>/home/` and the tools folder are
 translated to where they appear inside (`$HOME` and `/tools`), so you can paste
 the host path. The capture home is live: anything copied into it shows up in
 the running game at once.
+
+The game's folder is not, always. What the game changed in it is kept in
+`rw/`, and the game sees that through an overlay. The kernel's overlay usually
+shows a change made straight in `rw/` at once, but does not promise to;
+`fuse-overlayfs`, which a game under a [uid of its own](#a-uid-of-its-own-experimental)
+always gets, keeps what it has read, so a save copied into `rw/` while the game
+runs is not seen until it restarts. `--put` goes through the overlay instead,
+as the game does, replacing the file whole; a host path into `rw/` names the
+same file under `/game`:
+
+```sh
+sandbox-attach --put ~/edited.rpgsave ~/game-sandboxes/NAME/rw/www/save/file1.rpgsave
+```
 
 Windows programs are started with Proton's own `wine` binary against the live
 prefix, deliberately **not** with `proton run` — that verb re-enters prefix
@@ -1380,10 +1395,20 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 ### What changes
 
 - A capture's `home/`, `rw/` and Wine prefix belong to the sandbox's user:
-  `ls -l` shows a number such as `150001` as their owner. You can read what
-  the game left open to others. `--delete` and `--reset-install` take care
-  of the rest, and so does `SANDBOX_SEPARATE_UID=0`, which gives the files
-  back for good. To change something in there by hand, run the command as
+  `ls -l` shows a number such as `150001` as their owner, and a `+` for the
+  ACL entries that let you read and change them all the same, also while the
+  game runs. What either of you makes in there gets those entries too, so
+  you can edit a save, or put one there, as you would anywhere else. The game
+  runs with umask 002 for that: the group the files get is the sandbox's own.
+
+  `home/` and the prefix are live: the game sees a change there at once. A
+  change made straight in `rw/` while the game runs it may not see before it
+  restarts, as `fuse-overlayfs` keeps what it has read; `sandbox-attach --put`
+  (see [Attaching to a running game](#attaching-to-a-running-game)) makes one
+  it does. A file you *move* in from elsewhere keeps its own permissions,
+  which the game can read but not change in place; copy it in instead, or it
+  is handed over at the next launch. For anything else,
+  `SANDBOX_SEPARATE_UID=0` gives the files back for good, or run a command as
   the owner of both you and the sandbox:
 
   ```sh

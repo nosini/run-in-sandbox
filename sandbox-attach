@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-attach [--name NAME] [--list] [--shell|--exec] [CMD...]
+# sandbox-attach [--name NAME] --put FILE DEST
 #   Launch a second program inside a sandbox that is already running, in the
 #   same Wine session as the game -- which is what Cheat Engine, regedit or
 #   winetricks need in order to see the game at all.
@@ -28,6 +29,15 @@
 #   sandbox-attach --name witcher3 ~/game-sandboxes/witcher3/home/setup.exe
 #   sandbox-attach --shell                 # a shell inside, to look around
 #   sandbox-attach --exec -- ps -ef        # a native command inside
+#   sandbox-attach --put edited.rpgsave /game/www/save/file1.rpgsave
+#
+#   --put writes a file of yours into the running game's view of its folder,
+#   replacing DEST whole (into it, when DEST is a folder) -- the way to change
+#   a save in the game's folder while it runs. Its changes land in the
+#   capture's rw/, but one made there directly may not reach the game before
+#   it restarts: under SANDBOX_SEPARATE_UID, fuse-overlayfs serves /game and
+#   keeps what it has read. A host path into rw/ or home/ of the capture is
+#   taken as the same file inside.
 #
 # Host paths into the tools folder or ~/game-sandboxes/NAME/home -- which is
 # $HOME inside -- are translated to where they appear in there. Anything copied
@@ -50,7 +60,7 @@ usage() {
     exit "${1:-0}"
 }
 
-NAME=""; MODE=wine; LIST=0
+NAME=""; MODE=wine; LIST=0; PUT=()
 # Must match sandbox-game, which mounts this folder at /tools.
 TOOLS="${SANDBOX_TOOLS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/sandbox-game/tools}"
 while [ "$#" -gt 0 ]; do
@@ -58,6 +68,8 @@ while [ "$#" -gt 0 ]; do
         --list)   LIST=1; shift ;;
         --shell)  MODE=shell; shift ;;
         --exec)   MODE="exec"; shift ;;
+        --put)    [ "$#" -ge 3 ] || { echo "$SELF: --put needs FILE and DEST" >&2; usage 1 >&2; }
+                  MODE=put; PUT=( "$2" "$3" ); shift 3 ;;
         --name)   NAME="$2"; shift 2 ;;
         --name=*) NAME="${1#--name=}"; shift ;;
         -h|--help) usage 0 ;;
@@ -172,6 +184,18 @@ if [ "$MODE" = wine ] && [ "$#" -eq 0 ]; then
         exit 1; }
     set -- "$CE"
 fi
+if [ "$MODE" = put ]; then
+    [ "$#" -eq 0 ] || { echo "$SELF: --put takes no program" >&2; exit 1; }
+    [ -f "${PUT[0]}" ] && [ -r "${PUT[0]}" ] || { echo "$SELF: cannot read ${PUT[0]}" >&2; exit 1; }
+    case "${PUT[1]}" in
+        "$HOME/game-sandboxes/$TNAME/rw") PUT[1]=/game/ ;;
+        "$HOME/game-sandboxes/$TNAME/rw/"*) PUT[1]="/game/${PUT[1]#"$HOME/game-sandboxes/$TNAME/rw/"}" ;;
+        /*) ;;
+        *) echo "$SELF: --put needs DEST as a full path, e.g. /game/save/file1" >&2; exit 1 ;;
+    esac
+    exec < "${PUT[0]}"
+    set -- "${PUT[1]}" "${PUT[0]##*/}"
+fi
 [ "$MODE" = shell ] || [ "$#" -gt 0 ] || { echo "$SELF: nothing to run" >&2; usage 1 >&2; }
 
 # The capture dir is $HOME inside and the tools folder is /tools, so a host
@@ -225,6 +249,17 @@ export WINEPREFIX="${WINEPREFIX:-/compat/pfx}"
 case "$mode" in
     shell) exec /bin/bash --norc --noprofile -i ;;
     exec)  exec "$@" ;;
+    put)
+        # Whole or not at all, should the game read it meanwhile; with the
+        # mode the file it replaces had.
+        dest="$1"; [ ! -d "$dest" ] || dest="${dest%/}/$2"
+        perm="$(stat -c %a -- "$dest" 2>/dev/null || echo 664)"
+        tmp="$(mktemp -- "${dest%/*}/.sandbox-attach.XXXXXX")"
+        if cat > "$tmp" && chmod "$perm" -- "$tmp" && mv -f -- "$tmp" "$dest"; then
+            echo "put $dest"
+        else
+            rm -f -- "$tmp"; exit 1
+        fi ;;
     wine)
         [ -x /proton/files/bin/wine ] || {
             echo "sandbox-attach: /proton/files/bin/wine not found inside" >&2; exit 1; }
