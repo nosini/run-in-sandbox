@@ -1,0 +1,5 @@
+# Experimental: install only on an isolated test system, with the matching
+# root-owned helper and service. Each short invocation inventories current
+# sysfs state under one lock; event ordering never chooses a device number.
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", ACTION=="add|change", RUN+="/usr/local/libexec/sandbox-game/systemd-render-devices"
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", ACTION=="remove", RUN+="/usr/local/libexec/sandbox-game/systemd-render-devices --removed %p"

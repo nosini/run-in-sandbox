@@ -1,0 +1,409 @@
+#!/usr/bin/env -S python3 -I
+"""Experimental administrator helper for systemd-backend render aliases.
+
+Reconcile only root-configured users and live DRM render nodes. No arbitrary
+device, owner, destination or command can be requested on the command line.
+Not installed by install.sh; see experiments/README.md before using it.
+"""
+import argparse
+import ctypes
+from contextlib import ExitStack
+from dataclasses import dataclass
+import errno
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import sys
+
+NODE = re.compile(r"renderD[0-9]{1,7}\Z")
+OBJECT = re.compile(r"([1-9][0-9]{0,9})-(renderD[0-9]{1,7})\Z")
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+PATH_ONLY = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+@dataclass(frozen=True)
+class Paths:
+    config: Path = Path("/etc/sandbox-game/systemd-render-users")
+    state: Path = Path("/run/sandboxgame/render")
+    sysfs: Path = Path("/sys")
+    devices: Path = Path("/dev/dri")
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def root_directory(path, create=False, mode=0o755):
+    """Walk root-owned, non-writable ancestors without following symlinks."""
+    require(path.is_absolute(), "administrator paths must be absolute")
+    fd = os.open("/", DIRECTORY)
+    try:
+        for index, part in enumerate(path.parts[1:]):
+            require(part not in (".", ".."), "invalid administrator path")
+            if create:
+                try:
+                    os.mkdir(part, mode if index == len(path.parts) - 2 else 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            opened = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = opened
+            st = os.fstat(fd)
+            require(st.st_uid == 0 and not st.st_mode & 0o022,
+                    f"administrator directory is writable by another user: {path}")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_root_file(parent, name, limit=65536):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        st = os.fstat(fd)
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == 0
+                and not st.st_mode & 0o022 and st.st_nlink == 1,
+                f"unsafe administrator file: {name}")
+        data = os.read(fd, limit + 1)
+        require(len(data) <= limit, f"administrator file too large: {name}")
+        return data
+    finally:
+        os.close(fd)
+
+
+def users(paths):
+    try:
+        parent = root_directory(paths.config.parent)
+        try:
+            data = read_root_file(parent, paths.config.name).decode("ascii")
+        finally:
+            os.close(parent)
+    except FileNotFoundError:
+        return set()
+    result = set()
+    for line in data.splitlines():
+        value = line.partition("#")[0].strip()
+        if not value:
+            continue
+        require(value.isascii() and value.isdecimal() and 0 < int(value) < 2**32 - 1,
+                "configuration must contain non-root numeric UIDs, one per line")
+        result.add(int(value))
+    require(len(result) <= 32, "at most 32 configured users are supported")
+    return result
+
+
+def device(paths, name):
+    """Validate both sysfs directions and the real character-device inode."""
+    require(NODE.fullmatch(name), "not a render-node name")
+    source = paths.devices / name
+    node = source.lstat()
+    require(stat.S_ISCHR(node.st_mode) and os.major(node.st_rdev) == 226
+            and os.minor(node.st_rdev) >= 128
+            and name == f"renderD{os.minor(node.st_rdev)}", "not a DRM render device")
+    sysdev = (paths.sysfs / "class/drm" / name).resolve(strict=True)
+    require(sysdev.is_relative_to(paths.sysfs / "devices"), "unexpected DRM sysfs path")
+    reverse = (paths.sysfs / "dev/char" /
+               f"226:{os.minor(node.st_rdev)}").resolve(strict=True)
+    require(reverse == sysdev, "sysfs/device identity mismatch")
+    require((sysdev / "subsystem").resolve(strict=True) == paths.sysfs / "class/drm",
+            "device is not in the DRM subsystem")
+    require((sysdev / "dev").read_text().strip() == f"226:{os.minor(node.st_rdev)}",
+            "sysfs device number mismatch")
+    generation = sysdev.stat()
+    try:
+        label = os.getxattr(source, "security.selinux", follow_symlinks=False).hex()
+    except OSError as error:
+        if error.errno not in (errno.ENODATA, errno.EOPNOTSUPP):
+            raise
+        label = None
+    return {"source_dev": node.st_dev, "source_ino": node.st_ino,
+            "sys_dev": generation.st_dev, "sys_ino": generation.st_ino,
+            "sys_path": "/" + str(sysdev.relative_to(paths.sysfs)),
+            "rdev": node.st_rdev, "label": label}
+
+
+def inventory(paths):
+    result = {}
+    try:
+        entries = sorted((paths.sysfs / "class/drm").iterdir())
+    except FileNotFoundError:
+        return result
+    for entry in entries:
+        if not NODE.fullmatch(entry.name):
+            continue
+        try:
+            result[entry.name] = device(paths, entry.name)
+        except (FileNotFoundError, RuntimeError) as error:
+            print(f"systemd-render-devices: withholding {entry.name}: {error}", file=sys.stderr)
+    return result
+
+
+def inode_permissions(fd, uid, mode):
+    # fchownat(AT_EMPTY_PATH) acts on the held O_PATH inode, not its published
+    # name. chmod via proc is likewise an inode reference, never a device open.
+    if libc.fchownat(fd, b"", uid, uid, 0x1000) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), "fchownat alias inode")
+    os.chmod(f"/proc/self/fd/{fd}", mode)
+
+
+def same_inode(a, b):
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def copy_directory_label(source, target):
+    try:
+        label = os.getxattr(source, "security.selinux")
+    except OSError as error:
+        if error.errno in (errno.ENODATA, errno.EOPNOTSUPP):
+            return
+        raise
+    os.setxattr(target, "security.selinux", label)
+
+
+def runtime_mount(path):
+    """The published tree must not persist or hardlink into another store."""
+    fd = root_directory(path)
+    try:
+        buffer = ctypes.create_string_buffer(256)
+        if libc.fstatfs(fd, buffer) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), "statfs render store")
+        require(ctypes.c_long.from_buffer(buffer).value == 0x01021994,
+                "render store must be a dedicated tmpfs")
+        require(os.fstat(fd).st_dev != path.parent.stat().st_dev,
+                "render store must have its own filesystem")
+        require(not os.fstatvfs(fd).f_flag & os.ST_NODEV,
+                "render store must permit device nodes")
+    finally:
+        os.close(fd)
+
+
+def entries(fd):
+    # Open after acquiring the transaction lock: a Btrfs directory handle
+    # opened before waiting can enumerate a view predating the previous writer.
+    current = os.open(".", DIRECTORY, dir_fd=fd)
+    try:
+        return os.listdir(current)
+    finally:
+        os.close(current)
+
+
+def user_directory(state, uid):
+    name = str(uid)
+    try:
+        os.mkdir(name, 0o700, dir_fd=state)
+    except FileExistsError:
+        pass
+    fd = os.open(name, DIRECTORY, dir_fd=state)
+    try:
+        require(os.fstat(fd).st_uid in (0, uid), "unexpected user-directory owner")
+        os.fchown(fd, uid, uid)
+        os.fchmod(fd, 0o700)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def retire(objects, state, key):
+    match = OBJECT.fullmatch(key)
+    require(match, "invalid private object name")
+    uid, name = int(match[1]), match[2]
+    fd = os.open(key, PATH_ONLY, dir_fd=objects)
+    try:
+        st = os.fstat(fd)
+        require(stat.S_ISCHR(st.st_mode), "private alias object is not a device")
+        # Do this BEFORE unlink: all hardlinks and existing bind mounts now
+        # deny new opens, even if the user moved the published name elsewhere.
+        inode_permissions(fd, 0, 0)
+        try:
+            directory = os.open(str(uid), DIRECTORY, dir_fd=state)
+        except FileNotFoundError:
+            directory = None
+        if directory is not None:
+            try:
+                try:
+                    published = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    published = None
+                if published is not None and same_inode(st, published):
+                    os.unlink(name, dir_fd=directory)
+            finally:
+                os.close(directory)
+    finally:
+        os.close(fd)
+    os.unlink(key, dir_fd=objects)
+    try:
+        os.unlink(key + ".json", dir_fd=objects)
+    except FileNotFoundError:
+        pass
+
+
+def publish(objects, directory, key, name):
+    # Build the hardlink in the root-only directory, then rename it atomically
+    # over the destination. Never chown/chmod or follow a user-supplied path.
+    temporary = ".publish-" + secrets.token_hex(16)
+    os.link(key, temporary, src_dir_fd=objects, dst_dir_fd=objects,
+            follow_symlinks=False)
+    try:
+        os.replace(temporary, name, src_dir_fd=objects, dst_dir_fd=directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=objects)
+        except FileNotFoundError:
+            pass
+
+
+def create(paths, objects, key, uid, source):
+    # A crash may have removed the old device but left its private metadata.
+    # This name is inside the root-only store; unlink never follows a target.
+    try:
+        os.unlink(key + ".json", dir_fd=objects)
+    except FileNotFoundError:
+        pass
+    os.mknod(key, stat.S_IFCHR, source["rdev"], dir_fd=objects)
+    fd = os.open(key, PATH_ONLY, dir_fd=objects)
+    try:
+        if source["label"] is not None:
+            os.setxattr(str(paths.state / ".objects" / key), "security.selinux",
+                        bytes.fromhex(source["label"]), follow_symlinks=False)
+        inode_permissions(fd, uid, 0o600)
+        metadata = {"source": source, "inode": os.fstat(fd).st_ino}
+        data = (json.dumps(metadata, sort_keys=True) + "\n").encode()
+        meta = os.open(key + ".json", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                       os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=objects)
+        try:
+            os.write(meta, data)
+        finally:
+            os.close(meta)
+    finally:
+        os.close(fd)
+
+
+def activation_state(state, action):
+    require(action in ("keep", "enable", "disable"), "invalid activation action")
+    if action != "keep":
+        fd = os.open(".enabled", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=state)
+        try:
+            st = os.fstat(fd)
+            require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1
+                    and not st.st_mode & 0o022, "unsafe activation marker")
+            os.ftruncate(fd, 0)
+            os.write(fd, b"1\n" if action == "enable" else b"0\n")
+        finally:
+            os.close(fd)
+    try:
+        return read_root_file(state, ".enabled") == b"1\n"
+    except FileNotFoundError:
+        return False
+
+
+def reconcile(paths=Paths(), removed=None, activation="keep"):
+    with ExitStack() as cleanup:
+        state = root_directory(paths.state, create=True)
+        cleanup.callback(os.close, state)
+        lock = os.open(".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                       0o600, dir_fd=state)
+        cleanup.callback(os.close, lock)
+        st = os.fstat(lock)
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1
+                and not st.st_mode & 0o022, "unsafe alias lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        parent = root_directory(paths.state.parent)
+        try:
+            copy_directory_label(parent, state)
+        finally:
+            os.close(parent)
+        objects = root_directory(paths.state / ".objects", create=True, mode=0o700)
+        cleanup.callback(os.close, objects)
+        os.fchmod(objects, 0o700)
+        for name in entries(objects):
+            if re.fullmatch(r"\.publish-[0-9a-f]{32}", name):
+                os.unlink(name, dir_fd=objects)
+        enabled = activation_state(state, activation)
+        allowed = users(paths) if enabled else set()
+        live = inventory(paths) if allowed else {}
+        existing = {name for name in entries(objects) if OBJECT.fullmatch(name)}
+        desired = {f"{uid}-{name}": (uid, name, source)
+                   for uid in allowed for name, source in live.items()}
+        for key in sorted(existing):
+            expected = desired.get(key)
+            try:
+                metadata = json.loads(read_root_file(objects, key + ".json"))
+                st = os.stat(key, dir_fd=objects, follow_symlinks=False)
+                keep = (expected is not None and metadata["source"] == expected[2]
+                        and metadata["source"]["sys_path"] != removed
+                        and stat.S_ISCHR(st.st_mode) and st.st_rdev == expected[2]["rdev"]
+                        and st.st_uid == expected[0] and st.st_gid == expected[0]
+                        and st.st_ino == metadata["inode"])
+            except (FileNotFoundError, ValueError, KeyError):
+                keep = False
+            if not keep:
+                retire(objects, state, key)
+                existing.remove(key)
+        # Revoked users keep no searchable caller-owned directory. Do not
+        # recursively delete any unexpected user-created contents as root.
+        for entry in entries(state):
+            if entry.isascii() and entry.isdecimal() and int(entry) not in allowed:
+                directory = os.open(entry, DIRECTORY, dir_fd=state)
+                try:
+                    os.fchown(directory, 0, 0)
+                    os.fchmod(directory, 0)
+                finally:
+                    os.close(directory)
+        for key, (uid, name, source) in sorted(desired.items()):
+            directory = user_directory(state, uid)
+            try:
+                copy_directory_label(state, directory)
+                if key not in existing:
+                    create(paths, objects, key, uid, source)
+                # A device can disappear while we prepare its alias. Never
+                # publish a source snapshot that has already become obsolete.
+                try:
+                    current = device(paths, name)
+                except (FileNotFoundError, RuntimeError):
+                    current = None
+                if current != source:
+                    retire(objects, state, key)
+                    continue
+                fd = os.open(key, PATH_ONLY, dir_fd=objects)
+                try:
+                    inode_permissions(fd, uid, 0o600)
+                finally:
+                    os.close(fd)
+                publish(objects, directory, key, name)
+            finally:
+                os.close(directory)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--removed", help="udev DEVPATH being removed; compare only, never opened")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--enable", action="store_true", help="activate reconciliation for this mount")
+    actions.add_argument("--disable", action="store_true", help="disable reconciliation and revoke aliases")
+    args = parser.parse_args()
+    require(os.geteuid() == 0, "this administrator helper must run as root")
+    if args.removed is not None:
+        require(args.removed.startswith("/devices/") and len(args.removed) <= 4096
+                and "\0" not in args.removed and "\n" not in args.removed,
+                "invalid removed DEVPATH")
+    os.umask(0o077)
+    runtime_mount(Paths().state)
+    reconcile(removed=args.removed,
+              activation="enable" if args.enable else "disable" if args.disable else "keep")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, UnicodeError) as error:
+        sys.exit(f"systemd-render-devices: {error}")

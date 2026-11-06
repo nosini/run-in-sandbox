@@ -1,0 +1,10 @@
+[Unit]
+Description=Private runtime filesystem for experimental sandbox render aliases
+Before=sandbox-game-render-devices.service
+
+[Mount]
+What=tmpfs
+Where=/run/sandboxgame/render
+Type=tmpfs
+Options=mode=0755,nosuid,noexec,dev,size=4M,nr_inodes=16384
+DirectoryMode=0755

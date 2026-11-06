@@ -1,0 +1,46 @@
+module sandbox_game_systemd_probe 1.0;
+
+# Development fixture for openSUSE's existing service domains. The services
+# remain enforcing and retain their Varlink ownership and namespace checks.
+# No game domain, per-game label, or permission for the game is introduced.
+require {
+    type systemd_mountfsd_t;
+    type systemd_nsresourced_t;
+    attribute user_home_type;
+    attribute user_tmp_type;
+    type init_var_run_t;
+    type nsfs_t;
+    type unconfined_t;
+    class dir { read getattr ioctl };
+    class file { read open ioctl };
+    class capability { setuid setgid sys_admin sys_chroot };
+    class cap_userns { sys_admin sys_ptrace };
+    class user_namespace create;
+}
+
+# mountfsd validates caller-owned directories by FD, clones them, and creates
+# an idmapping namespace. It does not need general access to home file data.
+# Any type of the user's home: a game, Proton or the launcher's tools may be
+# in ~/.local/share (data_home_t) as much as anywhere else there.
+allow systemd_mountfsd_t user_home_type:dir { read getattr ioctl };
+# PID 1 creates the render tmpfs mountpoint/parent with this runtime type.
+allow systemd_mountfsd_t init_var_run_t:dir { read getattr ioctl };
+allow systemd_mountfsd_t nsfs_t:file { read open ioctl };
+# Namespace-map proc files carry the namespace creator's process type.
+allow systemd_mountfsd_t unconfined_t:file read;
+allow systemd_mountfsd_t self:capability { setuid setgid sys_admin sys_chroot };
+allow systemd_mountfsd_t self:cap_userns { sys_admin sys_ptrace };
+allow systemd_mountfsd_t self:user_namespace create;
+
+# nsresourced receives the detached directory mount to register it in the
+# managed namespace. Its existing policy already permits namespace allocation.
+allow systemd_nsresourced_t user_home_type:dir { getattr ioctl };
+allow systemd_nsresourced_t self:capability sys_admin;
+
+allow systemd_nsresourced_t init_var_run_t:dir { getattr ioctl };
+
+# The launcher delegates the user's runtime directory (/run/user/UID), where
+# the Wayland and playback-only Pulse sockets are; only those are bound into
+# the sandbox.
+allow systemd_mountfsd_t user_tmp_type:dir { read getattr ioctl };
+allow systemd_nsresourced_t user_tmp_type:dir { getattr ioctl };
