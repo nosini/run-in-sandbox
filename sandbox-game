@@ -930,6 +930,8 @@ if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
         echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME no longer runs as a subordinate uid; giving its files back" >&2
     fi
     reclaim "$CAP" || exit 1
+    # Another sandbox may get that uid later: its ACL entries go too.
+    "$(helper sandbox-uid)" forget "$CAP" || exit 1
     rm -f "$CAP/uid" "$CAP/.shared" "$CAP/.handed-over"
 fi
 if [ "$SEPARATE_UID" = systemd ] && [ ! -f "$CAP/managed-uid" ]; then

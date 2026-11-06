@@ -846,12 +846,24 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertTrue((self.home / "game-sandboxes" / name / "home" / "attached").is_file())
         # Nor is it in the sandbox's pid 1, bwrap, which keeps its own
         # environment: the outer bwrap's child, read from out here.
+        # (Started from our namespace; under a uid of its own it runs in another.)
+        def bwrap(p):
+            return (p / "cmdline").read_bytes().split(b"\0")[0].endswith(b"bwrap")
         outer = next(p for p in Path("/proc").glob("[0-9]*")
-                     if (p / "cmdline").read_bytes().split(b"\0")[0].endswith(b"bwrap")
+                     if bwrap(p)
                      and f"game-sandboxes/{name}/home".encode() in (p / "cmdline").read_bytes()
-                     and os.path.samestat(os.stat(p / "ns" / "user"), os.stat("/proc/self/ns/user")))
-        pid1 = (outer / "task" / outer.name / "children").read_text().split()[0]
-        self.assertEqual(Path("/proc", pid1, "environ").read_bytes(), b"")
+                     and os.path.samestat(
+                         os.stat(Path("/proc", (p / "stat").read_text().rsplit(")", 1)[1].split()[1],
+                                      "ns", "user")),
+                         os.stat("/proc/self/ns/user")))
+        pid1 = next(k for k in (outer / "task" / outer.name / "children").read_text().split()
+                    if bwrap(Path("/proc", k)))
+        try:
+            self.assertEqual(Path("/proc", pid1, "environ").read_bytes(), b"")
+        except PermissionError:
+            # Under a uid of its own it is that uid's, closed to us: env -i
+            # does the same there, and the run as us shows it.
+            self.assertIn(self.env.get("SANDBOX_SEPARATE_UID"), ("1", "systemd"))
         # A descriptor handed to sandbox-attach stays outside: what is attached
         # runs without Landlock, and namespaces do not revoke an open file.
         secret = os.open(self.home / "host-secret", os.O_RDONLY)
@@ -3736,6 +3748,34 @@ class SeparateUidTests(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout.split()
         return int(out[0])
 
+    def test_forget_does_not_allocate_a_uid(self):
+        capture = self.home / "game-sandboxes" / "no-uid"
+        capture.mkdir(parents=True)
+        result = subprocess.run([str(ROOT / "sandbox-uid"), "forget", str(capture)],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no uid of its own", result.stderr)
+        self.assertFalse((capture / "uid").exists())
+
+    def test_switch_keeps_the_uid_if_acl_cleanup_fails(self):
+        self.run_guest('mkdir -p "$HOME/closed"; printf save > "$HOME/closed/save"')
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        # Give the capture back first, then make one directory unreadable.
+        subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--",
+                        "chown", "-hR", "0:0", str(capture)],
+                       env=self.env, check=True, timeout=15)
+        closed = capture / "home" / "closed"
+        closed.chmod(0)
+        try:
+            self.env["SANDBOX_SEPARATE_UID"] = "0"
+            result = self.cli("--headless", self.game, "/bin/true", check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not remove the sandbox's ACL entries", result.stderr)
+            self.assertTrue((capture / "uid").exists())
+        finally:
+            closed.chmod(0o700)
+
     def test_game_runs_as_a_user_of_its_own(self):
         (self.game / "original").write_text("original")
         secret = self.base / "secret"
@@ -3977,10 +4017,45 @@ class SystemdBackendTests(unittest.TestCase):
     cli = SecurityTests.cli
     run_guest = SecurityTests.run_guest
     launch_named = SecurityTests.launch_named
+    attach = SecurityTests.attach
 
     def setUp(self):
         SecurityTests.setUp(self)
         self.env["SANDBOX_SEPARATE_UID"] = "systemd"
+
+    # sandbox-attach and capture upkeep as for the other backends.
+    test_attach_uses_target_root_and_cwd = SecurityTests.test_attach_uses_target_root_and_cwd
+    test_attached_programs_take_nothing_from_the_game = \
+        SecurityTests.test_attached_programs_take_nothing_from_the_game
+    test_attached_programs_live_above_the_game = \
+        SecurityTests.test_attached_programs_live_above_the_game
+    test_game_cannot_use_the_attach_socket = SecurityTests.test_game_cannot_use_the_attach_socket
+    test_attach_runs_a_terminal_and_passes_the_exit_status_on = \
+        SecurityTests.test_attach_runs_a_terminal_and_passes_the_exit_status_on
+    test_attach_puts_a_file_where_the_running_game_sees_it = \
+        SecurityTests.test_attach_puts_a_file_where_the_running_game_sees_it
+    test_attach_cannot_be_steered_into_another_sandbox = \
+        SecurityTests.test_attach_cannot_be_steered_into_another_sandbox
+    test_list_reset_install_and_delete = SecurityTests.test_list_reset_install_and_delete
+
+    def test_attached_programs_run_as_the_game_without_our_groups(self):
+        name = "attach-ids-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        result = self.attach(name, "--exec", "--", "/bin/sh", "-c",
+                             'id -u; id -G; printf x > "$HOME/attached"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [str(os.getuid()), str(os.getgid())])
+        capture = self.home / "game-sandboxes" / name
+        self.assertEqual((capture / "home" / "attached").stat().st_uid, os.getuid())
+        self.cli("--stop", name)
+
+    def test_sandbox_uid_run_is_just_the_command(self):
+        self.run_guest("true")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        result = subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--", "id", "-u"],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.stdout.strip(), str(os.getuid()), result.stderr)
 
     def running_uid(self, *cmdline):
         """The host uid of the one process whose command line is CMDLINE."""
@@ -4077,6 +4152,19 @@ class SystemdBackendTests(unittest.TestCase):
                                  {os.getuid()})
                 self.assertFalse((capture / "uid").exists())
                 self.assertEqual((capture / "managed-uid").exists(), value != "0")
+                # Nor do ACL entries for the subordinate uid stay behind.
+                named = set()
+                for path in [capture, *capture.rglob("*")]:
+                    if path.is_symlink():
+                        continue
+                    for attr in ("system.posix_acl_access", "system.posix_acl_default"):
+                        try:
+                            data = os.getxattr(path, attr)
+                        except OSError:
+                            continue
+                        named |= {i for tag, _, i in struct.iter_unpack("<HHI", data[4:])
+                                  if tag == 2}
+                self.assertLessEqual(named, {os.getuid()})
 
     def test_a_source_it_cannot_reach_is_refused(self):
         result = self.cli("--headless", "--ro", "/root", "/mnt", self.game, "/bin/true",

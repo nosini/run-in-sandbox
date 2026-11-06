@@ -1465,7 +1465,8 @@ make it.
 The setting sticks to a capture, as `1` does. Switching a capture between
 `1`, `systemd` and `0` keeps its files: from `1` they are given back to you
 first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
-kernel's mark as well.
+kernel's mark as well. The old subordinate uid's ACL entries are removed
+before that uid is released.
 
 It is not ready for general use yet. It needs systemd 261.4 or later, on
 SELinux systems a policy module for the two services, and for the GPU copies
@@ -1474,8 +1475,12 @@ is set up once, as root: see [`systemd-backend/`](systemd-backend/README.md).
 
 `--net` works as with the other backends, with the same rules. The game's
 network belongs to the sandbox's namespace rather than to bwrap's, and pasta
-runs as the sandbox's transient uid too. Not yet: `sandbox-attach`, and a
-check that refuses unsuitable systemd versions. With a single user id mapped on files,
+runs as the sandbox's transient uid too. `sandbox-attach`, including `--put`,
+works as with the other backends. Use `--put` to change a live overlay;
+editing `rw/` directly is not guaranteed to reach the running game.
+`sandbox-uid run CAP -- CMD...` runs the command as you, since the capture
+already belongs to you. A check that refuses unsuitable systemd versions is
+still to come. With a single user id mapped on files,
 what the game creates gets your uid as its group id too.
 
 ## Preferences file format

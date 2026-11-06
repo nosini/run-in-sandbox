@@ -83,10 +83,11 @@ frame callback and independently recorded playback, plus rejected source/monitor
 recording and module loading. Rendering is llvmpipe on the VM; hardware
 acceleration, DMA-BUF, Vulkan and gamescope/Proton remain unvalidated.
 
-Next: validate accelerated rendering/gamescope on suitable hardware and integrate
-namespace lifetime, capture migration, attachment and maintenance. Full network
-policy integration, IPv6, other source filesystems and concurrent games remain
-open. See the experiment notes for exact coverage and setup/cleanup commands.
+The launcher integration below covers namespace lifetime, capture migration,
+attachment, maintenance and network policy. Administrator packaging and
+accelerated rendering/gamescope validation remain open, along with public IPv6
+traffic and other source filesystems. See the experiment notes for exact
+coverage and setup/cleanup commands.
 
 ### Implementation handoff: next steps
 
@@ -122,9 +123,8 @@ per-game SELinux policy or relabeling step.
      server there is no sound, as under `1`. `/dev/dri/renderD*` binds become
      `/run/sandboxgame/render/UID/renderD*` copies when present, otherwise a
      warning and software rendering.
-   - `sandbox-attach` refuses this backend (its `nsenter` fails on the child
-     namespace's `setgroups deny`). `--stop` and `--list` work: you hold every
-     capability in the managed namespace and the namespaces below it.
+   - `--stop` and `--list` work: you hold every capability in the managed
+     namespace and the namespaces below it. Attachment is covered in step 3.
    - The SELinux module (now `systemd-backend/sandbox_game_systemd.te`)
      grants on the `user_home_type` and `user_tmp_type` attributes instead of
      `user_home_t` alone: the launcher's tools and Steam's Proton live in
@@ -178,19 +178,25 @@ per-game SELinux policy or relabeling step.
      results were identical under `systemd` and `0`. The VM has no IPv6, so
      public IPv6 traffic itself is untested.
 
-3. **Integrate attachment and capture maintenance.**
-   - Adapt `sandbox-attach` (including `--put`), `sandbox-uid run`, deletion and
-     reset operations to backend metadata and live namespace identity. The
-     sandbox is found through `CAP/.managed-userns` (see step 2). Entering
-     it needs a different approach from `nsenter`: you hold every
-     capability in the managed namespace and below, but the child namespace
-     denies `setgroups`.
-   - Keep `sandbox-attach --put` as the supported way to change live overlay
-     content. Editing raw `rw/` during a run remains unsupported.
-   - Switching a capture between backends works (see step 1). Still to
-     decide: whether the subordinate uid's ACL entries, left on files after
-     `reclaim`, should be removed, and whether a large capture's first switch
-     needs progress output.
+3. **Attachment and capture maintenance: done (2026-11-06).**
+   - `sandbox-attach` finds the live namespace through `CAP/.managed-userns`
+     (see step 2), selects bwrap's child rather than the output relay or pasta
+     keeper, and enters the allocated namespace first. There it drops the
+     supplementary groups before entering bwrap's child namespace, which
+     denies `setgroups`, as the game's uid and gid.
+   - `--exec`, shells, terminal relaying and `--put` work. Keep `--put` as
+     the supported way to change live overlay content; editing raw `rw/`
+     during a run remains unsupported. Attached programs keep the existing
+     environment, descriptor and Landlock protections.
+   - `sandbox-uid run` runs directly as you for a managed capture, whose
+     files already belong to you. List, reset-install and delete use the
+     existing maintenance path and are covered under this backend too.
+   - Switching away from a subordinate uid removes its access/default ACL
+     entries after reclaim, before releasing the uid. Failure retains the
+     uid metadata so cleanup can be retried. Cleanup never allocates a uid.
+     Progress output for large first migrations remains an optional improvement.
+   - VM verification with SELinux enforcing: full suite 267 tests, 3 skipped.
+     New cleanup regressions also fail when their fixes are removed.
 
 4. **Package administrator setup and backend availability checks.**
    - Integrate the render helper, dedicated tmpfs mount, service, UID allowlist
@@ -237,11 +243,13 @@ per-game SELinux policy or relabeling step.
   2026-11-06; PID 1 included). On it, the setup for this backend is: build and
   `systemd-backend/README.md` (module, `modprobe overlay`, sockets) and, for
   the GPU, `systemd-backend/render-devices.md`.
-- After the step 1 and step 2 tests, the module, render helper and test
+- After the step 1, step 2 and step 3 tests, the module, render helper and test
   captures were removed and the sockets stopped. The services' BPF pins from that run were
   left in place: they were created with the policy loaded.
 - Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` and
   `systemd-net-20261106/` (suite logs and state), and the earlier
   `systemd-{2614,access,render-lifecycle,media}-20261106/`.
+  Attachment/maintenance logs are in `systemd-attach-20261106/`;
+  `final-suite.log` covers the finished step 3 changes.
   Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
   cross-project findings, including policy/overlay startup ordering and labels.

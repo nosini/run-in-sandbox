@@ -56,9 +56,12 @@ Commands:
   sandbox-uid launch CAP -- BWRAP...
   sandbox-uid run CAP -- CMD...    CMD as outer root: owner of your files and
                                    the sandbox's alike (like `podman unshare`);
-                                   only for a CAP that has an index
+                                   only for a CAP that has an index (one of
+                                   the systemd backend's: just CMD, as you)
   sandbox-uid share CAP            after a run: open what the game changed in
                                    its own folder (CAP/rw) to you again
+  sandbox-uid forget CAP           once CAP is yours again: drop the ACL
+                                   entries its uid had
   sandbox-uid managed-available    whether the systemd backend's services
                                    answer
   sandbox-uid managed-adopt CAP    make CAP's overlay readable to the kernel's
@@ -508,6 +511,40 @@ def reshare(path, uid):
                     follow_symlinks=False)
     except OSError:
         pass                                # gone again, or renamed: share after the run
+
+
+def forget(cap, uid):
+    """Once the capture is yours again (see reclaim in sandbox-game), the ACL
+    entries share() gave the sandbox's uid go: another sandbox may get that
+    uid later. Yours stay; they grant you nothing you do not have."""
+    cap = os.path.realpath(cap)
+    dev = os.lstat(cap).st_dev
+    todo = [cap]
+    while todo:
+        d = todo.pop()
+        try:
+            with os.scandir(d) as it:
+                entries = [d] + [e.path for e in it]
+        except OSError as e:
+            fail(f"could not remove the sandbox's ACL entries from {d}: {e}")
+        for path in entries:
+            try:
+                st = os.lstat(path)
+            except OSError as e:
+                fail(f"could not inspect {path} while removing the sandbox's ACL entries: {e}")
+            if st.st_dev != dev or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                continue
+            if stat.S_ISDIR(st.st_mode) and path != d:
+                todo.append(path)
+            for name in (ACL_ACCESS, ACL_DEFAULT):
+                try:
+                    acl = acl_unpack(os.getxattr(path, name, follow_symlinks=False))
+                except OSError as e:
+                    if e.errno in (errno.ENODATA, errno.ENOTSUP):
+                        continue
+                    fail(f"could not read {path}'s ACL: {e}")
+                if acl.pop((ACL_USER, uid), None) is not None:
+                    os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
 
 
 def keep_shared(rw, uid, gid):
@@ -1325,16 +1362,28 @@ def main():
     cmd, cap, rest = args[0], args[1], args[2:]
     if rest[:1] == ["--"]:
         rest = rest[1:]
-    if cmd not in ("index", "ids", "run", "launch", "share"):
+    if cmd not in ("index", "ids", "run", "launch", "share", "forget"):
         fail(f"unknown command: {cmd}")
+    if cmd == "run" and os.path.exists(os.path.join(cap, "managed-uid")) \
+       and not os.path.exists(os.path.join(cap, "uid")):
+        # The systemd backend's: its files are yours on disk already.
+        if not rest:
+            fail("run: no command")
+        try:
+            os.execvp(rest[0], rest)
+        except OSError as e:
+            fail(f"{rest[0]}: {e.strerror}")
     if cmd == "index":
         print(index_of(cap))
         return
-    # `run` and `share` give no capture a uid it did not have: that is
+    # Maintenance gives no capture a uid it did not have: that is
     # SANDBOX_SEPARATE_UID's.
-    lay = layout(cap, allocate=cmd not in ("run", "share"))
+    lay = layout(cap, allocate=cmd not in ("run", "share", "forget"))
     if cmd == "ids":
         print(lay["uid"], lay["clients"])
+        return
+    if cmd == "forget":
+        forget(cap, lay["uid"])
         return
     if cmd == "share":
         # Copied up during the run, those files have the mode of the game's
