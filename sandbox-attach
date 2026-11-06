@@ -168,6 +168,12 @@ else
     exit 1
 fi
 
+# The systemd backend's namespaces are not ours to enter the way these are
+# (see TODO.md).
+[ ! -f "$HOME/game-sandboxes/$TNAME/managed-uid" ] || {
+    echo "$SELF: '$TNAME' runs under SANDBOX_SEPARATE_UID=systemd, which sandbox-attach does not support yet" >&2
+    exit 1; }
+
 [ "$MODE" != wine ] || [ "$TPROTON" = 1 ] || {
     echo "$SELF: '$TNAME' is not a Proton sandbox; use --exec for a native command" >&2
     exit 1; }

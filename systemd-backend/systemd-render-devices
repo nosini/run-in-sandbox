@@ -3,7 +3,7 @@
 
 Reconcile only root-configured users and live DRM render nodes. No arbitrary
 device, owner, destination or command can be requested on the command line.
-Not installed by install.sh; see experiments/README.md before using it.
+Not installed by install.sh; see render-devices.md beside it before using it.
 """
 import argparse
 import ctypes

@@ -134,39 +134,15 @@ upper directory are not made safe by switching from FUSE to the kernel.
 
 ## Enforcing SELinux, sockets and GPU access
 
-The storage probe now passes with **SELinux enforcing** and the explicit
-[`sandbox_game_systemd_probe.te`](selinux/sandbox_game_systemd_probe.te) module.
-No service domain is permissive. This is a development module for the tested
-openSUSE policy, not an installer-ready policy for every distribution. It
-extends existing service domains, with no game labels or per-game policies.
-It permits directory/namespace descriptor handling and the privileged
-namespace operations the delegation services perform. Their Varlink caller
-ownership checks remain in place. It does not grant general home-file data
-access to mountfsd; the process-type file read rule is for namespace proc files.
-
-On an isolated test system with SELinux development tools installed:
-
-```sh
-probe_dir="$HOME/run-in-sandbox/builds/systemd-probe"
-mkdir -p "$probe_dir"
-checkmodule -M -m -o "$probe_dir/sandbox_game_systemd_probe.mod" \
-  experiments/selinux/sandbox_game_systemd_probe.te
-semodule_package -o "$probe_dir/sandbox_game_systemd_probe.pp" \
-  -m "$probe_dir/sandbox_game_systemd_probe.mod"
-sudo semodule -i "$probe_dir/sandbox_game_systemd_probe.pp"
-```
-
-Install the module before the first start of the private test daemons, and
-preload overlayfs before starting nsresourced. Initializing its BPF policy while
-SELinux still denies the required capability can leave a fail-closed overlay
-restriction pinned even after installing the module. The disposable VM fixture
-was stopped and its own v2 pins recreated after correcting this setup order;
-the complete storage probe then passed again.
-
-Installing the module is an administrator operation, once for the services.
-The individual probes and sandbox allocations run unprivileged. After testing,
-remove it with `sudo semodule -r sandbox_game_systemd_probe`. Keep these build
-outputs in a scratch directory; none belongs in the source tree.
+The storage probe now passes with **SELinux enforcing** and the service policy
+module now in [`systemd-backend/`](../systemd-backend/README.md), which also says
+how to install and remove it. No service domain is permissive. It extends the
+existing service domains, with no game labels or per-game policies. Install it
+before the services first start, and load overlayfs before nsresourced starts:
+initializing its BPF policy while SELinux still denied the required capability
+left a fail-closed overlay restriction pinned even after the module was
+installed. The disposable VM fixture was stopped and its own v2 pins recreated
+after correcting this setup order; the complete storage probe then passed again.
 
 [`systemd-access.py`](systemd-access.py) allocates two managed namespaces at
 once, each with its own mapped storage. It tests a caller-owned 0600 Unix
@@ -201,7 +177,7 @@ python3 -I experiments/systemd-access.py \
   --device-dir /path/to/render-alias
 ```
 
-The follow-up [render-device lifecycle prototype](render-devices.md) now
+The follow-up [render-device lifecycle prototype](../systemd-backend/render-devices.md) now
 provides an administrator helper, root-controlled private inode references,
 a dedicated runtime tmpfs, and systemd/udev fixtures. It tests removal and
 regrant against an alias already bound into a running protected client, with

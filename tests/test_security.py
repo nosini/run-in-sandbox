@@ -3923,6 +3923,134 @@ class SeparateUidTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+def systemd_backend():
+    """Why the systemd backend cannot run here, or None."""
+    result = subprocess.run([str(ROOT / "sandbox-uid"), "managed-available"],
+                            capture_output=True, text=True)
+    return result.stderr.strip() or None if result.returncode else None
+
+
+@unittest.skipIf(systemd_backend(), systemd_backend())
+class SystemdBackendTests(unittest.TestCase):
+    """SANDBOX_SEPARATE_UID=systemd: a transient uid of systemd-nsresourced's,
+    the capture idmapped by systemd-mountfsd and still ours on disk."""
+    reclaim = SecurityTests.reclaim
+    cli = SecurityTests.cli
+    run_guest = SecurityTests.run_guest
+    launch_named = SecurityTests.launch_named
+
+    def setUp(self):
+        SecurityTests.setUp(self)
+        self.env["SANDBOX_SEPARATE_UID"] = "systemd"
+
+    def running_uid(self, *cmdline):
+        """The host uid of the one process whose command line is CMDLINE."""
+        want = "\0".join(cmdline) + "\0"
+        for p in Path("/proc").glob("[0-9]*"):
+            try:
+                if (p / "cmdline").read_text() == want:
+                    return p.stat().st_uid
+            except OSError:
+                continue
+        self.fail(f"no process {cmdline}")
+
+    def test_game_runs_as_a_transient_user_and_its_files_stay_ours(self):
+        (self.game / "original").write_text("original")
+        (self.game / "gone").write_text("gone")
+        (self.game / "dir").mkdir()
+        (self.game / "dir" / "old").write_text("old")
+        name = "nsres-" + self.base.name
+        script = ('printf changed > /game/original; rm /game/gone; '
+                  'rm -r /game/dir; mkdir /game/dir; printf new > /game/dir/new; '
+                  'printf save > "$HOME/save"; echo ready; exec sleep 30.25')
+        proc = self.launch_named(name, "/bin/sh", "-ec", script)
+        uids = [self.running_uid("sleep", "30.25")]
+        self.cli("--stop", name)
+        proc.communicate(timeout=15)
+        proc = self.launch_named(name, "/bin/sh", "-ec", 'echo ready; cat /game/original; echo; '
+                                 'ls /game/dir; test ! -e /game/gone; exec sleep 30.5')
+        uids.append(self.running_uid("sleep", "30.5"))
+        self.cli("--stop", name)
+        out, _ = proc.communicate(timeout=15)
+        self.assertEqual(out.split(), ["changed", "new"])
+        # Each launch its own uid, of the service's range, never ours.
+        for uid in uids:
+            self.assertIn(uid, range(0x80000, 0x70000000))
+        self.assertNotEqual(uids[0], uids[1])
+        capture = self.home / "game-sandboxes" / name
+        self.assertEqual({p.lstat().st_uid for p in capture.rglob("*")}, {os.getuid()})
+        self.assertEqual((capture / "home" / "save").read_text(), "save")
+        self.assertEqual((self.game / "original").read_text(), "original")
+        self.assertTrue((capture / "managed-uid").exists())
+        self.assertFalse((capture / "work" / "work").exists())
+        # Nothing of ours was opened up to let it through.
+        for path in (self.base, self.home, self.game, self.game / "original"):
+            acl = subprocess.run(["getfacl", "-cp", str(path)], capture_output=True,
+                                 text=True, check=True).stdout
+            self.assertNotRegex(acl, r"(?m)^(user|group):[^:]+:", path)
+
+    def test_game_sees_only_its_own_ids_and_no_setup_descriptors(self):
+        result = self.run_guest('id -u; id -G; ls /proc/self/fd; '
+                                'grep -E "^(CapEff|Seccomp):" /proc/self/status')
+        lines = result.stdout.split("\n")
+        self.assertEqual(lines[0], str(os.getuid()))
+        self.assertEqual(lines[1], str(os.getgid()))
+        self.assertEqual(lines[2:6], ["0", "1", "2", "3"])
+        self.assertIn("CapEff:\t0000000000000000", result.stdout)
+        self.assertIn("Seccomp:\t2", result.stdout)
+
+    def test_game_can_reopen_its_output(self):
+        out = self.base / "out"
+        with out.open("w") as f:
+            rc = subprocess.run(
+                [str(ROOT / "sandbox-game"), "--headless", str(self.game),
+                 "/bin/sh", "-ec", "echo reopened > /dev/stdout"],
+                env=self.env, stdout=f, stderr=subprocess.DEVNULL, timeout=15).returncode
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.read_text(), "reopened\n")
+
+    def test_switching_backends_keeps_the_capture(self):
+        (self.game / "dir").mkdir()
+        (self.game / "dir" / "old").write_text("old")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        # Each with what the switch to it says. The first to run replaces the
+        # folder: under a subordinate uid through fuse-overlayfs, whose mark
+        # for that the kernel's overlayfs does not read.
+        steps = [("systemd", None)] if separate_uid_missing() else [
+            ("1", None), ("systemd", "no longer runs as a subordinate uid")]
+        steps += [(None, None),
+                  ("0", "no longer runs under the systemd backend"), ("systemd", None)]
+        self.env["SANDBOX_SEPARATE_UID"] = steps[0][0]
+        self.run_guest('rm -r /game/dir; mkdir /game/dir; printf new > /game/dir/new; '
+                       'printf save > "$HOME/save"')
+        for value, said in steps[1:]:
+            with self.subTest(value=value):
+                if value is None:
+                    del self.env["SANDBOX_SEPARATE_UID"]
+                else:
+                    self.env["SANDBOX_SEPARATE_UID"] = value
+                result = self.run_guest('ls /game/dir; cat "$HOME/save"')
+                self.assertEqual(result.stdout.split(), ["new", "save"])
+                if said:
+                    self.assertIn(said, result.stderr)
+                self.assertEqual({p.lstat().st_uid for p in capture.rglob("*")},
+                                 {os.getuid()})
+                self.assertFalse((capture / "uid").exists())
+                self.assertEqual((capture / "managed-uid").exists(), value != "0")
+
+    def test_a_source_it_cannot_reach_is_refused(self):
+        result = self.cli("--headless", "--ro", "/root", "/mnt", self.game, "/bin/true",
+                          check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot reach /root", result.stderr)
+
+    def test_network_is_refused_for_now(self):
+        result = self.cli("--headless", "--net", self.game, "/bin/true", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--net does not work with SANDBOX_SEPARATE_UID=systemd", result.stderr)
+
+
 if __name__ == "__main__":
     if not shutil.which("bwrap"):
         raise SystemExit("Run on the host: bwrap is required")

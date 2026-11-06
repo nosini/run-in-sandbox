@@ -8,8 +8,8 @@ VM's desktop compositor or audio graph. Hardware discovery is disabled in the
 private WirePlumber instance; the graph has only a synthetic sink and source.
 
 Use the dedicated VM setup from [README.md](README.md) and the
-[render-helper instructions](render-devices.md). The delegation daemons and
-workers must be the tested 261.4 versions, with the development SELinux module
+[render-helper instructions](../systemd-backend/render-devices.md). The delegation daemons and
+workers must be the tested 261.4 versions, with the [service SELinux module](../systemd-backend/README.md)
 installed before the first daemon start. Load overlayfs before starting the
 namespace service as described in [README.md](README.md). The module includes directory-FD access for `init_var_run_t`, which
 PID 1 may assign when it creates the runtime mountpoint's parent. Earlier tests

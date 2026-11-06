@@ -44,6 +44,11 @@ Sockets it must connect to (Wayland for gamescope, the sandbox sound server)
 need write permission for the CLIENTS group; sandbox-game grants that with an
 ACL entry, which the socket's owner may add without root.
 
+SANDBOX_SEPARATE_UID=systemd is another way to the same end, with no
+/etc/subuid and no fuse-overlayfs (see "The systemd backend" below): the
+game's uid is a transient one of systemd-nsresourced's, and its folders stay
+yours on disk, idmapped to it by systemd-mountfsd.
+
 Commands:
   sandbox-uid index CAP            print CAP's index, allocating it once
   sandbox-uid ids CAP              print "UID CLIENTS_GID" on the host,
@@ -54,12 +59,21 @@ Commands:
                                    only for a CAP that has an index
   sandbox-uid share CAP            after a run: open what the game changed in
                                    its own folder (CAP/rw) to you again
+  sandbox-uid managed-available    whether the systemd backend's services
+                                   answer
+  sandbox-uid managed-adopt CAP    make CAP's overlay readable to the kernel's
+                                   overlayfs (once, on switching to systemd)
+  sandbox-uid managed-launch CAP -- BWRAP...
 """
+import array
 import ctypes
+import errno
 import fcntl
 import json
 import os
 import pwd
+import re
+import socket
 import stat
 import struct
 import subprocess
@@ -805,6 +819,383 @@ def inside_launch(cap, argv):
     os.execv(argv[0], argv)
 
 
+# ---- the systemd backend ---------------------------------------------------
+#
+# systemd-nsresourced gives an unprivileged caller a user namespace mapped to
+# a transient range of 64K host uids, and systemd-mountfsd idmapped mounts of
+# folders the caller owns for it, which show the caller's files as that
+# namespace's root's. The game is that root, mapped once more, in a child
+# namespace, to the uid it always saw:
+#
+#   game uid YOUR_UID  =  managed root  =  a transient host uid, this launch's
+#   managed root, through an idmapped mount  =  you, on disk
+#
+# So the capture stays yours on disk, between runs and during them, and the
+# kernel's overlayfs serves the game's folders. Everything of yours that is not
+# delegated stays as closed to the game as your permissions make it, and
+# every launch gets a range of its own, gone with its namespace.
+NSRESOURCE = "/run/systemd/io.systemd.NamespaceResource"
+MOUNTFS = "/run/systemd/io.systemd.MountFileSystem"
+SYS_MOVE_MOUNT, SYS_FSOPEN, SYS_FSCONFIG, SYS_FSMOUNT = 429, 430, 431, 432
+MOVE_MOUNT_F_EMPTY_PATH, FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING = 4, 0, 1
+FSCONFIG_CMD_CREATE, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV = 6, 2, 4
+PR_SET_DUMPABLE = 4
+
+
+class VarlinkError(Exception):
+    pass
+
+
+def varlink(path, method, parameters, fds=()):
+    """One Varlink call, descriptors going both ways: (parameters, fds)."""
+    received = []
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC) as s:
+            s.settimeout(30)
+            s.connect(path)
+            request = json.dumps({"method": method, "parameters": parameters}).encode() + b"\0"
+            sent = s.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                          array.array("i", fds))] if fds else [])
+            s.sendall(request[sent:])
+            reply = b""
+            while b"\0" not in reply:
+                data, ancillary, flags, _ = s.recvmsg(
+                    65536, socket.CMSG_SPACE(16 * array.array("i").itemsize),
+                    socket.MSG_CMSG_CLOEXEC)
+                for level, kind, value in ancillary:
+                    if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                        ids = array.array("i")
+                        ids.frombytes(value[:len(value) - len(value) % ids.itemsize])
+                        received += ids
+                if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                    raise VarlinkError("truncated reply")
+                if not data:
+                    raise VarlinkError("no reply")
+                reply += data
+                if len(reply) > 1 << 20:
+                    raise VarlinkError("reply too long")
+        response = json.loads(reply.split(b"\0", 1)[0])
+        if "error" in response:
+            raise VarlinkError(f"{response['error']} {json.dumps(response.get('parameters', {}))}")
+        return response.get("parameters", {}), received
+    except BaseException:
+        for fd in received:
+            os.close(fd)
+        raise
+
+
+def managed_available():
+    """Both services answer (their sockets start them)."""
+    for path, interface in ((NSRESOURCE, "io.systemd.NamespaceResource"),
+                            (MOUNTFS, "io.systemd.MountFileSystem")):
+        try:
+            reply, fds = varlink(path, "org.varlink.service.GetInterfaceDescription",
+                                 {"interface": interface})
+        except (OSError, VarlinkError) as e:
+            return f"{path}: {e}"
+        for fd in fds:
+            os.close(fd)
+        if interface == "io.systemd.MountFileSystem" \
+           and "MountDirectory" not in reply.get("description", ""):
+            return "systemd-mountfsd cannot mount directories (systemd 258 or later can)"
+    return None
+
+
+def managed_namespace(name):
+    """A user namespace, by descriptor, with a range of nsresourced's: made
+    empty by a child that hands it over and exits, then given its 64K ids."""
+    ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            ours.close()
+            unshare(CLONE_NEWUSER)
+            fd = os.open("/proc/self/ns/user", os.O_RDONLY | os.O_CLOEXEC)
+            socket.send_fds(theirs, [b"ns"], [fd])
+            os._exit(0)
+        except BaseException as e:
+            os.write(2, f"sandbox-uid: {e}\n".encode())
+        os._exit(1)
+    theirs.close()
+    try:
+        _, fds, _, _ = socket.recv_fds(ours, 16, 1, socket.MSG_CMSG_CLOEXEC)
+    finally:
+        ours.close()
+        os.waitpid(pid, 0)
+    if len(fds) != 1:
+        fail("cannot make a user namespace")
+    try:
+        _, extra = varlink(NSRESOURCE, "io.systemd.NamespaceResource.AllocateUserRange", {
+            "name": name, "mangleName": True, "size": 65536, "target": 0,
+            "userNamespaceFileDescriptor": 0}, fds)
+    except (OSError, VarlinkError) as e:
+        os.close(fds[0])
+        fail(f"systemd-nsresourced gave no user namespace: {e}")
+    for fd in extra:
+        os.close(fd)
+    return fds[0]
+
+
+def delegate(path, ns, read_only):
+    """A detached mount of PATH, a folder of yours, idmapped for NS: your
+    files its root's."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        reply, fds = varlink(MOUNTFS, "io.systemd.MountFileSystem.MountDirectory", {
+            "directoryFileDescriptor": 0, "userNamespaceFileDescriptor": 1, "mode": "root",
+            "readOnly": read_only, "allowInteractiveAuthentication": False}, [fd, ns])
+    except (OSError, VarlinkError) as e:
+        fail(f"systemd-mountfsd would not mount {path} for the sandbox: {e}")
+    finally:
+        os.close(fd)
+    index = reply.get("mountFileDescriptor")
+    mnt = fds.pop(index) if type(index) is int and 0 <= index < len(fds) else None
+    for extra in fds:
+        os.close(extra)
+    if mnt is None:
+        fail(f"systemd-mountfsd returned no mount for {path}")
+    return mnt
+
+
+def mount_points():
+    """Every mount point here, decoded."""
+    out = set()
+    with open("/proc/self/mountinfo") as f:
+        for line in f:
+            out.add(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), line.split()[4]))
+    return out
+
+
+def canonical(argv):
+    """ARGV with every source bwrap opens on the host taken to its real
+    path: bwrap resolves them itself, and what is delegated is mounted where
+    a link leads, not where it is."""
+    out, i = argv[:1], 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--" or not a.startswith("--"):
+            out += argv[i:]
+            break
+        n = ARITY.get(a, 0)
+        args = argv[i + 1:i + 1 + n]
+        if a in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind",
+                 "--dev-bind-try", "--overlay-src") and os.path.lexists(args[0]):
+            args[0] = os.path.realpath(args[0])
+        elif a == "--overlay":
+            args[:2] = [os.path.realpath(p) for p in args[:2]]
+        out += [a, *args]
+        i += 1 + n
+    return out
+
+
+def reachable(path, want):
+    """Whether a uid that is neither the owner of PATH and its folders nor in
+    their group may get there and use it (WANT: os.R_OK and the like), by
+    their permissions for others."""
+    d = ""
+    for part in path.split("/")[1:-1]:
+        d += "/" + part
+        if not os.stat(d).st_mode & 0o001:
+            return False
+    mode = os.stat(path).st_mode
+    if stat.S_ISDIR(mode):
+        want |= os.X_OK
+    return all(mode & bit for ok, bit in ((os.R_OK, 0o004), (os.W_OK, 0o002), (os.X_OK, 0o001))
+               if want & ok)
+
+
+def delegations(argv, specs):
+    """[(folder, writable)] to delegate, parents first, so that every source
+    of ARGV and every layer of SPECS can be reached and used by the managed
+    root: a folder of yours itself, or the folder of yours it is in.
+    mountfsd mounts only that folder, without what is mounted below it."""
+    me, mounts = os.getuid(), mount_points()
+    needs = [(p, w) for p, w in sources(argv)]
+    for _, lowers, upper, work in specs:
+        needs += [(p, False) for p in lowers]
+        if upper is not None:
+            # One mount for both, or overlayfs cannot rename between them.
+            needs.append((os.path.commonpath([upper, work]), True))
+    want = {}
+    for path, writable in needs:
+        st = os.stat(path)
+        parent = os.path.dirname(path)
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == me:
+            folder = path
+        elif os.stat(parent).st_uid == me:
+            folder = parent
+        elif reachable(path, 0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
+                       else os.R_OK | (os.W_OK if writable else 0)):
+            continue                        # a device or socket: bwrap needs only the way
+        else:
+            fail(f"the sandbox's user cannot reach {path}, and neither it nor its folder "
+                 "is yours to share with it")
+        want[folder] = want.get(folder, False) or writable
+    out = []
+    for folder in sorted(want, key=len):
+        # One already delegated covers it, unless a mount lies in between.
+        cover = next((f for f in reversed(out) if folder.startswith(f[0].rstrip("/") + "/")),
+                     None)
+        if cover and (cover[1] or not want[folder]) and not any(
+                m == folder or (m.startswith(cover[0].rstrip("/") + "/")
+                                and folder.startswith(m.rstrip("/") + "/"))
+                for m in mounts):
+            continue
+        out.append((folder, want[folder]))
+    return out
+
+
+def attach(fd, path):
+    check(libc.syscall(SYS_MOVE_MOUNT, fd, b"", -100, os.fsencode(path),
+                       MOVE_MOUNT_F_EMPTY_PATH), path)
+
+
+def place(delegated):
+    """Each delegated folder's mount where the folder is. One the managed
+    root cannot get to -- in your 0700 home, say -- is first covered, in this
+    namespace alone, by an empty tmpfs holding just the folders on the way."""
+    tops = {}
+    for path, _ in delegated:
+        if any(path.startswith(p.rstrip("/") + "/") for p, _ in delegated if p != path):
+            continue                        # in another one: placed with it
+        d = ""
+        for part in path.split("/")[1:-1]:
+            d += "/" + part
+            if not os.access(d, os.X_OK):
+                tops[path] = d
+                break
+    covered = set()
+    for top in sorted(set(tops.values()), key=len):
+        if not any(top.startswith(c + "/") for c in covered):
+            mount("tmpfs", top, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755")
+            covered.add(top)
+    for path, fd in delegated:
+        if path in tops:
+            d = ""
+            for part in path.split("/")[1:]:
+                d += "/" + part
+                if len(d) > len(tops[path]) and not os.path.isdir(d):
+                    os.mkdir(d, 0o755)
+        attach(fd, path)
+        os.close(fd)
+
+
+def kernel_overlay(mp, lowers, upper, work):
+    """overlayfs at MP, set up through descriptors: no commas or colons in a
+    path read as anything else. Its errors are in the context's log."""
+    ctx = libc.syscall(SYS_FSOPEN, b"overlay", 1)
+    check(-1 if ctx < 0 else 0, "fsopen overlay")
+
+    def conf(cmd, key=None, value=None):
+        if libc.syscall(SYS_FSCONFIG, ctx, cmd, key and key.encode(),
+                        value and os.fsencode(value), 0) < 0:
+            e = ctypes.get_errno()
+            log = b""
+            try:
+                os.set_blocking(ctx, False)
+                while msg := os.read(ctx, 4096):
+                    log += msg + b"; "
+            except OSError:
+                pass
+            fail(f"cannot mount the overlay for {mp}: {os.strerror(e)} {log.decode(errors='replace')}")
+
+    try:
+        # bwrap names the bottom layer first, overlayfs the top one.
+        for lower in reversed(lowers):
+            conf(FSCONFIG_SET_STRING, "lowerdir+", lower)
+        conf(FSCONFIG_SET_STRING, "upperdir", upper)
+        conf(FSCONFIG_SET_STRING, "workdir", work)
+        conf(FSCONFIG_SET_FLAG, "userxattr")
+        conf(FSCONFIG_CMD_CREATE)
+        fd = libc.syscall(SYS_FSMOUNT, ctx, 1, MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV)
+        check(-1 if fd < 0 else 0, f"fsmount {mp}")
+    finally:
+        os.close(ctx)
+    attach(fd, mp)
+    os.close(fd)
+
+
+def managed_launch(cap, argv):
+    me, my_gid = os.getuid(), os.getgid()
+    argv = canonical(argv)
+    mounts = os.path.join(os.path.realpath(cap), ".mounts")
+    argv, specs = overlays(argv, mounts)
+    if specs:
+        os.makedirs(mounts, exist_ok=True)
+    wanted = delegations(argv, specs)
+    ns = managed_namespace(f"sandbox-game-{os.getpid()}")
+    delegated = [(path, delegate(path, ns, not writable)) for path, writable in wanted]
+    # In there, root: but not yours, so none of your files is ours but
+    # through those mounts. setns leaves the ids unmapped until changed.
+    check(libc.setns(ns, CLONE_NEWUSER), "setns")
+    os.close(ns)
+    os.setgroups([])
+    os.setresgid(0, 0, 0)
+    os.setresuid(0, 0, 0)
+    unshare(CLONE_NEWNS)
+    mount(None, "/", None, MS_REC | MS_PRIVATE)
+    place(delegated)
+    if specs:
+        mount("tmpfs", mounts, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755")
+    for mp, lowers, upper, work in specs:
+        os.mkdir(mp)
+        if upper is None:
+            upper, work = mp + ".upper", mp + ".work"
+            for d in (upper, work):
+                os.mkdir(d, 0o700)
+        kernel_overlay(mp, lowers, upper, work)
+    # What is yours of standard output and error, the game could not reopen.
+    relay_output(0)
+    # The game's own namespace inside, its root seen as your uid: what the
+    # game always was. Changing to root above cleared dumpability, without
+    # which the map files would be the initial namespace's root's.
+    check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
+    unshare(CLONE_NEWUSER)
+    for name, text in (("setgroups", "deny"), ("uid_map", f"{me} 0 1\n"),
+                       ("gid_map", f"{my_gid} 0 1\n")):
+        with open(f"/proc/self/{name}", "w") as f:
+            f.write(text)
+    check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
+    os.chdir("/")
+    os.execv(argv[0], argv)
+
+
+def managed_adopt(cap):
+    """CAP/rw as the kernel's overlayfs reads it. fuse-overlayfs -- the
+    subordinate-uid backend's, or this script's fallback -- marks a folder
+    the game replaced as opaque in a way of its own, which overlayfs ignores,
+    and the folder's old files would show through again. Its whiteouts are
+    overlayfs's own. Both kinds of marks are kept: fuse-overlayfs reads
+    overlayfs's too, so the capture can go back."""
+    rw = os.path.join(os.path.realpath(cap), "rw")
+    if not os.path.isdir(rw) or os.path.islink(rw):
+        return
+    dev = os.lstat(rw).st_dev
+    todo = [rw]
+    while todo:
+        d = todo.pop()
+        try:
+            opaque = os.getxattr(d, "user.fuseoverlayfs.opaque", follow_symlinks=False) == b"y"
+        except OSError:
+            opaque = False
+        marker = os.path.join(d, ".wh..wh..opq")
+        if opaque or os.path.lexists(marker):
+            os.setxattr(d, "user.overlay.opaque", b"y", follow_symlinks=False)
+            if os.path.lexists(marker):
+                os.unlink(marker)
+        with os.scandir(d) as it:
+            for e in it:
+                st = e.stat(follow_symlinks=False)
+                if st.st_dev != dev:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    todo.append(e.path)
+                elif e.name.startswith(".wh.") and stat.S_ISREG(st.st_mode):
+                    # A whiteout fuse-overlayfs could not make as a device.
+                    os.unlink(e.path)
+                    os.mknod(os.path.join(d, e.name[4:]), stat.S_IFCHR | 0o000, 0)
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == "--inside":
@@ -812,6 +1203,21 @@ def main():
         if rest[:1] == ["--"]:
             rest = rest[1:]
         inside_launch(cap, rest)
+    if args == ["managed-available"]:
+        why = managed_available()
+        if why:
+            fail(f"the systemd backend is not available: {why}")
+        return
+    if len(args) >= 2 and args[0] in ("managed-adopt", "managed-launch"):
+        cap, rest = args[1], args[2:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        if args[0] == "managed-adopt":
+            managed_adopt(cap)
+            return
+        if not rest:
+            fail("managed-launch: no command")
+        managed_launch(cap, rest)
     if len(args) < 2:
         fail(__doc__.split("Commands:")[1])
     cmd, cap, rest = args[0], args[1], args[2:]

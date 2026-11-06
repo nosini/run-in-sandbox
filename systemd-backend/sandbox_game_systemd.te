@@ -1,6 +1,7 @@
-module sandbox_game_systemd_probe 1.0;
+module sandbox_game_systemd 1.0;
 
-# Development fixture for openSUSE's existing service domains. The services
+# For systemd-mountfsd and systemd-nsresourced, as openSUSE Tumbleweed's
+# policy confines them; see README.md here. Extends their existing domains. The services
 # remain enforcing and retain their Varlink ownership and namespace checks.
 # No game domain, per-game label, or permission for the game is introduced.
 require {

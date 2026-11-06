@@ -47,3 +47,175 @@ To settle first:
   the directory API. Keep the subordinate-uid backend as the fallback.
 - Even the kernel's overlay does not promise that a change made straight in
   `rw/` during a run is seen; keep `sandbox-attach --put`.
+
+### First experiment (2026-11-06)
+
+The standalone [systemd backend probe](experiments/README.md) now exercises
+managed allocation, idmapped game/capture directories, kernel overlay copy-up,
+persistence across allocations, and a child namespace running bwrap with the
+existing seccomp and Landlock helpers. Those mechanism checks passed on a
+development VM; the launcher is unchanged.
+
+The complete probe fails on systemd 261.3: its transient-ID write restriction
+can be bypassed by the proposed child namespace. Stock SELinux policy also
+blocks directory delegation; mechanism testing required temporary exceptions
+for the two service domains, removed afterward. A follow-up test with the
+openSUSE 261.4 daemons and their matching workers/library passed the complete
+probe, including the child-namespace restriction. Enforcing SELinux policy
+was subsequently tested with a small service-wide policy module: all probes
+pass with SELinux enforcing. Idmapped socket access needs no ACL changes and
+preserves the transient peer credentials. A caller-owned render-device alias
+allows a DRM ioctl with no supplementary groups. Managed pasta passes DNS,
+public IPv4 HTTP and private/host-route prohibitions. These are synthetic
+fixtures, not real game rendering or display/audio protocol tests.
+
+The [GPU lifecycle prototype](systemd-backend/render-devices.md) adds a root helper,
+udev/systemd fixtures and a dedicated runtime tmpfs. Its 21 lifecycle tests and
+live bind-mounted-alias allowlist/mount-stop revocation/regrant tests pass with
+SELinux enforcing. Stopping the service also prevents queued events regranting.
+The real udev change hook and runtime mount recreation also pass; physical
+unplug/replug, reboot ordering and production packaging still need validation.
+
+The [display/audio probe](experiments/media.md) now passes a real Wayland/EGL
+window and playback-only Pulse clients through managed idmaps, bwrap, seccomp
+and Landlock with SELinux enforcing. It checks rendered pixels, a compositor
+frame callback and independently recorded playback, plus rejected source/monitor
+recording and module loading. Rendering is llvmpipe on the VM; hardware
+acceleration, DMA-BUF, Vulkan and gamescope/Proton remain unvalidated.
+
+Next: validate accelerated rendering/gamescope on suitable hardware and integrate
+namespace lifetime, capture migration, attachment and maintenance. Full network
+policy integration, IPv6, other source filesystems and concurrent games remain
+open. See the experiment notes for exact coverage and setup/cleanup commands.
+
+### Implementation handoff: next steps
+
+`SANDBOX_SEPARATE_UID=systemd` is now a selectable launch path (step 1
+below). The installer is unchanged; the administrator pieces (service SELinux
+policy, render-copy helper) are in `systemd-backend/`, set up by hand.
+One-time administrator setup is accepted (including service SELinux policy and
+GPU provisioning); ordinary launches must remain unprivileged. There is no
+per-game SELinux policy or relabeling step.
+
+1. **Opt-in launch path: done (2026-11-06).**
+   - `sandbox-uid managed-launch CAP -- BWRAP...` takes the bwrap command
+     `sandbox-game` builds. It delegates each folder of yours that bwrap reads
+     from (or the folder of yours a file or socket is in), read-only unless a
+     writable bind or an overlay's upper/work needs it, and mounts them back at
+     their own paths. Paths you can't reach get a tmpfs covering them in that
+     namespace only, as `stage()` does. It then mounts kernel overlays
+     (`fsopen`, `lowerdir+`, `userxattr`), relays output, enters the child
+     namespace and execs bwrap in the same process, so no setup descriptors or
+     helper processes outlive it. mountfsd clones only one mount, so a folder
+     with another mount between it and an already delegated one gets its own
+     delegation. Sources that are neither yours nor reachable stop the launch.
+   - `CAP/managed-uid` (storage format `1`) makes the setting stick, as
+     `CAP/uid` does. Switching backends keeps the capture. From `1`,
+     `reclaim` runs first. On entering `systemd`, `managed-adopt` adds
+     `user.overlay.opaque` where fuse-overlayfs left
+     `user.fuseoverlayfs.opaque` or `.wh..wh..opq` (the kernel reads neither),
+     and turns `.wh.NAME` files into device whiteouts. fuse-overlayfs reads the
+     kernel's marks once `work/work` is gone, which `unwork` now also does for
+     this backend. Unavailable services stop the launch before anything changes.
+   - The Wayland and playback-only Pulse sockets reach the game through
+     `/run/user/UID` delegated read-only. No ACLs; without the sandbox's Pulse
+     server there is no sound, as under `1`. `/dev/dri/renderD*` binds become
+     `/run/sandboxgame/render/UID/renderD*` copies when present, otherwise a
+     warning and software rendering.
+   - `--net` stops the launch, and `sandbox-attach` refuses this backend (its
+     `nsenter` fails on the child namespace's `setgroups deny`). `--stop` and
+     `--list` work: you hold every capability in the managed namespace and the
+     namespaces below it. `sandbox_user` recognises the process only by its
+     uid being in nsresourced's range. Replace that with the launch's own
+     namespace in step 2.
+   - The SELinux module (now `systemd-backend/sandbox_game_systemd.te`)
+     grants on the `user_home_type` and `user_tmp_type` attributes instead of
+     `user_home_t` alone: the launcher's tools and Steam's Proton live in
+     `data_home_t`, the sockets in `user_tmp_t`.
+   - Tested on the VM (systemd 261.4 from the repository, SELinux enforcing):
+     a native payload writes, exits and relaunches under another transient
+     range with its data intact, and on disk everything stays the caller's.
+     Also tested: real Wayland (`vkcube` on GNOME), a DRM ioctl through the
+     render copy, Proton with its throwaway `/proton` overlay, switching
+     `1 -> systemd -> unset -> 0 -> systemd`, and launches killed during setup
+     (no leftover processes, allocations or mounts). `SystemdBackendTests` in
+     `tests/test_security.py` cover this and skip without the services. The
+     full suite passed: 245 tests, 3 skipped.
+   - Not yet tested: a caller whose gid differs from their uid. mountfsd maps
+     the caller's uid number for gids too, so new files get gid = uid.
+     `--host-x11` delegates `$HOME` itself for the X authority file
+     (`user_home_dir_t`, perhaps not in `user_home_type`).
+
+2. **Integrate namespace lifetime and the full network policy.**
+   - Keep explicit live namespace handles for pasta and attachment rather than
+     deriving ownership from a persistent subordinate UID or raw pidfile.
+     Start pasta in the managed user namespace with host network access for
+     its outward sockets, as in `systemd-network.py`.
+   - Preserve network-disabled mode, host/private-route prohibitions, DNS and
+     explicit LAN allowances. Cover IPv6 and incoming-connection rejection;
+     the existing probe establishes only the IPv4 policy pattern.
+   - Test two concurrent game processes with independent capture storage and
+     network helpers, stopping either without disturbing the other.
+
+3. **Integrate attachment and capture maintenance.**
+   - Adapt `sandbox-attach` (including `--put`), `sandbox-uid run`, deletion and
+     reset operations to backend metadata and live namespace identity.
+   - Keep `sandbox-attach --put` as the supported way to change live overlay
+     content. Editing raw `rw/` during a run remains unsupported.
+   - Switching a capture between backends works (see step 1). Still to
+     decide: whether the subordinate uid's ACL entries, left on files after
+     `reclaim`, should be removed, and whether a large capture's first switch
+     needs progress output.
+
+4. **Package administrator setup and backend availability checks.**
+   - Integrate the render helper, dedicated tmpfs mount, service, UID allowlist
+     and udev rules from `systemd-backend/` into install.sh; include removal and
+     revocation behavior.
+   - Package and review the service-wide SELinux module for supported systems.
+     Install policy before first daemon activation and load overlayfs before
+     initializing nsresourced's BPF restrictions. Cover both manually created
+     `var_run_t` and PID1-created `init_var_run_t` runtime parents.
+   - Use matching delegation managers, workers, shared library and service units.
+     Merely finding MountDirectory is insufficient: the proposed child namespace
+     bypasses the transient-write restriction in tested 261.3; tested 261.4
+     passes. Gate unsupported versions/setups and explain setup failures.
+   - Keep the subordinate-UID backend available. Reject an explicitly requested
+     unavailable backend clearly; never silently reinterpret existing captures
+     using another backend. Document selection, installation and rollback.
+
+5. **Complete graphics and lifecycle validation before normal use.**
+   - Run accelerated OpenGL and Vulkan rendering through the mapped alias on
+     suitable hardware; report the selected renderer/device and reject software
+     fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
+     Xwayland, a native game and a Proton game. Check whether card-node metadata
+     access needed by gamescope requires additional handling.
+   - The VM's llvmpipe result neither proves nor rules out acceleration through
+     this backend. Opening the alias and a DRM version ioctl are already proven;
+     accelerated rendering is not. Suitable hardware access must be provided
+     within the authorized test environment; desktop access is not implied.
+   - Validate physical GPU unplug/replug, stale device-number reuse, multiple
+     GPUs, reboot ordering, allowlist changes and orderly service/mount stops.
+     Existing tests cover synthetic lifecycle cases, a real udev change event
+     and live alias revocation/regrant, not physical hotplug or reboot.
+   - Test other source filesystems and sources owned by another user, repeated
+     starts/stops, concurrent games, capture operations and existing-backend
+     regressions. Do not enable the new backend by default based on probes alone.
+
+### Resume information
+
+- Start with [experiment coverage/setup](experiments/README.md),
+  [administrator setup](systemd-backend/README.md),
+  [GPU provisioning](systemd-backend/render-devices.md), and
+  [real display/audio results](experiments/media.md). The probe scripts contain
+  working setup details; they are not production launcher code.
+- The VM now runs systemd 261.4 from the Tumbleweed repository (upgraded
+  2026-11-06; PID 1 included). On it, the setup for this backend is: build and
+  `systemd-backend/README.md` (module, `modprobe overlay`, sockets) and, for
+  the GPU, `systemd-backend/render-devices.md`.
+- After the step 1 tests the module, render helper and test captures were
+  removed and the sockets stopped. The services' BPF pins from that run were
+  left in place: they were created with the policy loaded.
+- Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` (suite logs and
+  state), and the earlier `systemd-{2614,access,render-lifecycle,media}-20261106/`.
+  Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
+  cross-project findings, including policy/overlay startup ordering and labels.

@@ -17,7 +17,7 @@ import sys
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location(
-    "access_probe", Path(__file__).with_name("systemd-access.py"))
+    "access_probe", Path(__file__).resolve().parents[1] / "experiments" / "systemd-access.py")
 access = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(access)
 probe = access.probe

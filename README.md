@@ -1445,6 +1445,37 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   The launch says so, with the command that gives them back to you:
   `sudo chown -R "$USER": ~/game-sandboxes/NAME`.
 
+### The systemd backend (in development)
+
+`SANDBOX_SEPARATE_UID=systemd` gets the game a uid of its own another way.
+systemd-nsresourced lends each launch a transient range of 64K uids, and
+systemd-mountfsd mounts your folders for it idmapped, showing your files as
+the game's. So the capture stays yours on disk: `ls -l` shows you as the
+owner, with no ACL entries, and you edit a save as you would anywhere else.
+The game's folder and Proton go through the kernel's overlay, not
+`fuse-overlayfs`. There is no `/etc/subuid` range and no `newuidmap`.
+
+The game still runs as a uid that is neither yours nor another sandbox's, a
+different one at every launch. Only what the sandbox binds in is shared with
+it: the capture, the game's folder, Proton, the launcher's helpers, and from
+your runtime folder only the Wayland socket and the playback-only sound
+server. Everything else of yours stays as closed to it as your permissions
+make it.
+
+The setting sticks to a capture, as `1` does. Switching a capture between
+`1`, `systemd` and `0` keeps its files: from `1` they are given back to you
+first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
+kernel's mark as well.
+
+It is not ready for general use yet. It needs systemd 261.4 or later, on
+SELinux systems a policy module for the two services, and for the GPU copies
+of the render nodes that an administrator's helper keeps for you. All of that
+is set up once, as root: see [`systemd-backend/`](systemd-backend/README.md).
+
+Not yet: `--net` (it stops the launch), `sandbox-attach`, and a check that
+refuses unsuitable systemd versions. With a single user id mapped on files,
+what the game creates gets your uid as its group id too.
+
 ## Preferences file format
 
 ```

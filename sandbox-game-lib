@@ -581,8 +581,18 @@ started_by_us() {                     # $1 = PID
     s="${s##*) }"; s="${s#* }"
     [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
 }
+# Under the systemd backend (SANDBOX_SEPARATE_UID=systemd) the capture stays
+# ours, and the outer bwrap runs as a transient uid of systemd-nsresourced's,
+# one of 64K ids from its range for containers. That only tells it from what
+# runs as us, not from another namespace of ours from the same service; to
+# be replaced by the launch's own namespace (see TODO.md).
 sandbox_user() {                      # $1 = PID, $2 = NAME
     local u
     u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
+    if [ -f "$HOME/game-sandboxes/$2/managed-uid" ]; then
+        u="${u%$'\n'*}"
+        [ "$u" -ge $((0x80000)) ] && [ "$u" -lt $((0x70000000)) ]
+        return
+    fi
     [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
 }

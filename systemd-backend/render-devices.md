@@ -1,6 +1,7 @@
 # Render-device lifecycle prototype
 
-This extends the [systemd backend experiments](README.md). The administrator
+This is part of the [systemd backend](README.md); its experiments are in
+[`experiments/`](../experiments/README.md). The administrator
 helper provisions render-device aliases for configured host users. It has been
 tested on an isolated VM with SELinux enforcing, including a real udev change
 event and a protected process using an idmapped, bind-mounted alias. It is
@@ -45,7 +46,7 @@ current sysfs state after acquiring it. They do not blindly trust an event's
 old device number. A removal path is used only for comparison: a delayed remove
 for a currently live path revokes the old alias before publishing a fresh one.
 If the path now names another device, its current identity controls publication.
-The [oneshot unit](systemd-render-devices.service) enables reconciliation and
+The [oneshot unit](sandbox-game-render-devices.service) enables reconciliation and
 remains active to track the mount's lifetime; its boot ordering precedes user
 sessions. Reload applies allowlist changes without replacing unchanged aliases.
 On stop (including a failed start), it disables reconciliation and revokes
@@ -77,18 +78,18 @@ test ! -e /run/systemd/system/run-sandboxgame-render.mount
 Stop if any of those checks fails. Then:
 
 ```sh
-sudo install -D -m 0755 experiments/systemd-render-devices \
+sudo install -D -m 0755 systemd-backend/systemd-render-devices \
   /usr/local/libexec/sandbox-game/systemd-render-devices
 sudo restorecon /usr/local/libexec/sandbox-game/systemd-render-devices
 sudo install -d -m 0755 /etc/sandbox-game
 id -u | sudo tee /etc/sandbox-game/systemd-render-users >/dev/null
 sudo chmod 0644 /etc/sandbox-game/systemd-render-users
-sudo install -m 0644 experiments/run-sandboxgame-render.mount /run/systemd/system/
-sudo install -m 0644 experiments/systemd-render-devices.service \
-  /run/systemd/system/sandbox-game-render-devices.service
+sudo install -m 0644 systemd-backend/run-sandboxgame-render.mount /run/systemd/system/
+sudo install -m 0644 systemd-backend/sandbox-game-render-devices.service \
+  /run/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl start sandbox-game-render-devices.service
-sudo install -D -m 0644 experiments/systemd-render-devices.rules \
+sudo install -D -m 0644 systemd-backend/systemd-render-devices.rules \
   /run/udev/rules.d/99-sandbox-game-render-probe.rules
 sudo udevadm verify /run/udev/rules.d/99-sandbox-game-render-probe.rules
 sudo udevadm control --reload
@@ -103,7 +104,7 @@ setup; individual game namespaces and mapped mounts remain unprivileged.
 Run the isolated lifecycle tests as root on the VM:
 
 ```sh
-sudo python3 -I experiments/test_render_devices.py -v
+sudo python3 -I systemd-backend/test_render_devices.py -v
 ```
 
 All **21 tests pass**, covering initial creation, unchanged/reused devices,
@@ -131,7 +132,7 @@ socket and cross-managed-namespace checks continue to pass with this store.
 For a dedicated fixture whose allowlist contains exactly the test UID:
 
 ```sh
-sudo python3 -I experiments/test_render_revocation_live.py run --uid "$(id -u)"
+sudo python3 -I systemd-backend/test_render_revocation_live.py run --uid "$(id -u)"
 ```
 
 This starts an unprivileged managed client, which successfully opens its
@@ -144,7 +145,7 @@ allowlist in its cleanup path. This test passed with SELinux enforcing.
 The mount-stop variant also passed:
 
 ```sh
-sudo python3 -I experiments/test_render_revocation_live.py run \
+sudo python3 -I systemd-backend/test_render_revocation_live.py run \
   --uid "$(id -u)" --cycle-mount
 ```
 
