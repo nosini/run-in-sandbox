@@ -1472,8 +1472,10 @@ SELinux systems a policy module for the two services, and for the GPU copies
 of the render nodes that an administrator's helper keeps for you. All of that
 is set up once, as root: see [`systemd-backend/`](systemd-backend/README.md).
 
-Not yet: `--net` (it stops the launch), `sandbox-attach`, and a check that
-refuses unsuitable systemd versions. With a single user id mapped on files,
+`--net` works as with the other backends, with the same rules. The game's
+network belongs to the sandbox's namespace rather than to bwrap's, and pasta
+runs as the sandbox's transient uid too. Not yet: `sandbox-attach`, and a
+check that refuses unsuitable systemd versions. With a single user id mapped on files,
 what the game creates gets your uid as its group id too.
 
 ## Preferences file format

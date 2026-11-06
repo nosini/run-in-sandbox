@@ -2341,6 +2341,40 @@ for ver in (4, 6) if not lan else ():
         if net.prefixlen and "gateway" not in r:
             block[ver].append(str(net))
 
+batches = {}
+for ver, nets in block.items():
+    if ver == 6 and not has_v6:
+        continue
+    # Rules, not routes: they are consulted before any route, so the on-link
+    # route pasta copies from the host cannot outrank them.
+    # Only DNS itself: pasta answers just that at this address, and passes
+    # anything else on to whatever really has it, on this machine or the LAN.
+    rules = [f"rule add priority 90 to {dns} ipproto {p} dport 53 lookup main"
+             for p in ("udp", "tcp")] if ver == 4 else []
+    # Host addresses stay refused even when an allowance includes them. Pasta
+    # copies only its selected interface address, so other host addresses
+    # could otherwise reach host services through its sockets.
+    rules += [f"rule add priority 94 to {a} prohibit"
+              for a in dict.fromkeys(host_addresses[ver])]
+    # --allow-lan, ahead of the network refusals: the address, or network, and
+    # with a port only that port, over TCP and UDP unless one was named.
+    for net, proto, ports in json.loads(allowed):
+        if ipaddress.ip_network(net).version != ver:
+            continue
+        where = f"rule add priority 95 to {net}"
+        for p in [proto] if proto else ["tcp", "udp"] if ports else [""]:
+            rules.append(where + (f" ipproto {p}" if p else "")
+                         + (f" dport {ports}" if ports else "") + " lookup main")
+    rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
+    if rules:
+        batches[ver] = rules
+# No game yet under the systemd backend: sandbox-uid makes the game's network
+# namespace itself, before bwrap, and starts pasta and applies these there.
+if not pid:
+    print(json.dumps({"pasta": pasta, "dns": dns, "mac": mac, "ipv6": has_v6,
+                      "rules": {str(ver): rules for ver, rules in batches.items()}}))
+    sys.exit()
+
 net_fd = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
 user_fd = fcntl.ioctl(net_fd, NS_GET_USERNS)
 # Under a uid of its own (SANDBOX_SEPARATE_UID) that namespace belongs to the
@@ -2375,32 +2409,7 @@ subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
                 "--dns-forward", dns, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
                check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
                pass_fds=(user_fd,))
-for ver, nets in block.items():
-    if ver == 6 and not has_v6:
-        continue
-    # Rules, not routes: they are consulted before any route, so the on-link
-    # route pasta copies from the host cannot outrank them.
-    # Only DNS itself: pasta answers just that at this address, and passes
-    # anything else on to whatever really has it, on this machine or the LAN.
-    rules = [f"rule add priority 90 to {dns} ipproto {p} dport 53 lookup main"
-             for p in ("udp", "tcp")] if ver == 4 else []
-    # Host addresses stay refused even when an allowance includes them. Pasta
-    # copies only its selected interface address, so other host addresses
-    # could otherwise reach host services through its sockets.
-    rules += [f"rule add priority 94 to {a} prohibit"
-              for a in dict.fromkeys(host_addresses[ver])]
-    # --allow-lan, ahead of the network refusals: the address, or network, and
-    # with a port only that port, over TCP and UDP unless one was named.
-    for net, proto, ports in json.loads(allowed):
-        if ipaddress.ip_network(net).version != ver:
-            continue
-        where = f"rule add priority 95 to {net}"
-        for p in [proto] if proto else ["tcp", "udp"] if ports else [""]:
-            rules.append(where + (f" ipproto {p}" if p else "")
-                         + (f" dport {ports}" if ports else "") + " lookup main")
-    rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
-    if not rules:
-        continue
+for ver, rules in batches.items():
     subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
                    text=True, check=True, pass_fds=(user_fd, net_fd),
                    preexec_fn=enter((user_fd, CLONE_NEWUSER), (net_fd, CLONE_NEWNET)))
@@ -2466,7 +2475,6 @@ if [ "$SEPARATE_UID" = 1 ]; then
 # it draws through the copies of them that an administrator's helper keeps
 # for you (see systemd-backend/render-devices.md).
 elif [ "$SEPARATE_UID" = systemd ]; then
-    [ "$NET" = 0 ] || { echo "sandbox-game: --net does not work with SANDBOX_SEPARATE_UID=systemd yet" >&2; exit 1; }
     if [ ! -S "$SANDBOX_PULSE" ]; then
         AUDIO_ARGS=()
         echo "sandbox-game: warning: no playback-only sound server, so no sound under SANDBOX_SEPARATE_UID" >&2
@@ -2494,7 +2502,25 @@ elif [ "$SEPARATE_UID" = systemd ]; then
     DEVICE_ARGS=( "${GPU_ARGS[@]}" )
     [ "$NO_GPU" = 0 ] || echo "sandbox-game: warning: no copy of the GPU's render nodes for you in $RENDER_COPIES," \
         "so the game draws without the GPU under SANDBOX_SEPARATE_UID=systemd" >&2
-    UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" managed-launch "$CAP" -- )
+    # The network too is sandbox-uid's to make, in the namespace it makes,
+    # before bwrap starts: the same rules, from here, and pasta beside it as a
+    # child that ends with the sandbox. bwrap then neither waits for it nor
+    # reports its pid.
+    MANAGED_NET=()
+    if [ "$NET" = 1 ]; then
+        NET_SPEC="$(python3 -c "$NET_HELPER" "" "$DNS_ADDR" "" "$PASTA_BIN" "$MAC" \
+                    "$LAN_ALL" "$LAN_RULES" 18>&-)" || {
+            echo "could not work out the sandbox's network rules; not starting the game" >&2; exit 1; }
+        MANAGED_NET=( --net "$NET_SPEC" )
+        for ((i = 0; i < ${#NET_ARGS[@]}; i++)); do
+            case "${NET_ARGS[i]}" in
+                --info-fd|--block-fd) unset 'NET_ARGS[i]' 'NET_ARGS[i+1]'; i=$((i + 1)) ;;
+            esac
+        done
+        NET_ARGS=( "${NET_ARGS[@]}" )
+        rm -f "$PASTA_PID"; PASTA_PID=""
+    fi
+    UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" managed-launch "$CAP" "${MANAGED_NET[@]}" -- )
 fi
 
 # Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find
@@ -2641,7 +2667,7 @@ fi
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
 PLAY_START="$(date +%s)"
-if [ "$NET" = 0 ]; then
+if [ "$NET" = 0 ] || [ "$SEPARATE_UID" = systemd ]; then
     "${BWRAP[@]}" "$@" 18>&- && rc=0 || rc=$?
 else
     # FIFOs, opened in the same order on both ends: bwrap's info pipe first,

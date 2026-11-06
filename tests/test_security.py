@@ -2638,6 +2638,45 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         time.sleep(0.3)
         self.assertEqual(running(), [], "pasta outlived the game")
 
+    def test_network_lets_nothing_in(self):
+        # No port of this machine leads into the sandbox: pasta forwards none.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import socket
+        import time
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--net", self.game, "python3", "-c",
+             "import socket, sys\n"
+             "for family, host in ((socket.AF_INET, '0.0.0.0'), (socket.AF_INET6, '::')):\n"
+             "    try:\n"
+             "        s = socket.socket(family); s.bind((host, %d)); s.listen()\n"
+             "    except OSError:\n"
+             "        continue\n"
+             "    globals()[host] = s\n"
+             "print('ready', flush=True); sys.stdin.read()" % port],
+            env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "ready",
+                         proc.stderr.read() if proc.poll() is not None else "")
+        own = [a["local"] for link in json.loads(subprocess.run(
+                   [shutil.which("ip") or "/usr/sbin/ip", "-j", "addr", "show"],
+                   capture_output=True, text=True, check=True).stdout)
+               for a in link.get("addr_info", [])]
+        for address in own:
+            with self.subTest(address=address), socket.socket(
+                    socket.AF_INET6 if ":" in address else socket.AF_INET) as client:
+                client.settimeout(2)
+                if address.startswith("fe80:"):
+                    continue
+                self.assertNotEqual(client.connect_ex((address, port)), 0,
+                                    f"reached the game at {address}:{port}")
+        proc.stdin.close()
+        proc.wait(timeout=10)
+
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.
         import time
@@ -4045,10 +4084,89 @@ class SystemdBackendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot reach /root", result.stderr)
 
-    def test_network_is_refused_for_now(self):
-        result = self.cli("--headless", "--net", self.game, "/bin/true", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--net does not work with SANDBOX_SEPARATE_UID=systemd", result.stderr)
+    # The network as for the other backends, made by sandbox-uid instead.
+    test_network_reaches_the_internet_and_nothing_else = \
+        SecurityTests.test_network_reaches_the_internet_and_nothing_else
+    test_lan_allowances_open_only_what_they_name = \
+        SecurityTests.test_lan_allowances_open_only_what_they_name
+    test_network_helper_is_named_after_the_game_and_ends_with_it = \
+        SecurityTests.test_network_helper_is_named_after_the_game_and_ends_with_it
+    test_network_card_keeps_its_address_between_launches = \
+        SecurityTests.test_network_card_keeps_its_address_between_launches
+    test_standard_input_reaches_the_game_with_and_without_network = \
+        SecurityTests.test_standard_input_reaches_the_game_with_and_without_network
+    test_network_lets_nothing_in = SecurityTests.test_network_lets_nothing_in
+    test_stop_ends_only_the_named_sandbox_and_counts_as_clean = \
+        SecurityTests.test_stop_ends_only_the_named_sandbox_and_counts_as_clean
+
+    def test_the_game_cannot_change_its_network(self):
+        # Its network namespace is the managed namespace's, not bwrap's: no
+        # capability there, even before bwrap drops its own.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        result = self.run_guest('ip=$(command -v ip || echo /usr/sbin/ip); '
+                                '"$ip" rule show | grep -c prohibit; '
+                                '"$ip" rule del priority 100 && echo removed; '
+                                '"$ip" link set lo down && echo down; true', "--net")
+        self.assertGreater(int(result.stdout.split()[0]), 0, result.stderr)
+        self.assertNotIn("removed", result.stdout)
+        self.assertNotIn("down", result.stdout)
+
+    def test_two_games_have_networks_of_their_own(self):
+        # Stopping one leaves the other's pasta, and its way out, alone.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import time
+        dns = ("import socket, struct\n"
+               "q = struct.pack('!6H', 7, 0x100, 1, 0, 0, 0) + b'\\x07example\\x03com\\x00'"
+               " + struct.pack('!HH', 1, 1)\n"
+               "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(10)\n"
+               "s.sendto(q, ('169.254.1.1', 53)); print('dns', s.recv(512)[:2] == q[:2])\n")
+        (self.game / "dns.py").write_text(dns)
+        procs = {}
+        for name in ("net-a", "net-b"):
+            procs[name] = subprocess.Popen(
+                [str(ROOT / "sandbox-game"), "--headless", "--net", "--name", name, str(self.game),
+                 "/bin/sh", "-c", 'echo ready; until [ -e "$HOME/go" ]; do sleep 0.1; done; '
+                 'exec python3 /game/dns.py'],
+                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(procs[name].kill)
+            self.assertEqual(procs[name].stdout.readline().strip(), "ready",
+                             procs[name].stderr.read() if procs[name].poll() is not None else "")
+        def pastas():
+            found = set()
+            for p in Path("/proc").glob("[0-9]*"):
+                try:
+                    found.add(os.path.basename(os.readlink(p / "exe")).split(".")[0])
+                except OSError:
+                    pass
+            return found & {"net-a-pasta", "net-b-pasta"}
+        self.assertEqual(pastas(), {"net-a-pasta", "net-b-pasta"})
+        self.assertIn("stopped net-a", self.cli("--stop", "net-a").stdout)
+        procs["net-a"].communicate(timeout=10)
+        time.sleep(0.3)
+        self.assertEqual(pastas(), {"net-b-pasta"})
+        self.assertRegex(self.cli("--list").stdout, r"net-b.*running")
+        (self.home / "game-sandboxes" / "net-b" / "home" / "go").touch()
+        out, err = procs["net-b"].communicate(timeout=20)
+        self.assertEqual(procs["net-b"].returncode, 0, err)
+        self.assertIn("dns True", out)
+        time.sleep(0.3)
+        self.assertEqual(pastas(), set())
+
+    def test_stop_knows_the_sandbox_by_its_namespace(self):
+        # Not by the uid: another namespace of ours from the same service, with
+        # a bwrap that names the capture, is not the sandbox.
+        name = "own-ns-" + self.base.name
+        proc = self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        record = self.home / "game-sandboxes" / name / ".managed-userns"
+        real = record.read_text()
+        record.write_text("0 0\n")
+        self.assertNotRegex(self.cli("--list").stdout, rf"{name}.*running")
+        record.write_text(real)
+        self.assertRegex(self.cli("--list").stdout, rf"{name}.*running")
+        self.cli("--stop", name)
+        proc.communicate(timeout=10)
 
 
 if __name__ == "__main__":

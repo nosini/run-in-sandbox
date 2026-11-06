@@ -63,7 +63,9 @@ Commands:
                                    answer
   sandbox-uid managed-adopt CAP    make CAP's overlay readable to the kernel's
                                    overlayfs (once, on switching to systemd)
-  sandbox-uid managed-launch CAP -- BWRAP...
+  sandbox-uid managed-launch CAP [--net SPEC] -- BWRAP...
+                                   SPEC: sandbox-game's network rules (see
+                                   NET_HELPER there), as JSON
 """
 import array
 import ctypes
@@ -73,6 +75,8 @@ import json
 import os
 import pwd
 import re
+import shutil
+import signal
 import socket
 import stat
 import struct
@@ -1004,13 +1008,13 @@ def reachable(path, want):
                if want & ok)
 
 
-def delegations(argv, specs):
+def delegations(argv, specs, extra=()):
     """[(folder, writable)] to delegate, parents first, so that every source
     of ARGV and every layer of SPECS can be reached and used by the managed
     root: a folder of yours itself, or the folder of yours it is in.
     mountfsd mounts only that folder, without what is mounted below it."""
     me, mounts = os.getuid(), mount_points()
-    needs = [(p, w) for p, w in sources(argv)]
+    needs = [(p, w) for p, w in sources(argv)] + list(extra)
     for _, lowers, upper, work in specs:
         needs += [(p, False) for p in lowers]
         if upper is not None:
@@ -1115,15 +1119,109 @@ def kernel_overlay(mp, lowers, upper, work):
     os.close(fd)
 
 
-def managed_launch(cap, argv):
+def managed_network(net):
+    """The game's network namespace, made here, so that it belongs to the
+    managed namespace, where the game has no capabilities -- and set up as
+    sandbox-game's NET_HELPER sets up bwrap's for the other backends: pasta
+    stays in the network we are in, as the game's way out, and sandbox-game's
+    rules go in. pasta runs under a keeper, which the kernel tells when the
+    sandbox ends (the outer bwrap, this process now): no pid file, and
+    nothing that can outlive it."""
+    target = f"/proc/{os.getpid()}/ns/net"
+    # Which pasta opens as the managed root: changing to it cleared
+    # dumpability, and with it left /proc/PID to the host's root.
+    check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
+    go_r, go = os.pipe()
+    keeper = os.fork()
+    if keeper == 0:
+        try:
+            os.close(go)
+            parent = os.getppid()
+            libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+            ends = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+            signal.pthread_sigmask(signal.SIG_BLOCK, ends | {signal.SIGCHLD})
+            if os.getppid() != parent:
+                os._exit(0)
+            devnull = os.open("/dev/null", os.O_RDWR)
+            os.dup2(devnull, 0)
+            os.dup2(devnull, 1)
+            close_others([go_r])
+            if os.read(go_r, 1) != b"1":
+                os._exit(0)                 # setup failed: nothing to serve
+            os.close(go_r)
+            pasta = os.fork()
+            if pasta == 0:
+                signal.pthread_sigmask(signal.SIG_SETMASK, set())
+                os.execv(net["pasta"], [
+                    net["pasta"], "--quiet", "--foreground", "--config-net", "--netns-only",
+                    "--netns", target, "--no-netns-quit",
+                    "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+                    "--map-host-loopback", "none", "--map-guest-addr", "none",
+                    "--dns-forward", net["dns"], "--ns-mac-addr", net["mac"],
+                    *([] if net["ipv6"] else ["-4"])])
+            while True:
+                sig = signal.sigwait(ends | {signal.SIGCHLD})
+                if sig != signal.SIGCHLD:
+                    os.kill(pasta, signal.SIGTERM)
+                    os.waitpid(pasta, 0)
+                    break
+                if os.waitpid(pasta, os.WNOHANG)[0]:
+                    break
+        except BaseException as e:
+            os.write(2, f"sandbox-uid: pasta: {e}\n".encode())
+        os._exit(0)
+    os.close(go_r)
+    unshare(CLONE_NEWNET)
+    os.write(go, b"1")
+    os.close(go)
+    ip = shutil.which("ip", path="/usr/sbin:/sbin:/usr/bin:/bin")
+    if not ip:
+        fail("the network needs ip (iproute2)")
+
+    def configured():
+        for ver in ("4", "6") if net["ipv6"] else ("4",):
+            out = subprocess.run([ip, "-j", f"-{ver}", "route", "show", "default"],
+                                 capture_output=True, text=True).stdout
+            if json.loads(out or "[]"):
+                return True
+        return False
+
+    deadline = time.monotonic() + 15
+    while not configured():
+        if os.waitpid(keeper, os.WNOHANG)[0] or time.monotonic() > deadline:
+            fail("pasta did not set up the sandbox's network")
+        time.sleep(0.02)
+    for ver, rules in net["rules"].items():
+        if subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
+                          text=True).returncode:
+            fail("could not apply the sandbox's network rules")
+
+
+def managed_launch(cap, argv, net=None):
     me, my_gid = os.getuid(), os.getgid()
     argv = canonical(argv)
     mounts = os.path.join(os.path.realpath(cap), ".mounts")
     argv, specs = overlays(argv, mounts)
     if specs:
         os.makedirs(mounts, exist_ok=True)
-    wanted = delegations(argv, specs)
+    if net:
+        # bwrap keeps the network namespace made here (see managed_network).
+        if "--unshare-all" not in argv:
+            fail("managed-launch --net: the command does not unshare the network")
+        at = argv.index("--unshare-all") + 1
+        argv[at:at] = ["--share-net"]
+    # pasta runs from its folder too: sandbox-game names a copy after the game.
+    wanted = delegations(argv, specs, [(os.path.realpath(net["pasta"]), False)] if net else ())
     ns = managed_namespace(f"sandbox-game-{os.getpid()}")
+    # How sandbox-game --stop and sandbox-attach tell this sandbox's processes
+    # from any others (see sandbox_user in sandbox-game-lib): the outer bwrap
+    # runs in a namespace whose parent is this one. Where the game cannot
+    # reach it: the capture's own folder is not in the sandbox.
+    st = os.fstat(ns)
+    record = os.path.join(os.path.realpath(cap), ".managed-userns")
+    with open(record + ".tmp", "w") as f:
+        f.write(f"{st.st_dev} {st.st_ino}\n")
+    os.replace(record + ".tmp", record)
     delegated = [(path, delegate(path, ns, not writable)) for path, writable in wanted]
     # In there, root: but not yours, so none of your files is ours but
     # through those mounts. setns leaves the ids unmapped until changed.
@@ -1144,6 +1242,8 @@ def managed_launch(cap, argv):
             for d in (upper, work):
                 os.mkdir(d, 0o700)
         kernel_overlay(mp, lowers, upper, work)
+    if net:
+        managed_network(net)
     # What is yours of standard output and error, the game could not reopen.
     relay_output(0)
     # The game's own namespace inside, its root seen as your uid: what the
@@ -1209,7 +1309,9 @@ def main():
             fail(f"the systemd backend is not available: {why}")
         return
     if len(args) >= 2 and args[0] in ("managed-adopt", "managed-launch"):
-        cap, rest = args[1], args[2:]
+        cap, rest, net = args[1], args[2:], None
+        if args[0] == "managed-launch" and rest[:1] == ["--net"] and len(rest) > 1:
+            net, rest = json.loads(rest[1]), rest[2:]
         if rest[:1] == ["--"]:
             rest = rest[1:]
         if args[0] == "managed-adopt":
@@ -1217,7 +1319,7 @@ def main():
             return
         if not rest:
             fail("managed-launch: no command")
-        managed_launch(cap, rest)
+        managed_launch(cap, rest, net)
     if len(args) < 2:
         fail(__doc__.split("Commands:")[1])
     cmd, cap, rest = args[0], args[1], args[2:]

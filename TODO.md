@@ -122,12 +122,9 @@ per-game SELinux policy or relabeling step.
      server there is no sound, as under `1`. `/dev/dri/renderD*` binds become
      `/run/sandboxgame/render/UID/renderD*` copies when present, otherwise a
      warning and software rendering.
-   - `--net` stops the launch, and `sandbox-attach` refuses this backend (its
-     `nsenter` fails on the child namespace's `setgroups deny`). `--stop` and
-     `--list` work: you hold every capability in the managed namespace and the
-     namespaces below it. `sandbox_user` recognises the process only by its
-     uid being in nsresourced's range. Replace that with the launch's own
-     namespace in step 2.
+   - `sandbox-attach` refuses this backend (its `nsenter` fails on the child
+     namespace's `setgroups deny`). `--stop` and `--list` work: you hold every
+     capability in the managed namespace and the namespaces below it.
    - The SELinux module (now `systemd-backend/sandbox_game_systemd.te`)
      grants on the `user_home_type` and `user_tmp_type` attributes instead of
      `user_home_t` alone: the launcher's tools and Steam's Proton live in
@@ -146,20 +143,48 @@ per-game SELinux policy or relabeling step.
      `--host-x11` delegates `$HOME` itself for the X authority file
      (`user_home_dir_t`, perhaps not in `user_home_type`).
 
-2. **Integrate namespace lifetime and the full network policy.**
-   - Keep explicit live namespace handles for pasta and attachment rather than
-     deriving ownership from a persistent subordinate UID or raw pidfile.
-     Start pasta in the managed user namespace with host network access for
-     its outward sockets, as in `systemd-network.py`.
-   - Preserve network-disabled mode, host/private-route prohibitions, DNS and
-     explicit LAN allowances. Cover IPv6 and incoming-connection rejection;
-     the existing probe establishes only the IPv4 policy pattern.
-   - Test two concurrent game processes with independent capture storage and
-     network helpers, stopping either without disturbing the other.
+2. **Namespace lifetime and the full network policy: done (2026-11-06).**
+   - `sandbox-uid managed-launch --net SPEC` creates the game's network
+     namespace itself, in the managed namespace, before bwrap, which keeps it
+     (`--share-net`, added by sandbox-uid). The game has no capabilities in
+     the namespace that owns it.
+   - pasta (the copy named after the game) runs `--foreground` from the host
+     network, as the managed root, under a keeper process. The kernel signals
+     the keeper when the outer bwrap ends (`PR_SET_PDEATHSIG`; pasta's own
+     would be cleared when it drops to nobody), and the keeper then ends
+     pasta. There's no pid file, and bwrap's info and block descriptors
+     aren't used under this backend. sandbox-uid waits for pasta's default
+     route, then applies the rules.
+   - `NET_HELPER` now computes the rules first; called without a pid, it only
+     prints them with pasta's settings as JSON, which `sandbox-game` passes to
+     sandbox-uid. The other backends apply them as before.
+   - `pasta` must open `/proc/PID/ns/net` of the launcher, so the launcher sets
+     itself dumpable again after changing to the managed root.
+   - sandbox-uid records the managed namespace (`CAP/.managed-userns`, device
+     and inode). `sandbox_user` recognises the outer bwrap by its user
+     namespace's parent being that one, replacing the uid-range check.
+   - Tested on the VM, as `SystemdBackendTests`:
+     - the existing internet, LAN-allowance, MAC, stdin and pasta-naming
+       tests, run under this backend;
+     - the game can't change rules or links;
+     - nothing reaches a port the game listens on, from any host address
+       (also a new test for the other backends);
+     - two games with their own pastas, where stopping one leaves the
+       other's DNS working;
+     - `--list` ignores a sandbox whose recorded namespace doesn't match.
+   - IPv6, tested by hand: in a root-made dual-stack namespace on the VM
+     (dummy interface, `2001:db8:1::/64` and `fd12:3456::/64`), the LAN, ULA
+     and multicast are refused while public addresses go to pasta. The
+     results were identical under `systemd` and `0`. The VM has no IPv6, so
+     public IPv6 traffic itself is untested.
 
 3. **Integrate attachment and capture maintenance.**
    - Adapt `sandbox-attach` (including `--put`), `sandbox-uid run`, deletion and
-     reset operations to backend metadata and live namespace identity.
+     reset operations to backend metadata and live namespace identity. The
+     sandbox is found through `CAP/.managed-userns` (see step 2). Entering
+     it needs a different approach from `nsenter`: you hold every
+     capability in the managed namespace and below, but the child namespace
+     denies `setgroups`.
    - Keep `sandbox-attach --put` as the supported way to change live overlay
      content. Editing raw `rw/` during a run remains unsupported.
    - Switching a capture between backends works (see step 1). Still to
@@ -212,10 +237,11 @@ per-game SELinux policy or relabeling step.
   2026-11-06; PID 1 included). On it, the setup for this backend is: build and
   `systemd-backend/README.md` (module, `modprobe overlay`, sockets) and, for
   the GPU, `systemd-backend/render-devices.md`.
-- After the step 1 tests the module, render helper and test captures were
-  removed and the sockets stopped. The services' BPF pins from that run were
+- After the step 1 and step 2 tests, the module, render helper and test
+  captures were removed and the sockets stopped. The services' BPF pins from that run were
   left in place: they were created with the policy loaded.
-- Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` (suite logs and
-  state), and the earlier `systemd-{2614,access,render-lifecycle,media}-20261106/`.
+- Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` and
+  `systemd-net-20261106/` (suite logs and state), and the earlier
+  `systemd-{2614,access,render-lifecycle,media}-20261106/`.
   Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
   cross-project findings, including policy/overlay startup ordering and labels.

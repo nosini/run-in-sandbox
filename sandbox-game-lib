@@ -583,16 +583,19 @@ started_by_us() {                     # $1 = PID
 }
 # Under the systemd backend (SANDBOX_SEPARATE_UID=systemd) the capture stays
 # ours, and the outer bwrap runs as a transient uid of systemd-nsresourced's,
-# one of 64K ids from its range for containers. That only tells it from what
-# runs as us, not from another namespace of ours from the same service; to
-# be replaced by the launch's own namespace (see TODO.md).
+# in a user namespace whose parent is the one sandbox-uid had allocated for
+# that launch, and recorded in the capture (.managed-userns). The game cannot
+# write there, nor make another namespace with that parent.
 sandbox_user() {                      # $1 = PID, $2 = NAME
     local u
-    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
     if [ -f "$HOME/game-sandboxes/$2/managed-uid" ]; then
-        u="${u%$'\n'*}"
-        [ "$u" -ge $((0x80000)) ] && [ "$u" -lt $((0x70000000)) ]
+        python3 -I -c '
+import fcntl, os, sys
+parent = os.fstat(fcntl.ioctl(os.open(sys.argv[1], os.O_RDONLY), 0xB702))  # NS_GET_PARENT
+sys.exit(open(sys.argv[2]).read().split() != [str(parent.st_dev), str(parent.st_ino)])
+' "/proc/$1/ns/user" "$HOME/game-sandboxes/$2/.managed-userns" 2>/dev/null
         return
     fi
+    u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
     [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
 }
