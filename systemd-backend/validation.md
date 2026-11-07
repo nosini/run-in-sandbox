@@ -107,16 +107,16 @@ runs `vulkaninfo`, `eglinfo`, `vkcube` in a window and inside gamescope, and
 logged to count DMA-BUF buffers against shared-memory pools, as throwaway games under
 `SANDBOX_SEPARATE_UID=0` and `systemd`, and the hardware-only media probe
 when its build tools are there. Missing tools are skipped and named
-(`vulkan-tools`, `Mesa-demo-egl`, `gamescope`). Your per-user installation,
+(`vulkan-tools`, `Mesa-demo-egl`, `gamescope`). The user's per-user installation,
 settings and games are not used. Logs and `summary.txt` stay in
 `.gpu-check/DATE` in the checkout.
 
 With `--game PATH` (repeatable; `--name NAME` after one whose sandbox was
-renamed) it launches your own games instead, as "Sandbox game" does and with
+renamed) it launches the user's own games instead, as "Sandbox game" does and with
 their preferences, but under the systemd backend and in a capture of their
 own, `NAME-systemd-test`; the game's own capture and folder stay as they
 are. It records the render node the game got, which of its processes have
-the GPU open, and whether the capture stays yours on disk. The results call
+the GPU open, and whether the capture stays the user's on disk. The results call
 the games `game1`, `game2` and so on: their folder and sandbox names, and the
 names of the files at the top of their folders, are redacted from every
 result file, also as process names and in any case.

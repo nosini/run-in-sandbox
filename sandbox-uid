@@ -957,7 +957,7 @@ def managed_version(value):
     return tuple(int(x or 0) for x in match.groups())
 
 
-GROUP_HELP = 'see "Your account\'s group" in systemd-backend/README.md'
+GROUP_HELP = 'see "The account\'s group" in systemd-backend/README.md'
 
 
 def managed_identity_error():

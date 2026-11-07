@@ -1,11 +1,11 @@
 # run-in-sandbox
 
 Install and manage games in a desktop library, and run them in a bwrap sandbox.
-You can also launch them from the file manager or the shell.
+They can also be launched from the file manager or the shell.
 
-Games from itch.io, a jam page, or a random archive are unpacked and run as your
-user with your whole home directory in reach. This puts one between them and
-you:
+Games from itch.io, a jam page, or a random archive are unpacked and run as the
+desktop user, with that user's whole home directory in reach. This puts one
+between them and the user:
 
 - **No network.** `--unshare-all` takes the net namespace with it. A game that
   needs the internet can be given it, and only it: never the LAN, never a
@@ -29,7 +29,7 @@ includes **microphone and monitor recording, and loading sound server
 modules**, some of which reach the network. `./install.sh --restrict-audio`
 makes it playback only; see [Sound](#sound).
 `--host-x11` explicitly grants access to other host X applications; do not
-enable it for a game you do not trust.
+enable it for an untrusted game.
 
 This is not a complete security boundary against actively malicious software.
 The host kernel, graphics drivers and exposed display services remain shared.
@@ -45,7 +45,7 @@ games), and Windows `.exe` games via Proton.
 curl -fsSL https://raw.githubusercontent.com/nosini/run-in-sandbox/main/install.sh | bash
 ```
 
-That downloads the current `main` and installs it for your user; no root, and
+That downloads the current `main` and installs it for the current user; no root, and
 nothing outside `~/.local`. From a checkout, `./install.sh` installs that
 checkout instead. Either way, running it again updates in place, and it warns
 about anything missing from the [dependencies](#dependencies) below.
@@ -62,11 +62,11 @@ less install.sh && bash install.sh
 (`curl ... | REF=<tag> bash`). To remove the
 scripts again, `./install.sh --uninstall`, or through the pipe
 `... | bash -s -- --uninstall`. That leaves `~/game-sandboxes` (saves and Wine
-prefixes), your preferences and the shared tools folder alone.
+prefixes), the preferences and the shared tools folder alone.
 
 `./install.sh --restrict-audio` (or `... | bash -s -- --restrict-audio`)
 additionally makes games' sound playback only; see [Sound](#sound). It changes
-your sound setup, so it is not done unless asked, and once done every later
+the user's sound setup, so it is not done unless asked, and once done every later
 install keeps it current. `--uninstall` takes it out again.
 
 What goes where:
@@ -91,19 +91,19 @@ Each of them is looked for beside the script using it first, so a checkout
 runs as it is, then there, then on `PATH`. An earlier install kept them in
 `~/.local/bin/`; `install.sh` clears those copies out.
 
-Open **Sandbox Manager** from your applications, or run `sandbox-manager`.
-You can also right-click a game folder in Nautilus → **Scripts** → **Sandbox game**.
+Open **Sandbox Manager** from the applications menu, or run `sandbox-manager`.
+Games can also be started by right-clicking a game folder in Nautilus → **Scripts** → **Sandbox game**.
 
-## Manage your library
+## Manage the library
 
-The manager lists your sandboxes in a searchable sidebar. Select a game to
+The manager lists the sandboxes in a searchable sidebar. Select a game to
 launch or stop it, view its log and playtime, open its files, or change its
 settings. Closing the manager leaves running games open.
 
 The filter below search switches between **All games**, **Installed in sandbox**,
 and **External game folder**. The location of the game's files determines the
 category, independently of which runtime it uses. Older entries with an unknown
-location remain visible under **All games** until you locate their folder.
+location remain visible under **All games** until their folder is located.
 
 Game icons are picked up from the selected executable's embedded icon or nearby
 PNG/ICO files. Extraction and image decoding run in a separate bwrap sandbox,
@@ -115,22 +115,22 @@ To give a game a readable title, edit **Overview → Display name** and choose
 keeping the existing sandbox folder, settings and saves in place.
 
 To start a game without opening the manager, use **Overview → Shortcuts**.
-**Show in the applications menu** adds it to your desktop's app list, and
-**Place a shortcut on the desktop** puts a launcher in your desktop folder
+**Show in the applications menu** adds it to the desktop's app list, and
+**Place a shortcut on the desktop** puts a launcher in the desktop folder
 (GNOME shows desktop icons only with an extension such as Desktop Icons NG).
 A shortcut starts the game as **Play** does, with the game's icon and display
 name, and both follow later changes the manager makes. Deleting the sandbox
 in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
-`sandbox-manager --launch NAME`, which you can also use from a shell. For a
+`sandbox-manager --launch NAME`, which also works from a shell. For a
 game run with Proton, the shortcut's `StartupWMClass=steam_app_NAME` matches
 the app ID its windows get (see [Windows games — Proton](#windows-games--proton)),
 so the desktop shows a game window drawn on it directly with the game's icon
-and name. Windows inside gamescope's window always show as gamescope. You can
-edit these files: the manager updates only the name, the `Exec` and `TryExec`
-lines, and the icon (unless you chose another one), adds a missing
+and name. Windows inside gamescope's window always show as gamescope. These files
+can be edited by hand: the manager updates only the name, the `Exec` and
+`TryExec` lines, and the icon (unless another one was chosen), adds a missing
 `StartupWMClass` without changing one that is there, and leaves every other
-line as you wrote it.
+line as written.
 
 Choose **Add game → Add an existing game** for an unpacked game. Select its
 folder or launcher; its original files stay in place, and saves and changes
@@ -152,7 +152,7 @@ once the original is executable again.
 
 Open **Game folders…** in the manager menu to set default search locations for
 external games, then choose **Save and search**. On startup and library refresh,
-the manager shows your library straight away, then searches those locations
+the manager shows the library straight away, then searches those locations
 and up to three folder levels below them for missing games in the background. A folder matches when `sandbox-game` would give it the same
 sandbox name as the game's original folder or, for older entries without a
 recorded location, as the sandbox itself (a sandbox named with `--name` cannot
@@ -162,7 +162,7 @@ settings and saves. Entries still showing the sandbox name take their display
 name from the game folder. Otherwise **Locate game** shows the matches to
 choose from, or a folder chooser. Symbolic links inside search locations are
 skipped. A game on a drive that is not connected keeps its saved location until
-the drive is back. These locations reconnect games already in your library; use
+the drive is back. These locations reconnect games already in the library; use
 **Add game** to import another game.
 
 To install a Windows game:
@@ -171,14 +171,14 @@ To install a Windows game:
 2. Select a Proton runner. **Choose another Proton folder** accepts a build
    such as DWProton unpacked elsewhere.
 3. Choose an `.exe` or `.msi` installer, and enable internet access if it
-   needs to download game files. You can also create the sandbox first and
+   needs to download game files. Alternatively, create the sandbox first and
    use **Run installer** later.
 4. Complete the installer and close it. Open **Programs**, refresh the list,
    and choose **Use for Play** beside the installed game or launcher.
 
 The installer and game share one persistent Windows prefix. The installer's
 folder is available read-only while it runs, including any adjacent files it
-needs. An installer saved directly in your home folder, Downloads or another
+needs. An installer saved directly in the home folder, Downloads or another
 standard user folder sees only itself, its split archives (`setup-1.bin`) and,
 for an `.msi`, the `.cab` files beside it. Give an installer that needs other
 files beside it a folder of its own. Files installed into the Windows C: drive
@@ -219,7 +219,7 @@ neither. `--host-x11` is an explicit, less isolated option for X11 sessions.
 
 `bwrap` must **not** be the setuid build: `--disable-userns` does not work
 there, so every launch fails. No current distribution needs it, since
-unprivileged user namespaces cover what setuid was for. If yours disables them
+unprivileged user namespaces cover what setuid was for. Where a system disables them
 (`kernel.unprivileged_userns_clone=0`, or an AppArmor restriction on Ubuntu
 24.04+), nothing here will run until that is lifted.
 
@@ -252,7 +252,7 @@ working directory.
 |---|---|---|
 | overlay on a `bwrap` built without `--overlay` | `fuse-overlayfs` | fallback only |
 | `--mangohud` | `mangohud` | |
-| MangoHud in a 32-bit game | the 32-bit libraries | `lib32-mangohud`, `mangohud-32bit`, `mangohud.i686`, `mangohud:i386` — pick your distro's spelling |
+| MangoHud in a 32-bit game | the 32-bit libraries | `lib32-mangohud`, `mangohud-32bit`, `mangohud.i686`, `mangohud:i386` — the distribution's spelling |
 | `--gamescope` | `gamescope` | |
 | `--wayland-x11 --x11-backend=satellite` | `xwayland-satellite`, `Xwayland` | separate desktop windows for X11 launchers |
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
@@ -261,7 +261,7 @@ working directory.
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
 | `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, `nsenter`, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own) |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
-| `--dotnet` | a .NET runtime | your distribution's package, or Microsoft's install script into `~/.dotnet` |
+| `--dotnet` | a .NET runtime | the distribution's package, or Microsoft's install script into `~/.dotnet` |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
@@ -272,7 +272,7 @@ not an error: the game still starts, without the overlay.
 ### Per engine
 
 None of these are packaged with the project; each is found at runtime, and only
-the ones you actually use need to exist.
+the ones actually used need to exist.
 
 #### RPG Maker MV/MZ — NW.js
 
@@ -364,25 +364,25 @@ Turn on **Hide Wine's tray icon window** (`hide_tray=1`, or `--hide-tray`) to
 keep that window closed. The sandbox sets `ShowSystray=0` under
 `HKCU\Software\Wine\Explorer` in the prefix before Wine starts, so the
 setting applies from the first launch after the prefix exists. Turning it off
-removes that value again, but a value you set yourself, for example with
+removes that value again, but one set by hand, for example with
 `regedit`, stays.
 
 Proton's Wine gives every game's windows the same app ID, `steam_proton`, so
 the desktop cannot tell which game a window belongs to. The sandbox sets
 `WINE_WMCLASS` to the sandbox name, which builds that read it, such as
-DWProton, turn into `steam_app_NAME`; others ignore it. An `env=` entry of
-your own still wins.
+DWProton, turn into `steam_app_NAME`; others ignore it. An explicit `env=`
+entry still wins.
 
 Proton games also get `/dev/ntsync` where the kernel has it (6.14 and newer):
 Windows' thread synchronisation done in the kernel instead of by wineserver or
 fsync, which Wine and Proton builds that know it use on their own, to the
 benefit of CPU-bound games. It is a young driver, one more within a game's
 reach, so no other engine gets it. `sandbox-game --check` says whether it is
-there and yours to open.
+there and can be opened.
 
-Proton runs on your system's libraries, not Steam's runtime. Many Windows
+Proton runs on the system's libraries, not Steam's runtime. Many Windows
 installers and launchers are still 32-bit programs, and most Proton builds
-run those with a 32-bit Wine, which needs your distribution's 32-bit glibc
+run those with a 32-bit Wine, which needs the distribution's 32-bit glibc
 and the 32-bit libraries its display, font and sound drivers use: X11 and
 Wayland client libraries, xkbcommon, EGL and OpenGL, FreeType, Vulkan and
 GnuTLS. Without the 32-bit glibc such a program fails at once with
@@ -396,11 +396,11 @@ Videos go through GStreamer. Proton brings its own plugins, built for Steam's
 runtime, and outside it some cannot load: its FFmpeg plugin, which decodes most
 video, needs a `libvpx.so.9` that current distributions no longer ship. A game
 then fails to play its videos, and may blame the network. So both Proton games
-and native launchers using **With Proton** get your system's GStreamer plugins
+and native launchers using **With Proton** get the system's GStreamer plugins
 too, searched before Proton's, as Flatpak apps use their runtime's. Install
-your distribution's GStreamer plugin packages
+the distribution's GStreamer plugin packages
 (good, bad, ugly and libav) for the formats games use. For H.264, the most
-common one, you may need FFmpeg with H.264 from an extra repository (Packman on
+common one, FFmpeg with H.264 may be needed from an extra repository (Packman on
 openSUSE, RPM Fusion on Fedora) or the OpenH264 plugin with Cisco's library.
 
 Games that stream their videos over HTTPS hit one more snag on distributions
@@ -435,7 +435,7 @@ sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Exam
 For separate launcher windows on the desktop, choose **Satellite** in
 **Private X11 backend**, or add `--x11-backend=satellite` to that command.
 This optional backend requires `xwayland-satellite` and `Xwayland` on the host.
-They are taken from your `PATH`, `~/.cargo/bin` included, and mounted into
+They are taken from the user's `PATH`, `~/.cargo/bin` included, and mounted into
 the sandbox read-only.
 It starts a private X server for this sandbox and keeps it running until the
 game exits. Closing a launcher window leaves that server and the game running;
@@ -448,7 +448,7 @@ resolution and fullscreen settings do not apply; saved arguments are kept for
 switching back. Explicit `--gamescope` or `--gamescope=ARGS` is rejected
 with satellite.
 Satellite's window positioning and Wine scaling can differ from gamescope;
-test launcher popups and mixed Wayland/X11 coordinates with your runner.
+test launcher popups and mixed Wayland/X11 coordinates with the runner in use.
 If launcher popups crash satellite with `destroyed popup not top most popup`,
 use the project's [private satellite build](docs/satellite.md).
 
@@ -461,7 +461,7 @@ fullscreen setting is ignored in this mode. Gamescope's resolution applies
 to the X11 windows; the native
 Wayland game uses its own window and display settings.
 
-Wine places the X11 windows on the same desktop as the game: your monitors
+Wine places the X11 windows on the same desktop as the game: the monitors
 side by side at their full pixel size, so two 4K monitors at 150% scaling make
 a 7680×2160 desktop. Gamescope's X screen is made that size at launch, read
 from the compositor's monitor layout, so every window lies on it and clicks
@@ -479,7 +479,7 @@ keeping the overlay and configured FPS limit working without that connection.
 Its hotkeys for toggling the overlay, changing limits and starting recordings
 are therefore unavailable with that backend. Satellite keeps the shortcuts
 enabled. Other MangoHud settings still apply, including per-executable config
-files and explicit `MANGOHUD_CONFIG` values. If your
+files and explicit `MANGOHUD_CONFIG` values. If the
 config hides the overlay with `no_display`, set `no_display=0` to show it.
 
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
@@ -509,7 +509,7 @@ things to know:
   `--reset-install` throws these changes away, configs included.
 - BepInEx 6 for IL2CPP games downloads Unity's base libraries on its first
   start, and then takes a while generating its own files. Give that one
-  start internet access, or download the zip yourself and put it in
+  start internet access, or download the zip by hand and put it in
   `BepInEx/unity-libs/`. BepInEx 5, for Mono games, downloads nothing.
 - If nothing loads, look for `BepInEx/LogOutput.log` under `rw/`. If it is
   missing, the mod loader's DLL never ran.
@@ -528,7 +528,7 @@ reference, one such artifact is
 
 Two things about those downloads:
 
-- **You must be signed in to GitHub.** Artifact links are not public. An
+- **Downloading needs a GitHub sign-in.** Artifact links are not public. An
   anonymous `curl` or `wget` gets an HTML login page saved under the name of a
   zip, which then fails to unpack for no obvious reason. Download it in a
   browser that is logged in.
@@ -536,7 +536,7 @@ Two things about those downloads:
   once will eventually 404, including the one above — take a current run rather
   than assuming an old link still resolves.
 
-Building from source is the other option, and the only one if you want something
+Building from source is the other option, and the only one for anything
 newer than the last successful CI run.
 
 Unpack the archive whole into `~/.local/share/mkxp-z/`, so the binary sits
@@ -569,7 +569,7 @@ the [Linux port of PGMMV](https://github.com/nosini/PGMMV) with the decoder
 built in, so encrypted exports and plain editor projects use the same launcher.
 `PGMMV_DIR=/path/to/bundle` or `--pgmmv=/path/to/bundle` overrides the search.
 
-Like the other runtimes, the bundle is yours to install and update;
+Like the other runtimes, the bundle is installed and updated by hand;
 `./install.sh` never copies one. A self-built bundle kept in this checkout as
 `pgmmv-player-decrypt/` (ignored by git) is found only when `sandbox-game` runs
 from the checkout.
@@ -598,11 +598,11 @@ outside the sandbox. Both apply only when the game runs natively, through a
 
 **.NET runtime.** A .NET program published without the runtime bundled stops
 at once with *You must install .NET to run this application*, even when .NET is
-installed: the sandbox does not show your home folder or the usual install
+installed: the sandbox does not show the home folder or the usual install
 locations. When the game folder holds such a program (a
 `NAME.runtimeconfig.json` naming a framework, beside a Linux `NAME`), the
-preferences offer **.NET runtime**. It is off until you turn it on. Then
-`--dotnet` finds your install and mounts it read-only at `/dotnet`. It looks
+preferences offer **.NET runtime**. It is off until turned on. Then
+`--dotnet` finds the host's install and mounts it read-only at `/dotnet`. It looks
 in `$DOTNET_ROOT_X64` or `$DOTNET_ROOT_ARM64` before `$DOTNET_ROOT`, then
 `/etc/dotnet/install_location`, `~/.dotnet`,
 `/usr/share/dotnet`, `/usr/lib64/dotnet`, `/usr/lib/dotnet`, `/opt/dotnet`
@@ -726,7 +726,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--net` | internet access, and only that; see [Network](#network) |
 | `--allow-lan LIST` | with `--net`: these LAN addresses or networks after all, optionally only one port or protocol; see [Network](#network) |
 | `--lan` | with `--net`: the whole LAN, but still not this machine |
-| `--mac-vendor` | with `--net`: a network card address that starts like your own card's; see [Managing sandboxes](#managing-sandboxes) |
+| `--mac-vendor` | with `--net`: a network card address that starts like the host card's; see [Managing sandboxes](#managing-sandboxes) |
 | `--hosts` | a private `/etc/hosts`; see [Private hosts file](#private-hosts-file) |
 | `--add-host "ADDR NAME..."` | an entry in it, ahead of the host's own; implies `--hosts`, repeatable |
 | `--hosts-writable` | the game may edit that file too; it is then kept in the capture folder |
@@ -758,7 +758,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 
 Nautilus puts **Run as Program** right above **Scripts** in the right-click
 menu, so one misclick on a game's `.sh` or binary starts it with no sandbox
-at all. Mounting the folder you unpack games into with `noexec` takes that
+at all. Mounting the folder games are unpacked into with `noexec` takes that
 away. Nothing in it can be started directly any more: not binaries, not
 `#!` scripts such as Ren'Py's `.sh` and the Python it bundles, not a binary
 handed to the dynamic loader, not shared libraries. Nautilus sees the files
@@ -828,7 +828,7 @@ player draw SDR only.
 
 Cheat Engine, `regedit` and `winetricks` are only useful if they can see the
 game — which means the same Wine session, not merely the same prefix on disk.
-Launching a second sandbox does not give you that: `--unshare-all` hands every
+Launching a second sandbox does not give that: `--unshare-all` hands every
 launch its own PID and mount namespace, so the new process cannot see the game's
 processes, and Wine's server socket lives in `/tmp/.wine-$UID`, a tmpfs private
 to each sandbox. Same prefix, second wineserver, no contact.
@@ -888,8 +888,8 @@ sandbox-attach --put edited.rpgsave /game/www/save/file1.rpgsave
 | `--put FILE DEST` | write FILE over DEST inside, as the game sees it (into DEST when it is a folder); see below |
 
 Host paths under `~/game-sandboxes/<name>/home/` and the tools folder are
-translated to where they appear inside (`$HOME` and `/tools`), so you can paste
-the host path. The capture home is live: anything copied into it shows up in
+translated to where they appear inside (`$HOME` and `/tools`), so the host
+path can be pasted as it is. The capture home is live: anything copied into it shows up in
 the running game at once.
 
 The game's folder is not, always. What the game changed in it is kept in
@@ -922,8 +922,8 @@ a Windows program also takes Proton's run-time settings from `wineserver`. In
 split display that includes the desktop's Wayland socket, which the program
 may use as the game does.
 The `--shell` reads no `.bashrc` or profile. In a terminal, the program gets
-a terminal of the sandbox's own, which `sandbox-attach` relays, so your own
-is never handed to it; elsewhere it gets `sandbox-attach`'s stdin, stdout
+a terminal of the sandbox's own, which `sandbox-attach` relays, so the
+user's own terminal is never handed to it; elsewhere it gets `sandbox-attach`'s stdin, stdout
 and stderr. `sandbox-attach` exits with the program's exit status. Games
 started before this version have nothing to attach to; restart them.
 
@@ -942,7 +942,7 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── rw/         writes into the install directory at /game
 ├── compat/     --proton: the Wine prefix, under pfx/
 ├── registry-backup/  --proton: the prefix's last whole registry files
-├── mkxp.json   --mkxp: the runtime config, yours to edit
+├── mkxp.json   --mkxp: the runtime config, free to edit
 ├── machine-id  the game's own stand-in for /etc/machine-id
 ├── mac-address --net: the MAC address of the game's network card
 ├── mac-address-vendor  the same with --mac-vendor
@@ -1061,25 +1061,25 @@ seeing the real machine-id, in case it keyed its saves to it; delete its
 With `--net`, the game's network card has a MAC address of its own, made up
 at random the first time and kept in `mac-address`, so it never shows the real
 card's. It stays the same between launches: launchers that tie a saved login
-to the device would otherwise log you out every time.
+to the device would otherwise log the player out every time.
 
 Such a made-up address is marked as locally administered, as the addresses of
 virtual machines are, which a game could take as a sign of one. **Network card
-address with your card's manufacturer prefix** in the preferences
+address with the host card's manufacturer prefix** in the preferences
 (`mac_vendor=1`, or `--mac-vendor`) gives the game an address that starts like
-your own card's, with the rest still made up and kept in
-`mac-address-vendor`. That tells the game who made your card, which it shares
-with every other card of that make, but not which card it is. The address never
-reaches your network in either case.
+the host card's, with the rest still made up and kept in
+`mac-address-vendor`. That tells the game who made the host's card, which it
+shares with every other card of that make, but not which card it is. The
+address never reaches the local network in either case.
 
 ## Network
 
 Off by default. `--net`, or **Internet** in the preferences dialog, gives a game
-the internet and nothing else, unless you [let it reach the
+the internet and nothing else, unless it is [allowed to reach the
 LAN](#letting-a-game-reach-the-lan):
 
 - It keeps its own network namespace. `pasta` connects that to the internet
-  from outside, through ordinary sockets of yours; no port on this machine is
+  from outside, through ordinary sockets of the user's; no port on this machine is
   forwarded in, and nothing comes in from outside.
 - Routing rules refuse IPv4's private, shared and link-local space, IPv6's
   private (`fc00::/7`) and link-local space, multicast and broadcast, every
@@ -1095,7 +1095,7 @@ LAN](#letting-a-game-reach-the-lan):
   `--allow-lan fdfe:dcba:9876::/64`, say, or the same in the preferences.
 - The CA certificates are mounted too, wherever the distribution keeps them,
   so HTTPS can be verified.
-- DNS goes to `169.254.1.1`, which `pasta` forwards to your usual resolver —
+- DNS goes to `169.254.1.1`, which `pasta` forwards to the host's usual resolver —
   whether that is `127.0.0.53` or the router. Only DNS gets through to that
   address.
 - The sandbox waits for all of that before the game starts, and if any step
@@ -1130,7 +1130,7 @@ games that need it, not by default.
 
 ### Letting a game reach the LAN
 
-Some games need one machine on the LAN, such as a game server of your own. With
+Some games need one machine on the LAN, such as a self-hosted game server. With
 the internet on, **LAN addresses allowed anyway** in the preferences, or
 `--allow-lan`, opens just those. Separate the entries with commas or spaces:
 
@@ -1152,7 +1152,7 @@ stay blocked even when an allowed address or network includes them.
 ### Private hosts file
 
 **Private hosts file** in the preferences, or `--hosts`, gives the game its own
-`/etc/hosts`: yours, with conflicting names removed and the entries you list
+`/etc/hosts`: the host's, with conflicting names removed and the listed entries
 added in front of it, one per line, as in a hosts file:
 
 ```
@@ -1162,18 +1162,18 @@ added in front of it, one per line, as in a hosts file:
 
 Names resolve through that file before DNS, so this redirects them for the game
 alone. Other programs, including another copy of the same game running outside
-the sandbox, still reach the real servers. Your own `/etc/hosts` is never
+the sandbox, still reach the real servers. The host's own `/etc/hosts` is never
 changed.
 
 The file is read-only and made afresh on every launch, unless **The game may
 edit its hosts file too** (`--hosts-writable`) is on. Then it is kept as
 `~/game-sandboxes/<name>/hosts`, and what the game writes there stays. Only the
-block holding your entries is rewritten on later launches, and any conflicting
+block holding the listed entries is rewritten on later launches, and any conflicting
 names elsewhere in the file are removed, preserving unrelated aliases. Some
 programs edit `/etc/hosts` through `pkexec`, which cannot work in a sandbox.
 With this switch on, `pkexec` runs the command as it is, without extra
 privileges, and the edit goes into the game's own file. Delete that file to
-start again from yours.
+start again from the host's.
 
 ## Sound
 
@@ -1318,7 +1318,7 @@ away unless it comes from outside the sandbox's PID namespace.
 scope, `sandbox-game-<name>-<pid>.scope`, capped at 80% of RAM, 4096 tasks,
 and all but one core's worth of CPU time. That turns a leak or a fork bomb
 into a dead game instead of a frozen desktop, leaves the rest of the desktop
-a core however hard the game (or a miner hidden in it) works, and gives you a
+a core however hard the game (or a miner hidden in it) works, and gives the user a
 handle on it:
 
 ```sh
@@ -1353,45 +1353,45 @@ it is passed only so that no build goes looking for a setuid helper.
 
 ## A uid of its own
 
-Everything above runs the game as you. Its own mounts, process list and
-network, Landlock and the seccomp filter keep it from your files and your
-desktop, but to the kernel it is still your user. If one of those layers
-slips, the game is you: any file of yours it can name is open to it, and so is
-anything that trusts your uid — the session bus, the systemd user manager,
-ssh-agent, the full PipeWire socket.
+Everything above runs the game as the desktop user. Its own mounts, process
+list and network, Landlock and the seccomp filter keep it from that user's
+files and desktop, but to the kernel it is still that user. If one of those
+layers slips, the game is the user: any file of theirs it can name is open to
+it, and so is anything that trusts their uid — the session bus, the systemd
+user manager, ssh-agent, the full PipeWire socket.
 
 With `SANDBOX_SEPARATE_UID=1` each sandbox runs as a user of its own instead,
-much as Android gives each app one: a subordinate uid from your range in
+much as Android gives each app one: a subordinate uid from the user's range in
 `/etc/subuid`, the same mechanism rootless Podman uses, and a different one
 for every sandbox. The game still sees its usual uid, but on the system its
 processes and files belong to a uid that owns nothing else. A slip in the
-other layers then meets ordinary file permissions that are not yours, and
+other layers then meets ordinary file permissions that are not the user's, and
 services that check who is calling turn it away. Two sandboxes cannot read
 each other's files either.
 
 No setuid program of this project's is involved. `newuidmap` and `newgidmap`
-(from shadow, which your distribution already ships setuid for Podman) set up
-the uid. Your files are not changed to let the sandbox in: your home stays as
-closed to that uid as its permissions make it.
+(from shadow, which distributions ship setuid for rootless containers) set up
+the uid. The user's files are not changed to let the sandbox in: the home
+folder stays as closed to that uid as its permissions make it.
 
 ### Setting it up
 
-1. A subordinate range for your user of at least 50,100 ids. Most
+1. A subordinate range for the user of at least 50,100 ids. Most
    distributions give every new user 65,536:
 
    ```sh
    grep "^$USER:" /etc/subuid /etc/subgid
    ```
 
-   With no line for you in either file:
+   With no line for the user in either file:
 
    ```sh
    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
    ```
 
 2. The GPU. Render nodes are usually open to the group `render` and to the
-   logged-in user, and a sandbox's uid is neither. List the group for you as
-   well, and the sandbox gets it:
+   logged-in user, and a sandbox's uid is neither. List the group for the user
+   as well, and the sandbox gets it:
 
    ```sh
    g="$(stat -c %g /dev/dri/renderD128)"
@@ -1406,7 +1406,7 @@ closed to that uid as its permissions make it.
    SANDBOX_SEPARATE_UID=1 sandbox-game ~/Games/SomeGame /game/start.sh
    ```
 
-   or for everything you start after logging in again, Nautilus and the
+   or for everything started after logging in again, Nautilus and the
    manager included:
 
    ```sh
@@ -1416,8 +1416,8 @@ closed to that uid as its permissions make it.
 
    A sandbox that has run this way keeps doing so, also when started from
    somewhere the variable does not reach. Only `SANDBOX_SEPARATE_UID=0`
-   turns it off again, for that sandbox: it then runs as you, and its files
-   are given back to you.
+   turns it off again, for that sandbox: it then runs as the user, and its
+   files are given back to them.
 
 It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
@@ -1425,20 +1425,20 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 - A capture's `home/`, `rw/` and Wine prefix belong to the sandbox's user:
   `ls -l` shows a number such as `150001` as their owner, and a `+` for the
-  ACL entries that let you read and change them all the same, also while the
-  game runs. What either of you makes in there gets those entries too, so
-  you can edit a save, or put one there, as you would anywhere else. The game
+  ACL entries that let the user read and change them all the same, also while
+  the game runs. What either of them makes in there gets those entries too, so
+  a save can be edited, or put there, as anywhere else. The game
   runs with umask 002 for that: the group the files get is the sandbox's own.
 
   `home/` and the prefix are live: the game sees a change there at once. A
   change made straight in `rw/` while the game runs it may not see before it
   restarts, as `fuse-overlayfs` keeps what it has read; `sandbox-attach --put`
   (see [Attaching to a running game](#attaching-to-a-running-game)) makes one
-  it does. A file you *move* in from elsewhere keeps its own permissions,
+  it does. A file *moved* in from elsewhere keeps its own permissions,
   which the game can read but not change in place; copy it in instead, or it
   is handed over at the next launch. For anything else,
   `SANDBOX_SEPARATE_UID=0` gives the files back for good, or run a command as
-  the owner of both you and the sandbox:
+  the owner of both the user and the sandbox:
 
   ```sh
   ~/.local/lib/sandbox-game/sandbox-uid run ~/game-sandboxes/NAME -- rm ~/game-sandboxes/NAME/home/some-file
@@ -1446,7 +1446,7 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 - The game's own folder and Proton's are shown through `fuse-overlayfs`
   rather than the kernel's overlay, which cannot copy up a file that belongs
-  to you for a user who is not you. Reading game files is slower through it.
+  to the user for a uid that is not theirs. Reading game files is slower through it.
   The `fuse-overlayfs` process runs as the sandbox's user, with no network,
   but outside the seccomp filter and Landlock.
 - The desktop's Wayland socket and the playback-only sound server are opened
@@ -1461,7 +1461,7 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 - A `--stop` in the first moment of a launch, before the game is running,
   does not see the sandbox yet.
 - The game's folder has to be readable to other users: the sandbox's user
-  is one of them. A folder open to you alone (`chmod -R o+rX` it), or one on
+  is one of them. A folder open to its owner alone (`chmod -R o+rX` it), or one on
   an NTFS or exFAT drive mounted with `dmask=077` or `fmask=177`, as desktops
   often mount them, stops the launch with a message. Anything else bound in
   that the sandbox's user cannot read is left out with a warning.
@@ -1470,38 +1470,38 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   over file by file, which shows on large Wine prefixes.
 - Should the sandbox's uid go -- its range in `/etc/subuid` changed or
   removed -- its files are left with an owner nobody can act for but root.
-  The launch says so, with the command that gives them back to you:
+  The launch says so, with the command that gives them back to the user:
   `sudo chown -R "$USER": ~/game-sandboxes/NAME`.
 
 ### The systemd backend
 
 `SANDBOX_SEPARATE_UID=systemd` gets the game a uid of its own another way.
 systemd-nsresourced lends each launch a transient range of 64K uids, and
-systemd-mountfsd mounts your folders for it idmapped, showing your files as
-the game's. So the capture stays yours on disk: `ls -l` shows you as the
-owner, with no ACL entries, and you edit a save as you would anywhere else.
+systemd-mountfsd mounts the user's folders for it idmapped, showing their
+files as the game's. So the capture stays the user's on disk: `ls -l` shows
+them as the owner, with no ACL entries, and a save is edited as anywhere else.
 The game's folder and Proton go through the kernel's overlay, not
 `fuse-overlayfs`. Reading game files avoids the FUSE overhead, and edits made
 straight in `rw/` usually show up in the running game immediately. For reliable
 live updates, use `sandbox-attach --put` as described below. There is no
 `/etc/subuid` range and no `newuidmap`.
 
-The game still runs as a uid that is neither yours nor another sandbox's, a
+The game still runs as a uid that is neither the user's nor another sandbox's, a
 different one at every launch. Only what the sandbox binds in is shared with
 it: the capture, the game's folder, Proton, the launcher's helpers, and from
-your runtime folder only the Wayland socket and the playback-only sound
-server. Everything else of yours stays as closed to it as your permissions
+the user's runtime folder only the Wayland socket and the playback-only sound
+server. Everything else of the user's stays as closed to it as its permissions
 make it.
 
 The setting sticks to a capture, as `1` does. Switching a capture between
-`1`, `systemd` and `0` keeps its files: from `1` they are given back to you
+`1`, `systemd` and `0` keeps its files: from `1` they are given back to the user
 first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
 kernel's mark as well. The old subordinate uid's ACL entries are removed
 before that uid is released.
 
 It needs systemd 261.4 or later, on
 SELinux systems a policy module for the two services, and for the GPU copies
-of the render nodes that an administrator's helper keeps for you. On openSUSE
+of the render nodes that an administrator's helper keeps for each allowed user. On openSUSE
 Tumbleweed, `sudo ./install.sh --systemd-backend "$(id -u)"` installs that
 setup. Its explicit administrator install/removal modes are separate from the
 ordinary per-user install: see [`systemd-backend/`](systemd-backend/README.md).
@@ -1511,16 +1511,16 @@ network belongs to the sandbox's namespace rather than to bwrap's, and pasta
 runs as the sandbox's transient uid too. `sandbox-attach`, including `--put`,
 works as with the other backends. Use `--put` to change a live overlay;
 editing `rw/` directly is not guaranteed to reach the running game.
-`sandbox-uid run CAP -- CMD...` runs the command as you, since the capture
-already belongs to you. Both delegation workers must report the same stable
+`sandbox-uid run CAP -- CMD...` runs the command as the user, since the
+capture already belongs to them. Both delegation workers must report the same stable
 version, 261.4 or later; an unavailable or unsupported backend stops the
 launch before changing the capture. With a single user id mapped on files,
-what the game creates gets your uid as its group id too.
-Your primary group must have your uid's number, and the files the game
+what the game creates gets the user's uid as its group id too.
+The user's primary group must have their uid's number, and the files the game
 writes to, connects to or copies up must belong to it: the kernel lets no one
 write to a file whose group the mapping lacks. Other layouts are refused
 before changing a capture, naming the folders to regroup; see
-[Your account's group](systemd-backend/README.md#your-accounts-group).
+[The account's group](systemd-backend/README.md#the-accounts-group).
 
 Expect a launch to take a few seconds longer than under the other backends,
 most of the time. systemd-nsresourced serves requests from a pool of five

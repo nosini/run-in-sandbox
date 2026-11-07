@@ -170,7 +170,7 @@ class GroupTests(unittest.TestCase):
             text = uid.group_error([(str(b / "my game"), st_dir), (str(b / "sock"), st_sock)])
         self.assertIn("chgrp -R 1500 '" + str(b / "my game") + "'", text)
         self.assertIn(str(b / "sock") + ": a socket from before your group changed", text)
-        self.assertIn("Your account's group", text)
+        self.assertIn("The account's group", text)
         self.assertIsNone(uid.group_error([]))
 
     def test_launch_refuses_before_anything_changes(self):

@@ -44,7 +44,7 @@ die() { echo "desktop-gpu-check: $*" >&2; exit 1; }
 [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] \
     || die "run it in your Wayland desktop session (WAYLAND_DISPLAY is not set)"
 [ "$(id -g)" = "$(id -u)" ] \
-    || die "your primary group is not your uid's number; see \"Your account's group\" in $here/README.md"
+    || die "your primary group is not your uid's number; see \"The account's group\" in $here/README.md"
 compgen -G '/dev/dri/renderD*' >/dev/null || die "no /dev/dri/renderD* here: no GPU to test"
 
 mkdir -p "$results" || die "cannot make $results"

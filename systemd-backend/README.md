@@ -11,7 +11,7 @@ matching systemd and systemd-container packages, stable **261.4 or later**.
 On SELinux systems, checkmodule, semodule_package, semodule and restorecon
 must be installed (the policy development tools).
 Each launching user's primary group must have their uid's number; see
-[Your account's group](#your-accounts-group).
+[The account's group](#the-accounts-group).
 
 From a complete checkout, install the ordinary per-user tools first. Stop
 games and other users of managed namespaces before installing or updating
@@ -58,17 +58,17 @@ changing the capture. Missing/unsupported services stop the launch; they
 never cause a capture to fall back to another backend. For a checkout,
 `./sandbox-uid managed-available` runs the same availability check.
 
-## Your account's group
+## The account's group
 
-systemd-mountfsd maps one number into the sandbox: your uid's, for owners and
-groups alike. The kernel lets no one, not even the owner, write to a file
+systemd-mountfsd maps one number into the sandbox: the launching user's uid,
+for owners and groups alike. The kernel lets no one, not even the owner, write to a file
 whose group the mapping lacks, or connect to such a socket. So the backend
-needs your primary group to have your uid's number, and everything the game
+needs the user's primary group to have their uid's number, and everything the game
 writes to, connects to or copies up from to belong to it.
 
 Current openSUSE Tumbleweed gives each new account a group of its own with
 that number. Older accounts often have `users` (100) instead. The installer
-refuses such an account, and the launcher checks your primary group before
+refuses such an account, and the launcher checks the primary group before
 changing anything, the whole capture before it converts it to this backend,
 and the game's folder, Proton and the desktop's sockets on every launch. It
 names what to change. A launch stopped by the last of those leaves the
@@ -84,19 +84,19 @@ sudo usermod -g alice -aG users alice # keep `users` as a supplementary group
 
 If a group with that number already belongs to someone else, this account
 cannot use the backend. `usermod -g` also gives the new group to the files
-in your home folder that had the old one, captures and Steam's Proton
+in the account's home folder that had the old one, captures and Steam's Proton
 included. Then log out completely and back in (reboot if the user manager
 lingers), so that the desktop makes its sockets with the new group.
 
 Game folders elsewhere, on another drive say, keep the old group. Give them
-the new one as the launcher's message lists them; you own them, so no root
-is needed:
+the new one as the launcher's message lists them; the account owns them, so
+no root is needed:
 
 ```sh
 chgrp -R alice /mnt/games/NAME
 ```
 
-Files you make from then on belong to `alice` rather than `users`: other
+Files the account makes from then on belong to `alice` rather than `users`: other
 members of `users` lose group access to them. The launcher checks the
 folders themselves on every launch, and the whole capture once when a game
 first switches to this backend; files deeper in a game folder that kept the
@@ -119,7 +119,7 @@ The installer does not delete shared BPF state.
 
 To switch a capture back, launch that game once with `SANDBOX_SEPARATE_UID=1`
 (the subordinate-uid backend, which needs its own setup) or
-`SANDBOX_SEPARATE_UID=0` (your uid). Its saves and prefix are kept. Then stop
+`SANDBOX_SEPARATE_UID=0` (the user's own uid). Its saves and prefix are kept. Then stop
 the games and remove the administrator setup:
 
 ```sh
@@ -131,8 +131,8 @@ and mount, removes the packaged policy/helper/units, and disables only the
 delegation sockets this installation enabled. Shared idle delegation services
 are stopped before policy removal; their vendor units are kept. The GPU
 allowlist, per-user tools, settings and captures are kept. A capture still
-marked `systemd` refuses to launch after removal until you explicitly switch
-it to another available backend. Normal `./install.sh --uninstall` removes
+marked `systemd` refuses to launch after removal until it is explicitly
+switched to another available backend. Normal `./install.sh --uninstall` removes
 only the per-user installation and its optional sound setup.
 
 ## SELinux service policy
@@ -140,7 +140,7 @@ only the per-user installation and its optional sound setup.
 [`sandbox_game_systemd.te`](sandbox_game_systemd.te) extends the existing
 `systemd_mountfsd_t` and `systemd_nsresourced_t` domains of openSUSE
 Tumbleweed's policy. It has no game domain, per-game labels or relabeling.
-The services take folders of your home, your runtime directory and game
+The services take folders of the user's home, their runtime directory and game
 folders elsewhere (a drive under `/mnt` or `/run/media`, FAT, exFAT, NTFS
 or another FUSE filesystem, a folder at `/`) by descriptor, and handle
 namespaces; their Varlink checks that the caller owns what it hands over
@@ -156,7 +156,7 @@ Upstream policy (Fedora's, which openSUSE's follows) still gives mountfsd no
 module's mountfsd rules go beyond it: they match what upstream already grants
 nsresourced, plus `sys_ptrace` inside user namespaces and namespace creation
 for the idmapping.
-Neither service may take descriptors for your folders upstream. nsresourced's
+Neither service may take descriptors for the user's folders upstream. nsresourced's
 `sys_admin` is upstream from Fedora v45.22 and openSUSE 20261030; the module
 keeps it for older policies.
 
@@ -170,7 +170,7 @@ restriction check from [validation.md](validation.md); each removal broke one
 of them. Rules found unnecessary that way were dropped: `sys_chroot`, reading
 the callers' process files, and nsresourced's runtime-directory access,
 which stock policy already grants. Of the types for game folders outside
-your home, only `mnt_t` was checked so (a game folder under `/mnt` is
+the home folder, only `mnt_t` was checked so (a game folder under `/mnt` is
 refused without it); the others follow from it, untested. A rule refused at
 run time shows as an AVC denial; the one for `/proc/pressure` is expected
 and harmless.

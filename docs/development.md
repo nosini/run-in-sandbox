@@ -128,7 +128,7 @@ Run them as an ordinary user from the checkout, with a fresh, short
   supported way to change a running game's files.
 - Game files owned by another user can be read and new files saved, but
   replacing such a file can fail with `EOVERFLOW`, since its owner is not
-  mapped. A copy of the game owned by you avoids that.
+  mapped. A copy of the game owned by the launching user avoids that.
 - Unit files under `/usr/local` are not available when PID 1 builds the
   boot transaction on openSUSE, where it is a separate subvolume; the
   administrator setup installs its units in `/etc/systemd/system`.
