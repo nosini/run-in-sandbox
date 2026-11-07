@@ -1068,6 +1068,19 @@ class LibraryTests(unittest.TestCase):
                 self.library.save_preferences(name, {"scope": "game", key: bad})
             self.assertEqual(self.library.scope_settings(name), before)
 
+    def test_legacy_dialog_response_preserves_security_instead_of_copying_or_clearing_it(self):
+        import runpy
+        Preferences = runpy.run_path(str(ROOT / "sandbox-game-dialog"))["Preferences"]
+        name = self.library.create("game")["name"]
+        defaults = {"separate_uid": "systemd", "seccomp_policy": "allowlist", "seccomp": "log"}
+        self.library.save_preferences(name, {"scope": "all", **defaults})
+        state = Preferences({"engine": "native", "values": self.library.settings(name)})
+        self.library.save_preferences(name, state.result())
+        self.assertTrue(defaults.keys().isdisjoint(self.library.scope_settings(name)))
+        state.set_scope("all")
+        self.library.save_preferences(name, state.result())
+        self.assertEqual({k: self.library.scope_settings(name, True)[k] for k in defaults}, defaults)
+
     def test_security_preferences_override_and_export_environment(self):
         name = self.library.create("game")["name"]
         variables = {"SANDBOX_SEPARATE_UID": "systemd", "SANDBOX_SECCOMP_POLICY": "allowlist",

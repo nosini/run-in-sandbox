@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = runpy.run_path(str(ROOT / "sandbox-game-dialog"))
@@ -64,10 +65,58 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.result()["seccomp"], "log")
 
     def test_explicit_log_mode_conflicts_with_required_seccomp(self):
-        state = Preferences({"values": {"require": "seccomp", "seccomp": "log"}})
+        state = Preferences({"security": {"game": {"require": "seccomp", "seccomp": "log"}, "all": {}}})
         self.assertIn("Enforce", state.error())
         state.values["seccomp"] = "enforce"
         self.assertIsNone(state.error())
+
+    def test_seccomp_requirement_checks_inheritance_and_each_scopes_requirements(self):
+        own = {"require": "seccomp"}
+        defaults = {"seccomp": "log"}
+        with patch.dict(os.environ, {"SANDBOX_SECCOMP": "enforce"}):
+            state = Preferences({"security": {"game": own, "all": defaults}})
+        self.assertIn("Enforce", state.error())
+        state.values["seccomp"] = "enforce"
+        self.assertIsNone(state.error())
+        state.set_scope("all")
+        self.assertEqual(state.values["require"], "")
+        self.assertEqual(state.values["seccomp"], "log")
+        self.assertIsNone(state.error())
+        self.assertEqual(state.result()["require"], "")
+        state.values["require"] = "seccomp"
+        self.assertIn("Enforce", state.error())
+        state.set_scope("game")
+        self.assertEqual(state.values["require"], "seccomp")
+        self.assertIsNone(state.error())
+
+    def test_seccomp_requirement_checks_environment_and_only_saved_inherited_edits(self):
+        with patch.dict(os.environ, {"SANDBOX_SECCOMP": "log"}):
+            state = Preferences({"security": {"game": {"require": "seccomp"}, "all": {}}})
+        self.assertIn("Enforce", state.error())
+        state.set_scope("all")
+        state.values["seccomp"] = "enforce"
+        state.set_scope("game")
+        self.assertIn("Enforce", state.error())  # the default edit has not been saved
+        state.set_scope("all")
+        state.mark_saved()
+        state.set_scope("game")
+        self.assertIsNone(state.error())
+        state.values["seccomp"] = "log"
+        self.assertIn("Enforce", state.error())
+
+    def test_legacy_merged_requests_leave_security_choices_out_of_both_scopes(self):
+        state = Preferences({"values": {"separate_uid": "systemd", "seccomp": "log",
+                                         "seccomp_policy": "allowlist"}})
+        self.assertFalse(state.security_controls)
+        for scope in ("game", "all"):
+            state.set_scope(scope)
+            self.assertTrue(MODULE["SECURITY_CHOICES"].keys().isdisjoint(state.result()))
+
+    def test_invalid_security_choice_is_visible_and_inherit_labels_stay_consistent(self):
+        for scope in ("game", "all"):
+            choices = MODULE["security_choices"]("seccomp", scope, "on")
+            self.assertEqual(choices[0], ("", MODULE["inherit_label"](scope)))
+            self.assertEqual(choices[-1], ("on", "Invalid saved value: on"))
 
     def test_satellite_backend_round_trip_and_gamescope_controls(self):
         state = Preferences({"engine": "proton", "values": {
@@ -302,6 +351,46 @@ class GtkDialogTests(unittest.TestCase):
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["separate_uid"], "0")
         self.assertEqual(self.responses[0][1]["seccomp_policy"], "")
+
+    def test_invalid_security_value_can_be_replaced_by_inherit_in_one_selection(self):
+        dialog = self.create("preferences", {"security": {
+            "game": {"seccomp": "on"}, "all": {"separate_uid": "yes"}}})
+        self.assertEqual(dialog.selected("seccomp"), "on")
+        self.assertIn("Invalid saved value: on", [label for _, label in dialog.choices["seccomp"]])
+        self.assertIn("Unknown seccomp", dialog.state.error())
+        dialog.widgets["seccomp"].set_selected(0)
+        self.assertEqual(dialog.state.result()["seccomp"], "")
+        self.assertIsNone(dialog.state.error())
+        dialog.widgets["scope"].set_selected(1)
+        self.assertEqual(dialog.selected("separate_uid"), "yes")
+        dialog.widgets["separate_uid"].set_selected(0)
+        dialog.widgets["scope"].set_selected(0)
+        dialog.widgets["scope"].set_selected(1)
+        self.assertEqual(dialog.selected("separate_uid"), "")
+        self.assertEqual(dialog.choices["separate_uid"][0][1], MODULE["inherit_label"]("all"))
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["scope"], "all")
+
+    def test_scope_switch_updates_requirement_switches_and_the_seccomp_check(self):
+        dialog = self.create("preferences", {"security": {
+            "game": {"require": "seccomp", "seccomp": "enforce"}, "all": {"seccomp": "log"}}})
+        self.assertTrue(dialog.widgets["require_seccomp"].get_active())
+        dialog.widgets["scope"].set_selected(1)
+        self.assertFalse(dialog.widgets["require_seccomp"].get_active())
+        self.assertIsNone(dialog.state.error())
+        dialog.widgets["scope"].set_selected(0)
+        self.assertTrue(dialog.widgets["require_seccomp"].get_active())
+        self.assertEqual(dialog.selected("seccomp"), "enforce")
+        self.assertIsNone(dialog.state.error())
+
+    def test_legacy_scope_does_not_offer_unknown_security_or_defaults_requirements(self):
+        dialog = self.create("preferences", {"values": {"seccomp": "log", "require": "seccomp"}})
+        self.assertFalse(dialog.security_group.get_visible())
+        self.assertTrue(dialog.require_group.get_visible())
+        dialog.widgets["scope"].set_selected(1)
+        self.assertFalse(dialog.require_group.get_visible())
+        self.assertNotIn("require", dialog.state.result())
+        self.assertTrue(MODULE["SECURITY_CHOICES"].keys().isdisjoint(dialog.state.result()))
 
     def test_dark_theme_previews_then_cancel_restores_without_saving(self):
         dialog = self.create("preferences", {"engine": "native"})

@@ -165,6 +165,7 @@ def main():
                             raise ValueError(f"Leave out the env= in front: {word[4:]}")
                     result["env"] = " ".join(words)
                 self.manager.library.save_preferences(self.name, result)
+                self.state.mark_saved()
                 self.appearance.save(self.selected("appearance"))
                 self.error_note.set_visible(False)
                 self.notify("Defaults saved" if self.state.defaults_only else "Settings saved")

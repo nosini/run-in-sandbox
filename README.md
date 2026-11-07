@@ -1447,7 +1447,9 @@ do what is required, rather than warn. They hold however the game is started
 inside the same Landlock domain, seccomp filter and scope. `sandbox-game
 --check` lists the defaults' requirements and every game's own, and says what
 this machine cannot meet; what a launch's own display or sound settings
-contradict is said when it is started.
+contradict is said when it is started. It also compiles each game's selected
+seccomp policy. Invalid saved settings are reported separately from unavailable
+protections.
 
 ## A uid of its own
 

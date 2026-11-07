@@ -49,9 +49,10 @@ cfg_get() {                                    # $1 = key, $2 = fallback
 # Host-side protection choices apply even to direct CLI launches: per-game
 # settings, then defaults, then the environment. An empty value uses the latter.
 # A subshell caller (such as --check) can apply another game's choices safely.
+SECURITY_PREF_KEYS="separate_uid seccomp_policy seccomp"
 security_prefs() {
     local key value var
-    for key in separate_uid seccomp_policy seccomp; do
+    for key in $SECURITY_PREF_KEYS; do
         value="$(cfg_get "$key" '')"
         [ -n "$value" ] || continue
         case "$key:$value" in
@@ -581,7 +582,7 @@ PY
     bools="wayland wayland_x11 host_x11 mangohud hdr gamescope net launch_with mod_loaders steam hide_tray casefold webgl proton
            dotnet lan mac_vendor private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe x11_backend require"
-    security="separate_uid seccomp_policy seccomp"
+    security="$SECURITY_PREF_KEYS"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
         for key in $bools; do

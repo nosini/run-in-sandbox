@@ -509,6 +509,34 @@ check_host() {
     local here rt out abi failed=0 nodes=()
     rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     _check_line() { printf '  %s  %-12s %s\n' "$1" "$2" "$3"; [ "$1" != '!!' ] || failed=1; }
+    # Each saved scope may choose another policy. Keep invalid preferences
+    # distinct from a compiler failure, and propagate neither scope's exports.
+    _check_filter() {
+        local out status label="${1:-defaults}"
+        if out="$(
+            exec 2>&1
+            NAME="$1"
+            security_prefs || exit 2
+            compiler="$(helper sandbox-seccomp)"
+            [ -n "$compiler" ] || { echo "sandbox-seccomp not found"; exit 1; }
+            "$compiler" --status || exit 1
+        )"; then
+            if [ "$out" = "socket families filtered" ]; then
+                _check_line ok seccomp "$label: syscall filter, socket families filtered"
+            else
+                _check_line -- seccomp "$label: syscall filter; $out"
+            fi
+            return 0
+        else
+            status=$?
+            if [ "$status" = 2 ]; then
+                _check_line '!!' preferences "$label: $out"
+            else
+                _check_line '!!' seccomp "$label: cannot build the filter: $out"
+            fi
+            return "$status"
+        fi
+    }
 
     if command -v flock >/dev/null; then
         _check_line ok flock "one writer per sandbox"
@@ -524,15 +552,8 @@ check_host() {
         _check_line '!!' sandbox "cannot start one: $out"
     fi
 
-    if [ -z "$(helper sandbox-seccomp)" ]; then
-        _check_line '!!' seccomp "sandbox-seccomp not found"
-    elif ! out="$(NAME=""; { security_prefs && "$(helper sandbox-seccomp)" --status; } 2>&1)"; then
-        _check_line '!!' seccomp "cannot build the filter: $out"
-    elif [ "$out" = "socket families filtered" ]; then
-        _check_line ok seccomp "syscall filter, socket families filtered"
-    else
-        _check_line -- seccomp "syscall filter; $out"
-    fi
+    local default_filter_status=0
+    _check_filter "" || default_filter_status=$?
 
     abi="$(python3 "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
     if [ "$abi" -ge 6 ] 2>/dev/null; then
@@ -611,22 +632,37 @@ check_host() {
     # Saved requirements, by game, as a launch would take them -- a game's own
     # file over the defaults -- and what of each this machine cannot meet.
     # What a launch's display or sound would contradict is said at launch.
-    local name file all
+    local name file all key own_security filter_status
     for file in "$CFGDIR/defaults" "$CFGDIR"/games/*; do
         [ -f "$file" ] || continue
         if [ "$file" = "$CFGDIR/defaults" ]; then name=""; else name="${file##*/}"; fi
+        own_security=0
+        for key in $SECURITY_PREF_KEYS; do
+            file_get "$file" "$key" >/dev/null && own_security=1
+        done
+        filter_status="$default_filter_status"
+        if [ -n "$name" ] && [ "$own_security" = 1 ]; then
+            filter_status=0
+            _check_filter "$name" || filter_status=$?
+        fi
+        [ "$filter_status" != 2 ] || continue  # a configuration error, already reported
         all="$(NAME="$name" cfg_get require "")"
         [ -n "$all" ] || continue
-        # A game's line only where it sets requirements or a seccomp mode
-        # that could contradict them; otherwise the defaults' line covers it.
-        [ -z "$name" ] || file_get "$file" require >/dev/null \
-            || file_get "$file" seccomp >/dev/null || continue
+        [ -z "$name" ] || [ "$own_security" = 1 ] || file_get "$file" require >/dev/null || continue
         if ! parse_requirements "$all" 2>/dev/null; then
-            _check_line '!!' require "${name:-defaults}: unknown requirement in '$all'"
-        elif out="$(NAME="$name"; { security_prefs && requirement_failures $R_REQUIRE; } 2>&1)" && [ -z "$out" ]; then
-            _check_line ok require "${name:-defaults}: $R_REQUIRE"
+            _check_line '!!' preferences "${name:-defaults}: unknown requirement in '$all'"
         else
-            _check_line '!!' require "${name:-defaults}: $R_REQUIRE; cannot launch here: ${out//$'\n'/; }"
+            # Only stdout lists unmet protections. Helpers' warnings remain on
+            # stderr and do not turn a satisfied requirement into a refusal.
+            out="$(NAME="$name"; security_prefs && requirement_failures $R_REQUIRE)"
+            if [ "$filter_status" != 0 ] && [[ " $R_REQUIRE " == *" seccomp "* ]]; then
+                out+="${out:+$'\n'}seccomp: the selected filter cannot be built"
+            fi
+            if [ -z "$out" ]; then
+                _check_line ok require "${name:-defaults}: $R_REQUIRE"
+            else
+                _check_line '!!' require "${name:-defaults}: $R_REQUIRE; cannot launch here: ${out//$'\n'/; }"
+            fi
         fi
     done
     return "$failed"
@@ -1060,9 +1096,9 @@ fi
 required() { [[ " $REQUIRE " == *" $1 "* ]]; }
 if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
     if [ "$SEPARATE_UID" = 0 ]; then
-        echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
+        echo "sandbox-game: $NAME runs as you from now on; giving its files back" >&2
     else
-        echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME no longer runs as a subordinate uid; giving its files back" >&2
+        echo "sandbox-game: $NAME no longer runs as a subordinate uid; switching to systemd and giving its files back" >&2
     fi
     reclaim "$CAP" || exit 1
     # Another sandbox may get that uid later: its ACL entries go too.
@@ -1078,7 +1114,7 @@ if [ "$SEPARATE_UID" = systemd ] && [ "$(cat -- "$CAP/managed-uid" 2>/dev/null)"
     "$UIDHELPER" managed-adopt "$CAP" || exit 1
     printf '1\n' > "$CAP/managed-uid"  # the storage's format, should it change
 elif [ "$SEPARATE_UID" != systemd ] && [ -f "$CAP/managed-uid" ]; then
-    echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME no longer runs under the systemd backend" >&2
+    echo "sandbox-game: $NAME no longer runs under the systemd backend" >&2
     rm -f "$CAP/managed-uid"
 fi
 # Under it, the capture stays the sandbox's between runs. sandbox-game's own

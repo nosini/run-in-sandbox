@@ -35,17 +35,11 @@ RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
 [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=""
 PROTONS="$("$SANDBOX" --list-proton 2>/dev/null)"
 OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
-SECURITY_ARGS=()
-for scope in game all; do
-    file="$CFGDIR/games/$NAME"; [ "$scope" != all ] || file="$CFGDIR/defaults"
-    for key in separate_uid seccomp_policy seccomp; do
-        SECURITY_ARGS+=( "$scope:$key" "$(file_get "$file" "$key" || true)" )
-    done
-done
 
 # JSON is data, never shell code. Folder names and values need no escaping by
 # hand, and all controls keep their values while switching between runtimes.
 REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" "$DOTNET_APP" \
+    "$CFGDIR/games/$NAME" "$CFGDIR/defaults" \
     launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
     wayland_x11 "$(cfg_wayland_x11)" x11_exe "$(cfg_get x11_exe '')" \
     x11_backend "$(cfg_get x11_backend gamescope)" \
@@ -57,18 +51,26 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" \
     lan "$(cfg_get lan 0)" lan_allow "$(cfg_get lan_allow '')" mac_vendor "$(cfg_get mac_vendor 0)" \
     private_hosts "$(cfg_get private_hosts 0)" hosts "$(cfg_get hosts '')" \
-    hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" \
-    "${SECURITY_ARGS[@]}" <<'PY'
+    hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" <<'PY'
 import json, sys
+from pathlib import Path
 name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
-values = dict(zip(sys.argv[9::2], sys.argv[10::2]))
-security = {scope: {key.split(":", 1)[1]: value for key, value in values.items()
-                    if key.startswith(scope + ":")} for scope in ("game", "all")}
+security = {}
+for scope, path in zip(("game", "all"), sys.argv[9:11]):
+    values = {}
+    try:
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and not key.lstrip().startswith("#"):
+                values[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    security[scope] = values
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
                can_proton=proton == "1", renpy_x11=renpy == "1", dotnet=dotnet == "1",
                resolution=resolution, protons=installs.splitlines(),
                game_settings=own == "1", security=security,
-               values={key: value for key, value in values.items() if ":" not in key}), sys.stdout)
+               values=dict(zip(sys.argv[11::2], sys.argv[12::2]))), sys.stdout)
 PY
 )" || die "Cannot prepare preferences."
 if OUT="$(dialog preferences <<<"$REQUEST")"; then :

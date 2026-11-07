@@ -28,6 +28,22 @@ SECURITY_CHOICES = {
 }
 
 
+def inherit_label(scope):
+    return "Use environment" if scope == "all" else "Use defaults, then environment"
+
+
+def security_choices(key, scope, value):
+    choices = [("", inherit_label(scope)), *SECURITY_CHOICES[key]]
+    if value not in {value for value, _ in choices}:
+        choices.append((value, f"Invalid saved value: {value}"))
+    return choices
+
+
+def requirements_value(text):
+    asked = re.split(r"[\s,]+", text)
+    return ",".join(key for key, _ in REQUIREMENTS if "all" in asked or key in asked)
+
+
 class Appearance:
     """Application-wide theme; previewing never writes the desktop settings."""
 
@@ -173,11 +189,7 @@ class Preferences:
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("with_proton", "lan_allow", "hosts"):
             self.values[key] = self.values.get(key, "")
-        asked = [w for w in re.split(r"[\s,]+", self.values.get("require", "")) if w]
-        # "all", written by hand, is every one: shown as none, a save would drop them.
-        if "all" in asked:
-            asked = [key for key, _ in REQUIREMENTS]
-        self.values["require"] = ",".join(key for key, _ in REQUIREMENTS if key in asked)
+        self.values["require"] = requirements_value(self.values.get("require", ""))
         self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
         self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
         self.runtime = self.values.get("launch_with", "auto")
@@ -187,10 +199,20 @@ class Preferences:
         # Keep each scope's protection choices separate, including unsaved
         # edits. An inherited choice must stay inherited after saving.
         self.security_scope = self.scope
-        scopes = request.get("security", {self.scope: self.values})
+        # Legacy callers only send merged values. Their provenance is unknown:
+        # leave security settings untouched rather than copy or clear them.
+        scopes = request.get("security", {"all": self.values} if self.defaults_only else {})
+        self.security_scopes = set(scopes)
         self.security_values = {scope: {key: scopes.get(scope, {}).get(key, "") for key in SECURITY_CHOICES}
                                 for scope in ("game", "all")}
         self.values.update(self.security_values[self.scope])
+        default_require = scopes.get("all", {}).get("require", "")
+        game_require = scopes.get("game", {}).get("require", default_require or self.values["require"])
+        self.require_values = {"game": requirements_value(game_require),
+                               "all": requirements_value(default_require)}
+        self.values["require"] = self.require_values[self.scope]
+        self.host_seccomp = os.environ.get("SANDBOX_SECCOMP", "")
+        self.default_seccomp = self.security_values["all"]["seccomp"]
         if self.values.get("host_x11") == "1":
             self.display = "host-x11"
         elif self.values.get("wayland_x11") == "1" and self.values.get("wayland") == "1":
@@ -254,14 +276,33 @@ class Preferences:
     def hosts_controls(self):
         return self.values.get("private_hosts") == "1"
 
+    @property
+    def security_controls(self):
+        return self.scope in self.security_scopes
+
+    @property
+    def require_controls(self):
+        return self.scope == "game" or self.scope in self.security_scopes
+
+    @property
+    def effective_seccomp(self):
+        mode = self.values["seccomp"]
+        if not mode and self.scope == "game":
+            mode = self.default_seccomp
+        return mode or self.host_seccomp
+
+    def mark_saved(self):
+        if self.scope == "all":
+            self.default_seccomp = self.values["seccomp"]
+
     def error(self):
         """Why the visible settings cannot be saved, or None."""
         if self.scope == "clear":
             return None
         for key, choices in SECURITY_CHOICES.items():
-            if self.values[key] not in ("", *(value for value, _ in choices)):
+            if self.security_controls and self.values[key] not in ("", *(value for value, _ in choices)):
                 return f"Unknown {key} setting: {self.values[key]}"
-        if "seccomp" in self.values["require"].split(",") and self.values["seccomp"] == "log":
+        if self.security_controls and "seccomp" in self.values["require"].split(",") and self.effective_seccomp == "log":
             return "An enforced syscall filter is required; select Enforce instead of Log only."
         if self.lan_allow_controls and lan_error(self.values["lan_allow"]):
             return lan_error(self.values["lan_allow"])
@@ -295,10 +336,12 @@ class Preferences:
 
     def set_scope(self, scope):
         self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
+        self.require_values[self.security_scope] = self.values["require"]
         self.scope = scope
         if scope != "clear":
             self.security_scope = scope
             self.values.update(self.security_values[scope])
+            self.values["require"] = self.require_values[scope]
 
     def result(self):
         if self.scope == "clear":
@@ -340,8 +383,10 @@ class Preferences:
         if self.hosts_controls:
             result["hosts"] = hosts_value(self.values["hosts"])
             result["hosts_writable"] = self.values["hosts_writable"]
-        result["require"] = self.values["require"]
-        result.update({key: self.values[key] for key in SECURITY_CHOICES})
+        if self.require_controls:
+            result["require"] = self.values["require"]
+        if self.security_controls:
+            result.update({key: self.values[key] for key in SECURITY_CHOICES})
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -476,6 +521,7 @@ class Dialog:
     def section(self, title, description=None):
         group, self.preference_list = preference_group(self.Gtk, title, description)
         self.body.append(group)
+        return group
 
     def row(self, key, label, widget):
         row = preference_row(self.Gtk, self.Adw, label, widget)
@@ -619,18 +665,19 @@ class Dialog:
         self.switch("hosts_writable", "The game may edit its hosts file too",
                     self.state.values["hosts_writable"] == "1",
                     lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
-        self.section("Sandbox protections", "Saved choices override environment variables. "
+        self.security_group = self.section("Sandbox protections", "Saved choices override environment variables. "
                      "Unset game choices use the defaults, then the environment. "
                      "Without a uid choice, an existing sandbox keeps its previous backend.")
         for key, label in (("separate_uid", "Separate uid backend"),
                            ("seccomp_policy", "Seccomp filter"), ("seccomp", "Seccomp mode")):
-            inherit = "Use environment" if self.state.defaults_only else "Use defaults, then environment"
-            self.dropdown(key, label, [("", inherit), *SECURITY_CHOICES[key]],
+            self.dropdown(key, label, security_choices(key, self.state.scope, self.state.values[key]),
                           self.state.values[key], lambda *_, key=key: self.set_value(key, self.selected(key)))
-        self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
+        self.security_group.set_visible(self.state.security_controls)
+        self.require_group = self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
         for key, label in REQUIREMENTS:
             self.switch("require_" + key, label, key in self.state.values["require"].split(","),
                         lambda widget, *_, key=key: self.require_changed(key, widget.get_active()))
+        self.require_group.set_visible(self.state.require_controls)
         if not self.state.defaults_only:
             self.section("Save settings")
             self.dropdown("scope", "Save for", [("game", "This game only"), ("all", "All games (defaults)"),
@@ -675,9 +722,12 @@ class Dialog:
     def scope_changed(self, *_):
         self.state.set_scope(self.selected("scope"))
         self.updating = True
-        for key, choices in SECURITY_CHOICES.items():
-            inherit = "Use environment" if self.state.scope == "all" else "Use defaults, then environment"
-            self.set_options(key, [("", inherit), *choices], self.state.values[key])
+        for key in SECURITY_CHOICES:
+            self.set_options(key, security_choices(key, self.state.scope, self.state.values[key]), self.state.values[key])
+        self.security_group.set_visible(self.state.security_controls)
+        self.require_group.set_visible(self.state.require_controls)
+        for key, _ in REQUIREMENTS:
+            self.widgets["require_" + key].set_active(key in self.state.values["require"].split(","))
         self.updating = False
         for key, row in self.rows.items():
             if key not in ("scope", "appearance"):

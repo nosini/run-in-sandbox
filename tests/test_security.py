@@ -2708,6 +2708,19 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
             env=env or self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         return result, marker.exists()
 
+    def test_saved_none_backend_message_does_not_blame_an_environment_variable(self):
+        capture = self.home / "game-sandboxes/game"
+        (capture / "home").mkdir(parents=True)
+        (capture / "home/save").write_text("save")
+        (capture / "managed-uid").write_text("1\n")
+        self.save_prefs("game", "separate_uid=0\n")
+        self.env.pop("SANDBOX_SEPARATE_UID", None)
+        result = self.run_guest('cat "$HOME/save"')
+        self.assertEqual(result.stdout, "save")
+        self.assertIn("no longer runs under the systemd backend", result.stderr)
+        self.assertNotIn("SANDBOX_SEPARATE_UID=", result.stderr)
+        self.assertFalse((capture / "managed-uid").exists())
+
     def test_saved_security_choices_override_environment_on_real_launches(self):
         nr = {"x86_64": 308, "aarch64": 268}.get(os.uname().machine)
         if nr is None:
@@ -2834,6 +2847,63 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
         out = self.cli("--check", check=False).stdout
         self.assertRegex(out, r"!!\s+require\s+defaults: seccomp; cannot launch here: seccomp:")
         self.assertRegex(out, r"ok\s+require\s+logging: seccomp")
+
+    def test_check_builds_game_policies_and_reports_all_security_overrides(self):
+        scripts = self.base / "check-policy"
+        scripts.mkdir()
+        for name in ("sandbox-game", "sandbox-game-lib", "sandbox-landlock"):
+            shutil.copy2(ROOT / name, scripts / name)
+        compiler = scripts / "sandbox-seccomp"
+        compiler.write_text('#!/bin/sh\n'
+            'if [ "$SANDBOX_SECCOMP_POLICY" = allowlist ]; then\n'
+            '  echo "allowlist unsupported by this libseccomp" >&2; exit 1\n'
+            'fi\necho "socket families filtered"\n')
+        compiler.chmod(0o755)
+        self.save_prefs(None, "require=seccomp\nseccomp=enforce\nseccomp_policy=denylist\n")
+        self.save_prefs("policy", "seccomp_policy=allowlist\n")
+        self.save_prefs("uid-only", "separate_uid=0\n")
+        self.save_prefs("mode-only", "seccomp=log\n")
+        result = subprocess.run([str(scripts / "sandbox-game"), "--check"], env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertRegex(result.stdout, r"ok\s+seccomp\s+defaults:")
+        self.assertRegex(result.stdout, r"!!\s+seccomp\s+policy: cannot build the filter:.*unsupported")
+        self.assertRegex(result.stdout, r"!!\s+require\s+policy: seccomp; cannot launch here: seccomp:")
+        self.assertRegex(result.stdout, r"ok\s+require\s+uid-only: seccomp")
+        self.assertRegex(result.stdout, r"!!\s+require\s+mode-only: seccomp;")
+        # A policy must be compiled even without an explicit requirement.
+        self.save_prefs(None, "seccomp_policy=denylist\n")
+        result = subprocess.run([str(scripts / "sandbox-game"), "--check"], env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertRegex(result.stdout, r"!!\s+seccomp\s+policy: cannot build the filter:")
+
+    def test_check_labels_invalid_preferences_separately_from_unmet_protections(self):
+        self.save_prefs(None, "separate_uid=yes\nrequire=seccomp\n")
+        self.save_prefs("inherits", "require=seccomp\n")
+        self.save_prefs("overrides", "separate_uid=0\n")
+        out = self.cli("--check", check=False).stdout
+        self.assertRegex(out, r"!!\s+preferences\s+defaults:.*invalid separate_uid=yes")
+        self.assertNotIn("cannot launch here: sandbox-game: invalid", out)
+        self.assertNotRegex(out, r"require\s+(defaults|inherits):")
+        self.assertRegex(out, r"ok\s+require\s+overrides: seccomp")
+
+    def test_check_does_not_treat_requirement_helper_stderr_as_a_failed_protection(self):
+        scripts = self.base / "check-warning"
+        scripts.mkdir()
+        for name in ("sandbox-game-lib", "sandbox-landlock", "sandbox-seccomp"):
+            shutil.copy2(ROOT / name, scripts / name)
+        script = scripts / "sandbox-game"
+        source = (ROOT / "sandbox-game").read_text()
+        marker = "# ---- args "
+        # Simulate a successful protection probe which also emits a warning.
+        source = source.replace(marker, 'requirement_failures() { echo "probe warning" >&2; }\n\n' + marker, 1)
+        script.write_text(source)
+        script.chmod(0o755)
+        self.save_prefs(None, "require=seccomp\nseccomp=enforce\n")
+        result = subprocess.run([str(script), "--check"], env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertIn("probe warning", result.stderr)
+        self.assertNotIn("probe warning", result.stdout)
+        self.assertRegex(result.stdout, r"ok\s+require\s+defaults: seccomp")
 
     def test_standard_input_reaches_the_game_with_and_without_network(self):
         payload = "input for the game\n"
@@ -3538,8 +3608,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.save_prefs(None, defaults)
         self.preferences([])
         request = json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
-        self.assertEqual(request["security"]["game"],
-                         {"separate_uid": "", "seccomp_policy": "", "seccomp": ""})
+        self.assertEqual(request["security"]["game"], {})
         self.assertEqual(request["security"]["all"]["separate_uid"], "systemd")
         own = {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "log"}
         self.env["TEST_VALUES"] = json.dumps(own)
@@ -3558,6 +3627,23 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertNotIn("separate_uid=", path.read_text())
         self.assertNotIn("seccomp_policy=", path.read_text())
         self.assertNotIn("seccomp=", path.read_text())
+
+    def test_nautilus_keeps_requirements_with_their_own_scopes(self):
+        (self.game / "start.sh").write_text("#!/bin/sh\n")
+        self.save_prefs(None, "require=\nseccomp=log\nenv=DEFAULT=value=with=equals\n")
+        self.save_prefs("game", "require=seccomp\nseccomp=enforce\n")
+        self.preferences([])
+        request = json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
+        self.assertEqual(request["security"]["game"]["require"], "seccomp")
+        self.assertEqual(request["security"]["all"]["require"], "")
+        self.assertEqual(request["security"]["all"]["env"], "DEFAULT=value=with=equals")
+        self.preferences(["X11, in gamescope (private Xwayland)", "Off", "Off", "All games (defaults)"])
+        defaults = (self.home / ".config/sandbox-game/defaults").read_text()
+        self.assertNotIn("require=seccomp", defaults)
+        self.assertIn("seccomp=log", defaults)
+        own = (self.home / ".config/sandbox-game/games/game").read_text()
+        self.assertIn("require=seccomp", own)
+        self.assertIn("seccomp=enforce", own)
 
     def test_launcher_gives_dotnet_only_to_programs_needing_it(self):
         recorded = self.stub_launcher()
@@ -4257,7 +4343,9 @@ class SeparateUidTests(unittest.TestCase):
         self.assertNotEqual((capture / "home/save").stat().st_uid, os.getuid())
         self.save_prefs("game", "separate_uid=0\n")
         self.env["SANDBOX_SEPARATE_UID"] = "1"
-        self.run_guest('cat "$HOME/save"')
+        result = self.run_guest('cat "$HOME/save"')
+        self.assertIn("runs as you from now on", result.stderr)
+        self.assertNotIn("SANDBOX_SEPARATE_UID=", result.stderr)
         self.assertFalse((capture / "uid").exists())
         self.assertEqual((capture / "home/save").stat().st_uid, os.getuid())
 
@@ -4561,7 +4649,10 @@ class SystemdBackendTests(unittest.TestCase):
         self.assertEqual((capture / "managed-uid").read_text().strip(), "1")
         SecurityTests.save_prefs(self, "game", "separate_uid=0\n")
         self.env["SANDBOX_SEPARATE_UID"] = "systemd"
-        self.assertEqual(self.run_guest('cat "$HOME/save"').stdout, "save")
+        result = self.run_guest('cat "$HOME/save"')
+        self.assertEqual(result.stdout, "save")
+        self.assertIn("no longer runs under the systemd backend", result.stderr)
+        self.assertNotIn("SANDBOX_SEPARATE_UID=", result.stderr)
         self.assertFalse((capture / "managed-uid").exists())
         self.assertEqual((capture / "home/save").stat().st_uid, os.getuid())
 
