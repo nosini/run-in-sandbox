@@ -1378,7 +1378,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
 
         self.assertEqual(save("1920x1080\tYes"), [])            # as inherited: no line
         self.assertEqual(effective(), "-f -W 1920 -H 1080")
-        self.assertEqual(save("Game default (no override)\tNo"), ["gamescope_args="])
+        self.assertEqual(save("No override (the game's own size)\tNo"), ["gamescope_args="])
         self.assertEqual(effective(), "")
 
     def test_saving_defaults_keeps_their_hidden_gamescope_arguments(self):
@@ -1390,7 +1390,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         own.write_text("gamescope_args=-r 30\n")
         form = ["X11, in gamescope (private Xwayland)", "Off", "Off", "All games (defaults)"]
         for initial in ("--adaptive-sync -r 60", ""):
-            for resolution, fullscreen in (("Game default (no override)", "No"), ("1280x720", "Yes")):
+            for resolution, fullscreen in (("No override (the game's own size)", "No"), ("1280x720", "Yes")):
                 with self.subTest(initial=initial, resolution=resolution, fullscreen=fullscreen):
                     defaults.write_text("gamescope_args=" + initial + "\n")
                     self.env["TEST_GS_FORM"] = resolution + "\t" + fullscreen
@@ -3836,6 +3836,18 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual(keys(save("Native Wayland, in gamescope")), ("1", "1", "0"))
         self.assertEqual(keys(save("Host X11 (other X apps can watch and control it)")),
                          ("0", "0", "1"))
+
+    def test_default_display_follows_the_defaults_after_saving(self):
+        config = self.home / ".config" / "sandbox-game"
+        config.mkdir(parents=True)
+        (config / "defaults").write_text("wayland=1\n")
+        form = lambda display: [display, "Off", "Newest installed (auto)", "Off", "Off", "This game only"]
+        _, saved = self.preferences(form("X11, in gamescope (private Xwayland)"))
+        self.assertEqual(saved["wayland"], "0")
+        _, saved = self.preferences(form("Default"))
+        self.assertTrue({"wayland", "wayland_x11", "gamescope", "host_x11"}.isdisjoint(saved))
+        request = json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
+        self.assertEqual(request["security"]["all"], {"wayland": "1"})
 
     def test_split_display_is_saved_and_forwarded_to_the_cli(self):
         (self.game / "play.exe").touch()

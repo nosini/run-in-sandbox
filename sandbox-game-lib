@@ -489,11 +489,14 @@ keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud", 
         "net", "proton", "mod_loaders", "steam", "hide_tray", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
         "lan", "lan_allow", "mac_vendor", "private_hosts", "hosts", "hosts_writable", "env", "require",
-        "separate_uid", "seccomp_policy", "seccomp"}
+        "separate_uid", "seccomp_policy", "seccomp", "inherit"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
 assert values.get("x11_backend", "gamescope") in {"gamescope", "satellite"}
+# Dropdowns left on Default: their keys are removed from the file.
+assert all(word in {"launch_with", "display", "x11_backend", "proton", "casefold", "webgl", "with_proton",
+                    "resolution"} for word in values.get("inherit", "").split(",") if word)
 for key, choices in (("separate_uid", {"", "0", "1", "systemd"}),
                      ("seccomp_policy", {"", "denylist", "allowlist"}),
                      ("seccomp", {"", "enforce", "log"})):
@@ -535,6 +538,13 @@ PY
     # is not written: a game's file would then override the defaults with the
     # built-in value, from then on, for a setting the user never saw.
     saved_key() { [ "${RESULT[$1]+set}" ] || file_get "$TARGET" "$1" >/dev/null; }
+    inherited=" " inherit="${RESULT[inherit]:-}"
+    for key in ${inherit//,/ }; do
+        case "$key" in
+            display) inherited+="wayland wayland_x11 gamescope host_x11 " ;;
+            *) inherited+="$key " ;;
+        esac
+    done
 
     # Parse the destination's arguments, then replace only the exposed controls.
     # A game without its own arguments inherits the defaults; saving defaults
@@ -575,6 +585,8 @@ PY
         GA_OUT="$(ga_join)"
         if [ "$TARGET" != "$CFGDIR/defaults" ]; then
             GA_DEFAULT="$(file_get "$CFGDIR/defaults" gamescope_args || true)"
+            # Default resolution: kept only for what still differs, such as fullscreen.
+            [[ "$inherited" != *" resolution "* ]] || GA_OWN=0
             [ "$(ga_normalise "$GA_OUT")" = "$(ga_normalise "$GA_DEFAULT")" ] || GA_OWN=1
         fi
     fi
@@ -586,6 +598,7 @@ PY
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
         for key in $bools; do
+            [[ "$inherited" != *" $key "* ]] || continue
             saved_key "$key" || continue
             case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
             printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
@@ -596,6 +609,7 @@ PY
         # Values that may be empty: written when there is one, or when the
         # defaults have one that this game's empty value turns off.
         for key in $optional; do
+            [[ "$inherited" != *" $key "* ]] || continue
             saved_key "$key" || continue
             value="$(chosen "$key" '')"
             if [ -n "$value" ] || { [ "$TARGET" != "$CFGDIR/defaults" ] \

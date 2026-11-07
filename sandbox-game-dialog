@@ -28,6 +28,50 @@ SECURITY_CHOICES = {
 }
 
 
+# Dropdowns that can leave their setting to the defaults (for a game) or to
+# the built-in value (for the defaults): the file keys each one writes.
+INHERITED = {
+    "launch_with": ("launch_with",),
+    "display": ("wayland", "wayland_x11", "gamescope", "host_x11"),
+    "x11_backend": ("x11_backend",),
+    "proton": ("proton",),
+    "casefold": ("casefold",),
+    "webgl": ("webgl",),
+    "with_proton": ("with_proton",),
+    "resolution": ("gamescope_args",),
+}
+
+
+def display_of(values):
+    if values.get("host_x11") == "1":
+        return "host-x11"
+    if values.get("wayland") == "1":
+        if values.get("wayland_x11") == "1":
+            return "wayland-x11"
+        return "wayland-gamescope" if values.get("gamescope") == "1" else "wayland"
+    return "x11"
+
+
+def file_choice(key, values):
+    """What one settings file chooses for a dropdown; {} gives the built-in value."""
+    value = values.get(key, "")
+    if key == "display":
+        return display_of(values)
+    if key == "resolution":
+        return gamescope_parts(values.get("gamescope_args", ""))[0]
+    if key == "launch_with":
+        return "proton" if value == "proton" else "auto"
+    if key == "x11_backend":
+        return "satellite" if value == "satellite" else "gamescope"
+    if key == "casefold":
+        return "0" if value == "0" else "1"
+    if key == "webgl":
+        return "vulkan" if value == "vulkan" else "auto"
+    if key == "proton":
+        return value or "auto"
+    return value
+
+
 def inherit_label(scope):
     return "Use environment" if scope == "all" else "Use defaults, then environment"
 
@@ -183,26 +227,25 @@ class Preferences:
         self.request = request
         self.defaults_only = bool(request.get("defaults"))
         self.values = dict(request.get("values", {}))
-        self.values["x11_backend"] = "satellite" if self.values.get("x11_backend") == "satellite" else "gamescope"
+        for key in ("x11_backend", "proton", "casefold", "webgl", "with_proton"):
+            self.values[key] = file_choice(key, self.values)
         for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
-        for key in ("with_proton", "lan_allow", "hosts"):
+        for key in ("lan_allow", "hosts"):
             self.values[key] = self.values.get(key, "")
         self.values["require"] = requirements_value(self.values.get("require", ""))
-        self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
-        self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
-        self.runtime = self.values.get("launch_with", "auto")
-        if self.runtime != "proton":
-            self.runtime = "auto"
+        self.runtime = file_choice("launch_with", self.values)
         self.scope = "all" if self.defaults_only else "game"
         # Keep each scope's protection choices separate, including unsaved
         # edits. An inherited choice must stay inherited after saving.
         self.security_scope = self.scope
         # Legacy callers only send merged values. Their provenance is unknown:
         # leave security settings untouched rather than copy or clear them.
-        scopes = request.get("security", {"all": self.values} if self.defaults_only else {})
+        scopes = request.get("security", {"all": request.get("values", {})} if self.defaults_only else {})
         self.security_scopes = set(scopes)
+        # Each file's own values, by scope: what a Default choice stands for.
+        self.files = {scope: dict(values) for scope, values in scopes.items()}
         self.security_values = {scope: {key: scopes.get(scope, {}).get(key, "") for key in SECURITY_CHOICES}
                                 for scope in ("game", "all")}
         self.values.update(self.security_values[self.scope])
@@ -213,16 +256,15 @@ class Preferences:
         self.values["require"] = self.require_values[self.scope]
         self.host_seccomp = os.environ.get("SANDBOX_SECCOMP", "")
         self.default_seccomp = self.security_values["all"]["seccomp"]
-        if self.values.get("host_x11") == "1":
-            self.display = "host-x11"
-        elif self.values.get("wayland_x11") == "1" and self.values.get("wayland") == "1":
-            self.display = "wayland-x11"
-        elif self.values.get("wayland") == "1":
-            self.display = "wayland-gamescope" if self.values.get("gamescope") == "1" else "wayland"
-        else:
-            self.display = "x11"
+        self.display = display_of(self.values)
         self.resolution, self.fullscreen, _ = gamescope_parts(
             self.values.get("gamescope_args", ""))
+        # A dropdown whose keys this scope's file lacks starts on Default.
+        self.inherit = {key: self.offers_default(key) and self.files[self.scope].keys().isdisjoint(keys)
+                        for key, keys in INHERITED.items()}
+        for key in INHERITED:
+            if self.inherit[key]:
+                self.choose(key, None)
         self.set_runtime(self.runtime)
 
     @property
@@ -291,9 +333,62 @@ class Preferences:
             mode = self.default_seccomp
         return mode or self.host_seccomp
 
-    def mark_saved(self):
+    def offers_default(self, key):
+        scope = self.security_scope
+        # For the defaults, None and No override already are the built-in values.
+        return scope in self.files and not (scope == "all" and key in ("with_proton", "resolution"))
+
+    def inherited(self, key):
+        """The value a Default choice stands for in the scope being edited."""
+        value = file_choice(key, self.files.get("all", {}) if self.security_scope == "game" else {})
+        if key == "display" and value not in self.displays:
+            value = "wayland" if value == "wayland-x11" and "wayland" in self.displays else "x11"
+        return value
+
+    def current(self, key):
+        return {"launch_with": self.runtime, "display": self.display,
+                "resolution": self.resolution}.get(key, self.values.get(key))
+
+    def inherits(self, key):
+        # A value set some other way than through choose() is a choice of its own.
+        return self.inherit.get(key, False) and self.current(key) == self.inherited(key)
+
+    def choice(self, key):
+        """A dropdown's selection: None for Default."""
+        return None if self.inherits(key) else self.current(key)
+
+    def choose(self, key, value):
+        self.inherit[key] = value is None
+        if value is None:
+            value = self.inherited(key)
+        if key == "launch_with":
+            self.set_runtime(value)
+        elif key == "display":
+            self.display = value
+        elif key == "resolution":
+            self.resolution = value
+        else:
+            self.values[key] = value
+
+    def mark_saved(self, result=None):
         if self.scope == "all":
             self.default_seccomp = self.values["seccomp"]
+        # Later Default choices compare against what the files now hold.
+        if result is None or self.scope not in self.files and self.scope != "clear":
+            return
+        if self.scope == "clear":
+            self.files["game"] = {}
+            return
+        own = self.files[self.scope]
+        for key in result.get("inherit", "").split(","):
+            for name in INHERITED.get(key, ()):
+                own.pop(name, None)
+        own.update({key: value for key, value in result.items()
+                    if any(key in names for names in INHERITED.values())})
+        if "gamescope_resolution" in result and "resolution" not in result.get("inherit", "").split(","):
+            width, _, height = result["gamescope_resolution"].partition("x")
+            own["gamescope_args"] = " ".join(
+                (["-W", width, "-H", height] if height else []) + (["-f"] if result["gamescope_fullscreen"] == "1" else []))
 
     def error(self):
         """Why the visible settings cannot be saved, or None."""
@@ -330,18 +425,30 @@ class Preferences:
             self.display == "wayland-x11" and self.values["x11_backend"] == "gamescope")
 
     def set_runtime(self, runtime):
+        inherited = self.inherits("display")
         self.runtime = runtime
-        if self.display not in self.displays:
+        if inherited:
+            self.display = self.inherited("display")
+        elif self.display not in self.displays:
             self.display = "wayland" if self.display == "wayland-x11" and "wayland" in self.displays else "x11"
 
     def set_scope(self, scope):
         self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
         self.require_values[self.security_scope] = self.values["require"]
+        inherited = [key for key in INHERITED if self.inherits(key)]
         self.scope = scope
         if scope != "clear":
             self.security_scope = scope
             self.values.update(self.security_values[scope])
             self.values["require"] = self.require_values[scope]
+            # Default stays Default, now for the new scope -- unless the
+            # defaults file has the value shown, which then is saved there.
+            for key in inherited:
+                if self.offers_default(key) and (
+                        scope == "game" or self.files["all"].keys().isdisjoint(INHERITED[key])):
+                    self.choose(key, None)
+                else:
+                    self.inherit[key] = False
 
     def result(self):
         if self.scope == "clear":
@@ -392,6 +499,16 @@ class Preferences:
             # preserves the destination scope's remaining arguments.
             result["gamescope_resolution"] = self.resolution
             result["gamescope_fullscreen"] = "1" if self.fullscreen else "0"
+        # Shown dropdowns left on Default: their keys leave the file. The
+        # resolution still goes along, for the fullscreen switch beside it.
+        inherit = [key for key in INHERITED if self.inherits(key) and
+                   ("gamescope_resolution" if key == "resolution" else INHERITED[key][0]) in result]
+        for key in inherit:
+            if key != "resolution":
+                for name in INHERITED[key]:
+                    result.pop(name, None)
+        if inherit:
+            result["inherit"] = ",".join(inherit)
         return result
 
 
@@ -540,6 +657,31 @@ class Dialog:
         keys = [value for value, _ in options]
         self.widgets[key].set_selected(keys.index(current) if current in keys else 0)
 
+    def choice(self, key, label, options):
+        """A dropdown whose first entry, Default, leaves the setting to the defaults."""
+        self.base_options[key] = options
+        self.dropdown(key, label, self.choice_options(key), self.state.choice(key),
+                      lambda *_: self.choice_changed(key))
+
+    def choice_options(self, key):
+        options = self.base_options[key]
+        if not self.state.offers_default(key):
+            return options
+        value = self.state.inherited(key)
+        label = next((label for v, label in options if v == value), value)
+        return [(None, "Default — " + label), *options]
+
+    def update_choices(self):
+        for key in self.base_options:
+            options, current = self.choice_options(key), self.state.choice(key)
+            if options != self.choices[key] or current != self.selected(key):
+                self.set_options(key, options, current)
+
+    def choice_changed(self, key):
+        if not self.updating:
+            self.state.choose(key, self.selected(key))
+            self.refresh()
+
     def selected(self, key):
         index = self.widgets[key].get_selected()
         options = self.choices[key]
@@ -581,6 +723,7 @@ class Dialog:
         _, _, self.Adw = gtk_modules()
         self.state = Preferences(request)
         self.updating = False
+        self.base_options = {}
         heading = Gtk.Label(label=request.get("game", ""), xalign=0, wrap=True, selectable=True)
         heading.add_css_class("title-2")
         self.body.append(heading)
@@ -595,15 +738,11 @@ class Dialog:
                       self.appearance.saved_theme, lambda *_: self.appearance.preview(self.selected("appearance")))
         self.section("Launch and display")
         if request.get("can_proton"):
-            self.dropdown("launch_with", "Launch with", [("auto", "Automatic"), ("proton", "Proton (Windows .exe)")],
-                          self.state.runtime, self.runtime_changed)
-        self.dropdown("display", "Display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays],
-                      self.state.display, self.display_changed)
-        self.dropdown("x11_backend", "Private X11 backend",
-                      [("gamescope", "Gamescope — one launcher window"),
-                       ("satellite", "Satellite — separate desktop windows")],
-                      self.state.values["x11_backend"],
-                      self.x11_backend_changed)
+            self.choice("launch_with", "Launch with", [("auto", "Automatic"), ("proton", "Proton (Windows .exe)")])
+        self.choice("display", "Display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays])
+        self.choice("x11_backend", "Private X11 backend",
+                    [("gamescope", "Gamescope — one launcher window"),
+                     ("satellite", "Satellite — separate desktop windows")])
         self.entry("x11_exe", "X11 executable (optional)", self.state.values.get("x11_exe", ""),
                    "Launcher.exe or a Windows path fragment")
         self.split_note = Gtk.Label(xalign=0, wrap=True,
@@ -616,33 +755,29 @@ class Dialog:
                     self.state.values["hdr"] == "1",
                     lambda widget, *_: self.set_value("hdr", "1" if widget.get_active() else "0"))
         protons = list(dict.fromkeys(["auto", *request.get("protons", [])]))
-        pinned = self.state.values.get("proton", "auto")
+        pinned = self.state.values["proton"]
         if pinned not in protons:
             protons.append(pinned)
-        self.dropdown("proton", "Proton version", [(p, "Newest installed (auto)" if p == "auto" else p) for p in protons],
-                      pinned, lambda *_: self.set_value("proton", self.selected("proton")))
+        self.choice("proton", "Proton version", [(p, "Newest installed (auto)" if p == "auto" else p) for p in protons])
         self.switch("mod_loaders", "Mod loaders (BepInEx, MelonLoader, …)", self.state.values.get("mod_loaders") == "1",
                     lambda widget, *_: self.set_value("mod_loaders", "1" if widget.get_active() else "0"))
         self.switch("steam", "Start through Proton's Steam stand-in", self.state.values.get("steam") == "1",
                     lambda widget, *_: self.set_value("steam", "1" if widget.get_active() else "0"))
         self.switch("hide_tray", "Hide Wine's tray icon window", self.state.values.get("hide_tray") == "1",
                     lambda widget, *_: self.set_value("hide_tray", "1" if widget.get_active() else "0"))
-        self.dropdown("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")],
-                      self.state.values.get("casefold", "1"), lambda *_: self.set_value("casefold", self.selected("casefold")))
-        self.dropdown("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")],
-                      self.state.values.get("webgl", "auto"), lambda *_: self.set_value("webgl", self.selected("webgl")))
+        self.choice("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")])
+        self.choice("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")])
         self.switch("dotnet", ".NET runtime (yours, read-only)", self.state.values["dotnet"] == "1",
                     lambda widget, *_: self.set_value("dotnet", "1" if widget.get_active() else "0"))
         native_proton = self.state.values["with_proton"]
         choices = [("", "None"), *[(p, "Newest installed (auto)" if p == "auto" else p) for p in protons]]
         if native_proton not in [value for value, _ in choices]:
             choices.append((native_proton, native_proton))
-        self.dropdown("with_proton", "Proton for a program that starts Wine itself", choices, native_proton,
-                      lambda *_: self.set_value("with_proton", self.selected("with_proton")))
+        self.choice("with_proton", "Proton for a program that starts Wine itself", choices)
         resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
                                          "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
-        self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
-                      self.state.resolution, self.resolution_changed)
+        self.choice("resolution", "Gamescope resolution",
+                    [(r, r or "No override (the game's own size)") for r in resolutions])
         self.switch("fullscreen", "Gamescope fullscreen", self.state.fullscreen,
                     lambda widget, *_: setattr(self.state, "fullscreen", widget.get_active()))
         self.note = Gtk.Label(xalign=0, wrap=True)
@@ -702,23 +837,6 @@ class Dialog:
         if not self.updating:
             self.state.values[key] = value
 
-    def runtime_changed(self, *_):
-        self.state.set_runtime(self.selected("launch_with"))
-        self.refresh()
-
-    def display_changed(self, *_):
-        if not self.updating:
-            self.state.display = self.selected("display")
-            self.refresh_visibility()
-
-    def x11_backend_changed(self, *_):
-        if not self.updating:
-            self.state.values["x11_backend"] = self.selected("x11_backend")
-            self.refresh_visibility()
-
-    def resolution_changed(self, *_):
-        self.state.resolution = self.selected("resolution")
-
     def scope_changed(self, *_):
         self.state.set_scope(self.selected("scope"))
         self.updating = True
@@ -737,10 +855,13 @@ class Dialog:
             "This game's own settings still take precedence over defaults."
             if self.state.scope == "all" and self.state.request.get("game_settings") else "")
         self.scope_note.set_visible(bool(self.scope_note.get_label()))
+        # Default now stands for this scope's fallback, and may show another value.
+        self.refresh()
 
     def refresh(self):
         self.updating = True
-        self.set_options("display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays], self.state.display)
+        self.base_options["display"] = [(v, DISPLAY_CHOICES[v]) for v in self.state.displays]
+        self.update_choices()
         self.widgets["mangohud"].set_sensitive(self.state.engine != "nwjs")
         self.widgets["mangohud"].set_active(self.state.engine != "nwjs" and self.state.values.get("mangohud") == "1")
         self.updating = False

@@ -118,6 +118,66 @@ class PreferencePolicyTests(unittest.TestCase):
             self.assertEqual(choices[0], ("", MODULE["inherit_label"](scope)))
             self.assertEqual(choices[-1], ("on", "Invalid saved value: on"))
 
+    def test_dropdowns_without_own_values_start_on_default_and_save_nothing(self):
+        defaults = {"wayland": "1", "proton": "GE-Test", "gamescope_args": "-W 1280 -H 720"}
+        state = Preferences({"engine": "proton", "values": dict(defaults),
+                             "security": {"game": {}, "all": defaults}})
+        self.assertIsNone(state.choice("display"))
+        self.assertEqual(state.inherited("display"), "wayland")
+        self.assertEqual(state.inherited("proton"), "GE-Test")
+        saved = state.result()
+        self.assertEqual(saved["inherit"], "display,proton")
+        self.assertTrue({"wayland", "wayland_x11", "gamescope", "host_x11", "proton"}.isdisjoint(saved))
+        # An explicit choice is saved, even one equal to the defaults.
+        state.choose("proton", "GE-Test")
+        self.assertEqual(state.result()["proton"], "GE-Test")
+        self.assertEqual(state.result()["inherit"], "display")
+        state.choose("display", "x11")
+        # Shown now, the resolution is Default too, and still sent for fullscreen.
+        self.assertEqual(state.result()["inherit"], "resolution")
+        self.assertEqual(state.result()["gamescope_resolution"], "1280x720")
+        state.choose("resolution", "1920x1080")
+        self.assertNotIn("inherit", state.result())
+
+    def test_own_values_are_explicit_and_default_follows_the_scope(self):
+        own = {"wayland": "1", "webgl": "vulkan"}
+        defaults = {"webgl": "vulkan", "casefold": "0"}
+        state = Preferences({"engine": "nwjs", "values": {**defaults, **own},
+                             "security": {"game": own, "all": defaults}})
+        self.assertEqual(state.choice("display"), "wayland")
+        self.assertEqual(state.choice("webgl"), "vulkan")
+        self.assertIsNone(state.choice("casefold"))
+        state.choose("display", None)
+        self.assertEqual(state.display, "x11")
+        # Saved as defaults, what the defaults file holds is shown and kept;
+        # the rest stays Default, now the built-in value.
+        state.set_scope("all")
+        self.assertEqual(state.choice("casefold"), "0")
+        self.assertIsNone(state.choice("display"))
+        self.assertEqual(state.result()["inherit"], "display")
+        self.assertEqual(state.result()["casefold"], "0")
+
+    def test_inherited_display_follows_the_runtime(self):
+        defaults = {"wayland": "1", "wayland_x11": "1"}
+        state = Preferences({"engine": "native", "can_proton": True, "values": dict(defaults),
+                             "security": {"game": {}, "all": defaults}})
+        self.assertEqual(state.display, "wayland")  # split display is Proton's
+        self.assertIsNone(state.choice("display"))
+        state.choose("launch_with", "proton")
+        self.assertEqual(state.display, "wayland-x11")
+        self.assertIsNone(state.choice("display"))
+        self.assertIn("display", state.result()["inherit"].split(","))
+
+    def test_defaults_scope_offers_default_except_where_none_is_built_in(self):
+        state = Preferences({"defaults": True, "values": {}})
+        self.assertTrue(state.offers_default("display"))
+        self.assertFalse(state.offers_default("with_proton"))
+        self.assertFalse(state.offers_default("resolution"))
+        self.assertEqual(state.inherited("display"), "x11")
+        self.assertEqual(state.result()["inherit"], "display,proton,casefold,webgl")
+        # Merged values without each file's own (legacy callers): no Default.
+        self.assertNotIn("inherit", Preferences({"engine": "native", "values": {}}).result())
+
     def test_satellite_backend_round_trip_and_gamescope_controls(self):
         state = Preferences({"engine": "proton", "values": {
             "wayland": "1", "wayland_x11": "1", "x11_backend": "satellite",
@@ -484,6 +544,32 @@ class GtkDialogTests(unittest.TestCase):
         saved = self.responses[0][1]
         self.assertEqual(saved["wayland_x11"], "1")
         self.assertEqual(saved["x11_exe"], "Launcher.exe")
+
+    def test_default_entry_names_the_inherited_value_and_can_be_chosen_back(self):
+        defaults = {"wayland": "1"}
+        dialog = self.create("preferences", {"engine": "native", "values": dict(defaults),
+                                              "security": {"game": {}, "all": defaults}})
+        self.assertEqual(dialog.choices["display"][0], (None, "Default — Native Wayland"))
+        self.assertIsNone(dialog.selected("display"))
+        self.assertEqual(dialog.choices["casefold"][0], (None, "Default — Ignore case, like Windows"))
+        keys = [v for v, _ in dialog.choices["display"]]
+        dialog.widgets["display"].set_selected(keys.index("x11"))
+        self.assertTrue(dialog.rows["resolution"].get_visible())
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["wayland"], "0")
+        dialog.widgets["display"].set_selected(0)
+        self.assertFalse(dialog.rows["resolution"].get_visible())
+        # Saving for all games, Default means the built-in value instead, and
+        # the defaults' own value shown is kept as a choice of its own.
+        dialog.widgets["scope"].set_selected(1)
+        self.assertEqual(dialog.choices["display"][0], (None, "Default — X11, in gamescope (private Xwayland)"))
+        self.assertEqual(dialog.selected("display"), "wayland")
+        dialog.save_preferences()
+        self.assertEqual(self.responses[1][1]["wayland"], "1")
+        dialog.widgets["display"].set_selected(0)
+        self.assertTrue(dialog.rows["resolution"].get_visible())
+        dialog.save_preferences()
+        self.assertIn("display", self.responses[2][1]["inherit"].split(","))
 
     def test_native_proton_choice_starts_at_none(self):
         dialog = self.create("preferences", {"engine": "native", "can_proton": True, "protons": ["GE-Test"]})

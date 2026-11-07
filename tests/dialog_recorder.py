@@ -21,7 +21,7 @@ Path(os.environ["DIALOG_RECORD"]).write_text(json.dumps(request))
 module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "sandbox-game-dialog"))
 state = module["Preferences"](request)
 if os.environ.get("TEST_LAUNCH_WITH"):
-    state.set_runtime("proton" if os.environ["TEST_LAUNCH_WITH"] == "Proton (Windows .exe)" else "auto")
+    state.choose("launch_with", "proton" if os.environ["TEST_LAUNCH_WITH"] == "Proton (Windows .exe)" else "auto")
 form = json.loads(os.environ.get("TEST_FORM", "[]"))
 if not form:
     sys.exit(1)
@@ -31,11 +31,15 @@ if state.proton_controls:
 if state.engine == "nwjs":
     fields += ["casefold", "webgl"]
 fields += ["net", "scope"]
+# Dropdowns are chosen as the window does, so that a choice equal to the
+# defaults is saved rather than left on Default.
 for key, value in zip(fields, form):
     if not value:
         continue
-    if key == "display":
-        state.display = next(k for k, label in module["DISPLAY_CHOICES"].items() if label == value)
+    if value.startswith("Default"):
+        state.choose(key, None)
+    elif key == "display":
+        state.choose(key, next(k for k, label in module["DISPLAY_CHOICES"].items() if label == value))
     elif key == "scope":
         state.set_scope({"This game only": "game", "All games (defaults)": "all",
                          "Clear this game's settings": "clear"}[value])
@@ -44,15 +48,15 @@ for key, value in zip(fields, form):
     elif key == "mod_loaders" or key == "net":
         state.values[key] = "0" if value == "Off" else "1"
     elif key == "proton":
-        state.values[key] = "auto" if value == "Newest installed (auto)" else value
+        state.choose(key, "auto" if value == "Newest installed (auto)" else value)
     elif key == "casefold":
-        state.values[key] = "0" if value == "Match exactly" else "1"
+        state.choose(key, "0" if value == "Match exactly" else "1")
     elif key == "webgl":
-        state.values[key] = "vulkan" if value == "Vulkan" else "auto"
+        state.choose(key, "vulkan" if value == "Vulkan" else "auto")
 # Controls outside the positional form, by key, as the window stores them.
 state.values.update(json.loads(os.environ.get("TEST_VALUES", "{}")))
 if os.environ.get("TEST_GS_FORM"):
     resolution, full = os.environ["TEST_GS_FORM"].split("\t")
-    state.resolution = "" if resolution == "Game default (no override)" else resolution
+    state.choose("resolution", "" if resolution == "No override (the game's own size)" else resolution)
     state.fullscreen = full == "Yes"
 print(json.dumps(state.result()))

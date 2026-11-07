@@ -618,6 +618,35 @@ class LibraryTests(unittest.TestCase):
         value = self.library.settings(entry["name"])["gamescope_args"]
         self.assertEqual(value, "-W 1920 -H 1080 -f --adaptive-sync -r 60")
 
+    def test_default_choices_remove_their_keys_from_the_saved_file(self):
+        entry = self.library.create("game")
+        name = entry["name"]
+        self.library.update_settings(name, {"wayland": "1", "wayland_x11": "1", "gamescope": "0", "host_x11": "0",
+                                            "proton": "GE-Test", "webgl": "vulkan", "custom": "kept"})
+        self.library.update_settings(name, {"proton": "GE-Other"}, defaults=True)
+        self.library.save_preferences(name, {"scope": "game", "inherit": "display,proton", "webgl": "auto"})
+        own = self.library.scope_settings(name)
+        self.assertTrue({"wayland", "wayland_x11", "gamescope", "host_x11", "proton"}.isdisjoint(own))
+        self.assertEqual((own["webgl"], own["custom"]), ("auto", "kept"))
+        self.assertEqual(self.library.settings(name)["proton"], "GE-Other")
+        # For the defaults, Default goes back to the built-in value.
+        self.library.save_preferences(None, {"scope": "all", "inherit": "proton"})
+        self.assertNotIn("proton", self.library.scope_settings(None, defaults=True))
+        with self.assertRaises(ValueError):
+            self.library.save_preferences(name, {"scope": "game", "inherit": "net"})
+
+    def test_default_resolution_keeps_only_what_differs_from_the_defaults(self):
+        entry = self.library.create("game")
+        name = entry["name"]
+        self.library.update_settings(name, {"gamescope_args": "-W 1280 -H 720"}, defaults=True)
+        self.library.update_settings(name, {"gamescope_args": "-W 1920 -H 1080"})
+        result = {"scope": "game", "inherit": "resolution",
+                  "gamescope_resolution": "1280x720", "gamescope_fullscreen": "0"}
+        self.library.save_preferences(name, result)
+        self.assertNotIn("gamescope_args", self.library.scope_settings(name))
+        self.library.save_preferences(name, dict(result, gamescope_fullscreen="1"))
+        self.assertEqual(self.library.scope_settings(name)["gamescope_args"], "-W 1280 -H 720 -f")
+
     def test_split_display_flags_preserve_executable_names_with_spaces(self):
         entry = self.library.create("game")
         self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1",

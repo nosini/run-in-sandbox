@@ -683,6 +683,18 @@ Split display also offers **Private X11 backend**: gamescope or satellite.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
+Each dropdown (launch with, display, X11 backend, Proton version, file names,
+WebGL, Proton for a program that starts Wine itself, gamescope resolution)
+starts with **Default — …**, naming the value it stands for. For a game that
+is the defaults' value; for the defaults it is the built-in one. Choosing it
+removes the setting from the file being saved, so it follows later changes to
+the defaults. A dropdown the game's file has no value for starts on Default;
+any other choice is saved, even one equal to the defaults. The resolution and
+fullscreen switch share `gamescope_args`: with a Default resolution and a
+fullscreen choice different from the defaults', the game's file keeps the
+defaults' resolution too. With the defaults, **None** and **No override**
+already are the built-in values, so those two dropdowns offer no Default.
+
 **Sandbox protections** offers **Separate uid backend** (none, a persistent
 subordinate uid through `newuidmap`, or a transient systemd uid), **Seccomp
 filter** (denylist or allowlist), and **Seccomp mode** (enforce or log only).
