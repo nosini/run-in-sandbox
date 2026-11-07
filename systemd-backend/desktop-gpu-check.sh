@@ -94,7 +94,10 @@ installed_before=0 tidy=1
 # The uninstaller keeps the user list and leaves the helper's folder; what
 # this made, it takes away too.
 [ -e /etc/sandbox-game ] || [ -e /usr/local/libexec/sandbox-game ] && tidy=0
+pending=()
 remove_setup() {
+    # A game cut short is redacted all the same.
+    [ "${#pending[@]}" = 0 ] || redact "${pending[@]}"
     if [ "$keep" = 0 ] && [ "$installed_before" = 0 ] && [ -e /etc/sandbox-game/systemd-backend.json ]; then
         echo "Removing the administrator setup again..."
         # nsresourced lets go of a game's namespace a moment after the game
@@ -133,17 +136,19 @@ ls -l "/run/sandboxgame/render/$(id -u)" >> "$results/setup.txt" 2>&1
     || { note "backend: not available, see setup.txt"; exit 1; }
 
 # Real games, launched as "Sandbox game" launches them.
-game_check() { # SELECTION NAME
-    local sel gamedir real test cfg capture copied=0 watcher status users
+game_check() { # LABEL SELECTION NAME
+    local label="$1" sel gamedir real test cfg capture copied=0 watcher status users
+    shift
     sel="$(realpath "$1")" || { note "game: $1 not found"; return; }
     gamedir="$(. "$checkout/sandbox-game-lib" && resolve_selection "$sel" && printf '%s' "$R_GAMEDIR")"
     real="${2:-$("$checkout/sandbox-game" --print-name "$gamedir")}"
     test="$real-systemd-test"
+    pending=( "$label" "$sel" "$gamedir" "$real" "$test" )   # see remove_setup
     capture="$HOME/game-sandboxes/$test"
     cfg="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game/games"
     note ""
-    note "== game: $gamedir"
-    note "preferences: $([ -f "$cfg/$real" ] && echo "those of $real" || echo "defaults (none saved for $real)")"
+    note "== $label"
+    note "preferences: $([ -f "$cfg/$real" ] && echo "the game's own" || echo "defaults (none saved for it)")"
     if [ -f "$cfg/$real" ] && [ ! -e "$cfg/$test" ]; then
         cp "$cfg/$real" "$cfg/$test" && copied=1
     fi
@@ -153,7 +158,7 @@ game_check() { # SELECTION NAME
     # Every 5 seconds while it runs; the last look that found the GPU open
     # is kept, else the last one at all.
     (
-        inside="$results/game-$test-inside.log"
+        inside="$results/$label-inside.log"
         for _ in $(seq 720); do
             sleep 5
             "$checkout/sandbox-attach" --name "$test" --exec -- /bin/sh -c '
@@ -162,7 +167,7 @@ game_check() { # SELECTION NAME
                     if ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD; then
                         echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
                     fi
-                done' > "$inside.new" 2>> "$results/game-$test-attach-errors.log" || continue
+                done' > "$inside.new" 2>> "$results/$label-attach-errors.log" || continue
             if grep -q '^has the GPU open' "$inside.new" || ! grep -q '^has the GPU open' "$inside" 2>/dev/null; then
                 mv -f "$inside.new" "$inside"
             fi
@@ -173,25 +178,67 @@ game_check() { # SELECTION NAME
         SANDBOX_GAME_NAME="$test" SANDBOX_SEPARATE_UID=systemd "$checkout/Sandbox game"
     status=$?
     pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-    rm -f "$results/game-$test-inside.log.new"
+    rm -f "$results/$label-inside.log.new"
     [ "$copied" = 0 ] || rm -f "$cfg/$test"
-    cp "$capture/lastrun.log" "$results/game-$test-lastrun.log" 2>/dev/null
+    cp "$capture/lastrun.log" "$results/$label-lastrun.log" 2>/dev/null
     note "exit: $status"
-    note "$(grep -m1 '^render node: ' "$results/game-$test-inside.log" 2>/dev/null \
+    note "$(grep -m1 '^render node: ' "$results/$label-inside.log" 2>/dev/null \
             || echo "render node: not seen (the game ended within 5 seconds, or attaching failed)")"
-    grep '^has the GPU open: ' "$results/game-$test-inside.log" 2>/dev/null | tee -a "$summary"
+    grep '^has the GPU open: ' "$results/$label-inside.log" 2>/dev/null | tee -a "$summary"
     [ -e "$capture/managed-uid" ] && note "capture: marked for the systemd backend" \
         || note "capture: NOT marked for the systemd backend"
     # On disk the capture stays yours under this backend, owner and group.
     users="$(find "$capture" \( ! -user "$(id -u)" -o ! -group "$(id -u)" \) 2>/dev/null | wc -l)"
     note "capture files not yours, or not your group: $users"
     note "capture size: $(du -sh "$capture" 2>/dev/null | cut -f1)"
-    grep -E '^sandbox-(game|uid|landlock): ' "$results/game-$test-lastrun.log" 2>/dev/null \
+    grep -E '^sandbox-(game|uid|landlock): ' "$results/$label-lastrun.log" 2>/dev/null \
         | head -8 | sed 's/^/  /' | tee -a "$summary"
+    redact "${pending[@]}"
+    pending=()
+}
+# Which games were tested is nobody else's business: every result file loses
+# what names the game -- its folder and sandbox names, the files at its top
+# (its .exe among them) -- however they are cased, shortened to a process
+# name's 15 characters, or with the characters NW.js's launcher replaces.
+redact() { # LABEL SELECTION GAMEDIR NAME...
+    python3 -I - "$results" "$@" <<'PY'
+import os, re, sys
+results, label, sel, gamedir, *names = sys.argv[1:]
+# Folder and file names any game might have, which say nothing about it.
+COMMON = {"data", "game", "games", "www", "lib", "lib64", "bin", "save", "saves",
+          "audio", "img", "js", "fonts", "movies", "locales", "resources", "package.json",
+          "index.html", "readme", "readme.txt", "license", "license.txt", "start.sh",
+          "game.exe", "nw", "nw.exe", "icon", "icon.png", "credits", "credits.txt", "steam",
+          "swiftshader", "plugins", "content", "engine", "mono", "monobleedingedge"}
+words = {sel, gamedir, os.path.basename(sel), os.path.basename(gamedir), *names}
+try:
+    words |= set(os.listdir(gamedir))
+except OSError:
+    pass
+tokens = set()
+for word in words:
+    for w in (word, os.path.splitext(word)[0], re.sub(r"[^A-Za-z0-9._-]", "_", word)):
+        if w in (sel, gamedir) or (len(w) >= 4 and w.lower() not in COMMON):
+            tokens.add(w)
+            if len(w) > 15:
+                tokens.add(w[:15])          # a process's name in /proc/PID/comm
+tokens = sorted((t for t in tokens if len(t) >= 4), key=len, reverse=True)
+if not tokens:
+    sys.exit()
+pattern = re.compile("|".join(map(re.escape, tokens)), re.IGNORECASE)
+for name in os.listdir(results):
+    path = os.path.join(results, name)
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
+        text = f.read()
+    new = pattern.sub(f"<{label}>", text)
+    if new != text:
+        with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(new)
+PY
 }
 if [ "${#games[@]}" -gt 0 ]; then
     for i in "${!games[@]}"; do
-        game_check "${games[$i]}" "${names[$i]}"
+        game_check "game$((i + 1))" "${games[$i]}" "${names[$i]}"
     done
     note ""
     note "Test captures are kept in ~/game-sandboxes/*-systemd-test for another run;"

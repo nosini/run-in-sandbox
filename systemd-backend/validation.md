@@ -115,7 +115,10 @@ renamed) it launches your own games instead, as "Sandbox game" does and with
 their preferences, but under the systemd backend and in a capture of their
 own, `NAME-systemd-test`; the game's own capture and folder stay as they
 are. It records the render node the game got, which of its processes have
-the GPU open, and whether the capture stays yours on disk.
+the GPU open, and whether the capture stays yours on disk. The results call
+the games `game1`, `game2` and so on: their folder and sandbox names, and the
+names of the files at the top of their folders, are redacted from every
+result file, also as process names and in any case.
 
 Results on an RX 9070 XT desktop (Mesa 26.2.5, gamescope 3.16.31): under
 the systemd backend the game had the helper's render node copy, and Vulkan,
