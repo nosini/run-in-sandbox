@@ -46,6 +46,24 @@ cfg_get() {                                    # $1 = key, $2 = fallback
     printf '%s\n' "$2"
 }
 
+# Host-side protection choices apply even to direct CLI launches: per-game
+# settings, then defaults, then the environment. An empty value uses the latter.
+# A subshell caller (such as --check) can apply another game's choices safely.
+security_prefs() {
+    local key value var
+    for key in separate_uid seccomp_policy seccomp; do
+        value="$(cfg_get "$key" '')"
+        [ -n "$value" ] || continue
+        case "$key:$value" in
+            separate_uid:0|separate_uid:1|separate_uid:systemd) var=SANDBOX_SEPARATE_UID ;;
+            seccomp_policy:denylist|seccomp_policy:allowlist) var=SANDBOX_SECCOMP_POLICY ;;
+            seccomp:enforce|seccomp:log) var=SANDBOX_SECCOMP ;;
+            *) echo "sandbox-game: invalid $key=$value preference for ${NAME:-defaults}" >&2; return 1 ;;
+        esac
+        export "$var=$value"
+    done
+}
+
 # wayland_x11 (split display) refines the display that wayland, gamescope and
 # host_x11 choose, so it comes from the first file that sets any of them: a
 # game whose own file chose plain Wayland, saved before split display existed,
@@ -469,11 +487,16 @@ keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud", 
         "wayland_x11", "x11_exe", "x11_backend",
         "net", "proton", "mod_loaders", "steam", "hide_tray", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
-        "lan", "lan_allow", "mac_vendor", "private_hosts", "hosts", "hosts_writable", "env", "require"}
+        "lan", "lan_allow", "mac_vendor", "private_hosts", "hosts", "hosts_writable", "env", "require",
+        "separate_uid", "seccomp_policy", "seccomp"}
 assert isinstance(values, dict) and values.get("scope") in {"game", "all", "clear"}
 assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\0")
            for k, v in values.items())
 assert values.get("x11_backend", "gamescope") in {"gamescope", "satellite"}
+for key, choices in (("separate_uid", {"", "0", "1", "systemd"}),
+                     ("seccomp_policy", {"", "denylist", "allowlist"}),
+                     ("seccomp", {"", "enforce", "log"})):
+    assert values.get(key, "") in choices
 if "gamescope_resolution" in values or "gamescope_fullscreen" in values:
     assert "gamescope_resolution" in values and "gamescope_fullscreen" in values
     assert not values["gamescope_resolution"] or re.fullmatch(r"[0-9]+x[0-9]+", values["gamescope_resolution"])
@@ -558,6 +581,7 @@ PY
     bools="wayland wayland_x11 host_x11 mangohud hdr gamescope net launch_with mod_loaders steam hide_tray casefold webgl proton
            dotnet lan mac_vendor private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe x11_backend require"
+    security="separate_uid seccomp_policy seccomp"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
         for key in $bools; do
@@ -578,6 +602,16 @@ PY
                 printf '%s=%s\n' "$key" "$value"
             fi
         done
+        # Clearing one of these choices restores inheritance for that key.
+        for key in $security; do
+            if [ "${RESULT[$key]+set}" ]; then
+                value="${RESULT[$key]}"
+                [ -n "$value" ] || continue
+            else
+                value="$(file_get "$TARGET" "$key")" || continue
+            fi
+            printf '%s=%s\n' "$key" "$value"
+        done
         # The manager edits this file's own variables; an empty list leaves a
         # game with the defaults' ones, unless the file already said "none".
         if [ "${RESULT[env]+set}" ]; then
@@ -595,7 +629,7 @@ PY
                 [[ "$line" == *=* ]] || continue
                 key="${line%%=*}"; key="${key//[[:space:]]/}"
                 [[ "$key" =~ ^[a-z][a-z_0-9]*$ ]] || continue
-                [[ " $bools $optional gamescope_args env " == *[[:space:]]"$key"[[:space:]]* ]] && continue
+                [[ " $bools $optional $security gamescope_args env " == *[[:space:]]"$key"[[:space:]]* ]] && continue
                 printf '%s\n' "$line"
             done < "$TARGET"
         fi

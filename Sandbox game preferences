@@ -35,6 +35,13 @@ RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
 [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=""
 PROTONS="$("$SANDBOX" --list-proton 2>/dev/null)"
 OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
+SECURITY_ARGS=()
+for scope in game all; do
+    file="$CFGDIR/games/$NAME"; [ "$scope" != all ] || file="$CFGDIR/defaults"
+    for key in separate_uid seccomp_policy seccomp; do
+        SECURITY_ARGS+=( "$scope:$key" "$(file_get "$file" "$key" || true)" )
+    done
+done
 
 # JSON is data, never shell code. Folder names and values need no escaping by
 # hand, and all controls keep their values while switching between runtimes.
@@ -50,13 +57,18 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" \
     lan "$(cfg_get lan 0)" lan_allow "$(cfg_get lan_allow '')" mac_vendor "$(cfg_get mac_vendor 0)" \
     private_hosts "$(cfg_get private_hosts 0)" hosts "$(cfg_get hosts '')" \
-    hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" <<'PY'
+    hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" \
+    "${SECURITY_ARGS[@]}" <<'PY'
 import json, sys
 name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
+values = dict(zip(sys.argv[9::2], sys.argv[10::2]))
+security = {scope: {key.split(":", 1)[1]: value for key, value in values.items()
+                    if key.startswith(scope + ":")} for scope in ("game", "all")}
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
                can_proton=proton == "1", renpy_x11=renpy == "1", dotnet=dotnet == "1",
                resolution=resolution, protons=installs.splitlines(),
-               game_settings=own == "1", values=dict(zip(sys.argv[9::2], sys.argv[10::2]))), sys.stdout)
+               game_settings=own == "1", security=security,
+               values={key: value for key, value in values.items() if ":" not in key}), sys.stdout)
 PY
 )" || die "Cannot prepare preferences."
 if OUT="$(dialog preferences <<<"$REQUEST")"; then :

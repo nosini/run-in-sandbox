@@ -14,6 +14,40 @@ Preferences = MODULE["Preferences"]
 
 
 class PreferencePolicyTests(unittest.TestCase):
+    def test_security_choices_follow_scope_and_preserve_drafts(self):
+        own = {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "log"}
+        defaults = {"separate_uid": "systemd", "seccomp_policy": "allowlist", "seccomp": "enforce"}
+        state = Preferences({"engine": "native", "security": {"game": own, "all": defaults}})
+        for key, value in own.items():
+            self.assertEqual(state.result()[key], value)
+        state.values["separate_uid"] = "1"
+        state.set_scope("all")
+        for key, value in defaults.items():
+            self.assertEqual(state.result()[key], value)
+        state.values["seccomp_policy"] = "denylist"
+        state.set_scope("clear")
+        self.assertEqual(state.result(), {"scope": "clear"})
+        state.set_scope("game")
+        self.assertEqual(state.result()["separate_uid"], "1")
+        self.assertEqual(state.result()["seccomp"], "log")
+        state.set_scope("all")
+        self.assertEqual(state.result()["seccomp_policy"], "denylist")
+
+    def test_inherited_security_choices_stay_unset_despite_merged_defaults(self):
+        state = Preferences({"values": {"separate_uid": "systemd", "seccomp": "log"},
+                             "security": {"game": {}, "all": {"separate_uid": "systemd", "seccomp": "log"}}})
+        for key in MODULE["SECURITY_CHOICES"]:
+            self.assertEqual(state.result()[key], "")
+        state.set_scope("all")
+        self.assertEqual(state.result()["separate_uid"], "systemd")
+        self.assertEqual(state.result()["seccomp"], "log")
+
+    def test_explicit_log_mode_conflicts_with_required_seccomp(self):
+        state = Preferences({"values": {"require": "seccomp", "seccomp": "log"}})
+        self.assertIn("Enforce", state.error())
+        state.values["seccomp"] = "enforce"
+        self.assertIsNone(state.error())
+
     def test_satellite_backend_round_trip_and_gamescope_controls(self):
         state = Preferences({"engine": "proton", "values": {
             "wayland": "1", "wayland_x11": "1", "x11_backend": "satellite",
@@ -214,6 +248,23 @@ class GtkDialogTests(unittest.TestCase):
         self.addCleanup(dialog.window.destroy)
         self.app = app
         return dialog
+
+    def test_security_dropdowns_keep_scopes_and_saved_choices_separate(self):
+        dialog = self.create("preferences", {"engine": "native", "security": {
+            "game": {}, "all": {"separate_uid": "systemd", "seccomp_policy": "allowlist"}}})
+        self.assertEqual(dialog.selected("separate_uid"), "")
+        dialog.widgets["separate_uid"].set_selected(1)
+        dialog.widgets["seccomp"].set_selected(1)
+        dialog.widgets["scope"].set_selected(1)
+        self.assertEqual(dialog.selected("separate_uid"), "systemd")
+        self.assertEqual(dialog.selected("seccomp_policy"), "allowlist")
+        dialog.widgets["seccomp_policy"].set_selected(1)
+        dialog.widgets["scope"].set_selected(0)
+        self.assertEqual(dialog.selected("separate_uid"), "0")
+        self.assertEqual(dialog.selected("seccomp"), "enforce")
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["separate_uid"], "0")
+        self.assertEqual(self.responses[0][1]["seccomp_policy"], "")
 
     def test_dark_theme_previews_then_cancel_restores_without_saving(self):
         dialog = self.create("preferences", {"engine": "native"})

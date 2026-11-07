@@ -740,9 +740,11 @@ def main():
                     request = dict(self.descriptions[key])
                 else:
                     request = dict(engine="", can_proton=False)
+                scopes = {"game": self.library.scope_settings(entry["name"]),
+                          "all": self.library.scope_settings(entry["name"], True)}
                 request.update(game=entry["title"], values=self.library.settings(entry["name"]),
-                               env={"game": self.library.scope_settings(entry["name"]).get("env", ""),
-                                    "all": self.library.scope_settings(entry["name"], True).get("env", "")},
+                               security=scopes,
+                               env={scope: values.get("env", "") for scope, values in scopes.items()},
                                protons=self.protons(),
                                game_settings=(self.library.config / "games" / entry["name"]).exists())
                 return request

@@ -526,7 +526,7 @@ check_host() {
 
     if [ -z "$(helper sandbox-seccomp)" ]; then
         _check_line '!!' seccomp "sandbox-seccomp not found"
-    elif ! out="$("$(helper sandbox-seccomp)" --status 2>&1)"; then
+    elif ! out="$(NAME=""; { security_prefs && "$(helper sandbox-seccomp)" --status; } 2>&1)"; then
         _check_line '!!' seccomp "cannot build the filter: $out"
     elif [ "$out" = "socket families filtered" ]; then
         _check_line ok seccomp "syscall filter, socket families filtered"
@@ -617,12 +617,13 @@ check_host() {
         if [ "$file" = "$CFGDIR/defaults" ]; then name=""; else name="${file##*/}"; fi
         all="$(NAME="$name" cfg_get require "")"
         [ -n "$all" ] || continue
-        # A game's line only where its own file says something: the rest
-        # have the defaults', on the line above.
-        [ -z "$name" ] || file_get "$file" require >/dev/null || continue
+        # A game's line only where it sets requirements or a seccomp mode
+        # that could contradict them; otherwise the defaults' line covers it.
+        [ -z "$name" ] || file_get "$file" require >/dev/null \
+            || file_get "$file" seccomp >/dev/null || continue
         if ! parse_requirements "$all" 2>/dev/null; then
             _check_line '!!' require "${name:-defaults}: unknown requirement in '$all'"
-        elif out="$(requirement_failures $R_REQUIRE)" && [ -z "$out" ]; then
+        elif out="$(NAME="$name"; { security_prefs && requirement_failures $R_REQUIRE; } 2>&1)" && [ -z "$out" ]; then
             _check_line ok require "${name:-defaults}: $R_REQUIRE"
         else
             _check_line '!!' require "${name:-defaults}: $R_REQUIRE; cannot launch here: ${out//$'\n'/; }"
@@ -767,6 +768,8 @@ Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBO
 SANDBOX_SECCOMP=log, SANDBOX_SECCOMP_POLICY=allowlist, SANDBOX_GPU_CARD=1,
 SANDBOX_SEPARATE_UID=1, SANDBOX_X11_TIMEOUT=SECONDS, MANGOHUD=1. Sound is playback only
 once `install.sh --restrict-audio` has set that up.
+Saved separate_uid, seccomp_policy and seccomp preferences override their
+environment variables (per-game settings, then defaults).
 More in the README.
 EOF
 }
@@ -953,6 +956,10 @@ valid_name "$NAME" || {
 # The sandbox name doubles as the key everything else files a game under, so
 # hand it out rather than have callers reimplement derive_name().
 [ "$PRINT_NAME" = 0 ] || { printf '%s\n' "$NAME"; exit 0; }
+
+# Saved protection choices override inherited environment variables before
+# backend selection, required-protection checks or filter compilation.
+security_prefs || exit 1
 
 # A Ren'Py build without SDL's Wayland driver (see renpy_without_wayland in
 # sandbox-game-lib) cannot run under --wayland: it gives way to the default,

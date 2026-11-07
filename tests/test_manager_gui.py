@@ -94,7 +94,13 @@ def tick():
             scope = preferences.widgets["scope"]
             scope.set_selected(1)
             assert text() == "DXVK_HUD=1"
+            assert preferences.selected("separate_uid") == "systemd"
+            assert preferences.selected("seccomp_policy") == "allowlist"
             scope.set_selected(0)
+            assert preferences.selected("separate_uid") == ""
+            preferences.widgets["separate_uid"].set_selected(1)
+            preferences.widgets["seccomp_policy"].set_selected(1)
+            preferences.widgets["seccomp"].set_selected(1)
             preferences.widgets["net"].set_active(True)
             # A pasted line of several variables is several; the file's own
             # env= in front is not a variable called env.
@@ -111,6 +117,10 @@ def tick():
             assert manager.library.settings(entry["name"])["net"] == "1"
             assert manager.library.settings(entry["name"])["env"] == "WINE_GRAPHICS_DRIVER=x11"
             assert manager.library.scope_settings(entry["name"], True)["env"] == "DXVK_HUD=1"
+            assert manager.library.scope_settings(entry["name"])["separate_uid"] == "0"
+            assert manager.library.scope_settings(entry["name"])["seccomp_policy"] == "denylist"
+            assert manager.library.scope_settings(entry["name"])["seccomp"] == "enforce"
+            assert manager.library.scope_settings(entry["name"], True)["separate_uid"] == "systemd"
             prefix = manager.library.capture(entry["name"]) / "compat/pfx/drive_c/Example"
             prefix.mkdir(parents=True)
             (prefix / "play.exe").write_text("game")
@@ -317,7 +327,7 @@ sys.exit(result)
             env.pop("PROTON_DIR", None)
             defaults = Path(temporary) / ".config/sandbox-game/defaults"
             defaults.parent.mkdir(parents=True)
-            defaults.write_text("env=DXVK_HUD=1\n")
+            defaults.write_text("env=DXVK_HUD=1\nseparate_uid=systemd\nseccomp_policy=allowlist\n")
             result = subprocess.run([sys.executable, "-c", script, str(ROOT / "sandbox-manager")],
                                     env=env, capture_output=True, text=True, timeout=35)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

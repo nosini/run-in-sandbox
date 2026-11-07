@@ -1025,6 +1025,51 @@ class LibraryTests(unittest.TestCase):
             with self.subTest(require=bad), self.assertRaises(ValueError):
                 self.library.save_preferences(name, {"scope": "game", "require": bad})
 
+    def test_security_choices_save_each_scope_and_restore_inheritance(self):
+        name = self.library.create("game")["name"]
+        defaults = {"separate_uid": "systemd", "seccomp_policy": "allowlist", "seccomp": "enforce"}
+        self.library.save_preferences(name, {"scope": "all", **defaults})
+        self.assertEqual({k: self.library.settings(name)[k] for k in defaults}, defaults)
+        own = {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "log"}
+        self.library.save_preferences(name, {"scope": "game", **own})
+        self.assertEqual({k: self.library.settings(name)[k] for k in own}, own)
+        self.library.save_preferences(name, {"scope": "game", **dict.fromkeys(own, "")})
+        self.assertTrue(own.keys().isdisjoint(self.library.scope_settings(name)))
+        self.assertEqual({k: self.library.settings(name)[k] for k in defaults}, defaults)
+        self.library.save_preferences(name, {"scope": "all", **dict.fromkeys(own, "")})
+        self.assertTrue(own.keys().isdisjoint(self.library.settings(name)))
+        self.library.save_preferences(name, {"scope": "game", "separate_uid": "1"})
+        self.library.save_preferences(name, {"scope": "game", "net": "1"})
+        self.assertEqual(self.library.settings(name)["separate_uid"], "1")
+        before = self.library.scope_settings(name)
+        for key, bad in (("separate_uid", "auto"), ("seccomp_policy", "off"), ("seccomp", "off")):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.library.save_preferences(name, {"scope": "game", key: bad})
+            self.assertEqual(self.library.scope_settings(name), before)
+
+    def test_security_preferences_override_and_export_environment(self):
+        name = self.library.create("game")["name"]
+        variables = {"SANDBOX_SEPARATE_UID": "systemd", "SANDBOX_SECCOMP_POLICY": "allowlist",
+                     "SANDBOX_SECCOMP": "log"}
+        script = '''security_prefs || exit
+python3 -c 'import os,json; print(json.dumps([os.environ.get(k) for k in
+["SANDBOX_SEPARATE_UID", "SANDBOX_SECCOMP_POLICY", "SANDBOX_SECCOMP"]]))'
+'''
+        def effective():
+            result = self.library.shared(name, script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        with patch.dict(os.environ, variables):
+            self.assertEqual(effective(), ["systemd", "allowlist", "log"])
+            self.library.save_preferences(name, {"scope": "all", "separate_uid": "1",
+                                                  "seccomp_policy": "denylist", "seccomp": "enforce"})
+            self.assertEqual(effective(), ["1", "denylist", "enforce"])
+            self.library.save_preferences(name, {"scope": "game", "separate_uid": "0",
+                                                  "seccomp_policy": "allowlist", "seccomp": "log"})
+            self.assertEqual(effective(), ["0", "allowlist", "log"])
+            self.library.save_preferences(name, {"scope": "game", "separate_uid": "systemd"})
+            self.assertEqual(effective(), ["systemd", "allowlist", "log"])
+
     def test_installers_in_shared_folders_see_only_their_own_files(self):
         entry = self.library.create("game")
         for folder in (self.home, self.home / "Downloads"):

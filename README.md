@@ -677,6 +677,19 @@ Split display also offers **Private X11 backend**: gamescope or satellite.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
+**Sandbox protections** offers **Separate uid backend** (none, a persistent
+subordinate uid through `newuidmap`, or a transient systemd uid), **Seccomp
+filter** (denylist or allowlist), and **Seccomp mode** (enforce or log only).
+These controls are also in the manager's **Settings** page. **Save for** selects
+this game or all games' defaults; each scope keeps its own choices. An unset
+game choice follows the defaults, then the environment. An unset default uses
+the environment. A saved choice always overrides its environment variable,
+including when the game is launched from the CLI. Choosing **None** explicitly
+turns off a separate uid, even if the environment enables one. Leaving that
+choice unset preserves an existing sandbox's remembered uid backend when no
+environment variable selects one. Backend changes take effect at the next
+launch and keep the sandbox's files; see [A uid of its own](#a-uid-of-its-own).
+
 **Appearance (all dialogs)** offers **System**, **Light** and **Dark**, with
 an immediate preview. Save remembers the choice for preferences, launcher
 pickers, error windows and confirmations; Cancel discards the preview.
@@ -1281,9 +1294,10 @@ Debian, Arch) makes every socket through `socketcall()`, and they are not.
 A 32-bit program shipping an old glibc of its own cannot open any socket
 where the filter is on, its display included.
 
-If a game breaks and the filter is a suspect, run it once from the shell with
-`SANDBOX_SECCOMP=log`: every rule then logs instead of blocking. With auditd
-running, count the hits with
+If a game breaks and the filter is a suspect, choose **Seccomp mode → Log
+only** in its preferences, or run it once from the shell with
+`SANDBOX_SECCOMP=log` when no saved mode overrides it: every rule then logs
+instead of blocking. With auditd running, count the hits with
 
 ```sh
 sudo ausearch -m SECCOMP -ts recent | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort | uniq -c
@@ -1300,7 +1314,8 @@ were recorded at all in testing, by auditd or the kernel log; `strace -f`
 inside the sandbox, run through `sandbox-attach --exec` or as the game's
 command, shows the refused calls instead.
 
-**An allowlist.** `SANDBOX_SECCOMP_POLICY=allowlist` adds a
+**An allowlist.** **Seccomp filter → Allowlist**, or
+`SANDBOX_SECCOMP_POLICY=allowlist` when no saved policy overrides it, adds a
 second stage to the filter: after the denylist, every syscall a game is not
 known to need is refused with `ENOSYS`, the error programs take to mean "this
 kernel is too old" and work around. A syscall added to the kernel later, or
@@ -1477,14 +1492,20 @@ folder stays as closed to that uid as its permissions make it.
 
    Without this line the game starts, but software rendering is all it gets.
 
-3. Turn it on, for one launch from a terminal:
+3. In the manager's **Settings**, or Nautilus' **Sandbox game preferences**,
+   choose **Separate uid backend → Subordinate uid**. Save for this game or
+   all games' defaults. **Systemd** selects the other backend described below,
+   which needs its own administrator setup instead of steps 1 and 2 above.
+   **None** turns a separate uid off, giving its files back to the user.
+
+   With no saved choice, the environment can select it for one launch:
 
    ```sh
    SANDBOX_SEPARATE_UID=1 sandbox-game ~/Games/SomeGame /game/start.sh
    ```
 
-   or for everything started after logging in again, Nautilus and the
-   manager included:
+   or for launches after logging in again, Nautilus and the manager included,
+   where no saved choice overrides it:
 
    ```sh
    mkdir -p ~/.config/environment.d
@@ -1492,9 +1513,9 @@ folder stays as closed to that uid as its permissions make it.
    ```
 
    A sandbox that has run this way keeps doing so, also when started from
-   somewhere the variable does not reach. Only `SANDBOX_SEPARATE_UID=0`
-   turns it off again, for that sandbox: it then runs as the user, and its
-   files are given back to them.
+   somewhere the variable does not reach. Choosing **None** in its preferences,
+   or `SANDBOX_SEPARATE_UID=0` with no saved choice, turns it off again for that
+   sandbox: it then runs as the user, and its files are given back to them.
 
 It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
@@ -1514,7 +1535,8 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   it does. A file *moved* in from elsewhere keeps its own permissions,
   which the game can read but not change in place; copy it in instead, or it
   is handed over at the next launch. For anything else,
-  `SANDBOX_SEPARATE_UID=0` gives the files back for good, or run a command as
+  **Separate uid backend → None** gives the files back on the next launch
+  (`SANDBOX_SEPARATE_UID=0` also does, with no saved choice), or run a command as
   the owner of both the user and the sandbox:
 
   ```sh
@@ -1649,6 +1671,9 @@ private_hosts=0|1
 hosts=10.0.50.105 lobby.example.com login.example.com, 255.255.221.21 telemetry.example.com
 hosts_writable=0|1
 require=landlock,scoped,private-display,limits,audio,seccomp
+separate_uid=0|1|systemd
+seccomp_policy=denylist|allowlist
+seccomp=enforce|log
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -1695,6 +1720,14 @@ needed by Direct3D; the native launcher manages its own prefix.
 the entries in `hosts`.
 `require` lists the [required protections](#required-protections), separated by
 commas; `all` means every one, and an empty value none.
+`separate_uid`, `seccomp_policy` and `seccomp` override `SANDBOX_SEPARATE_UID`,
+`SANDBOX_SECCOMP_POLICY` and `SANDBOX_SECCOMP`, respectively: per-game settings
+win over defaults, which win over the environment. Unset controls remove the
+key from the selected scope, restoring inheritance. A hand-written empty value
+uses the environment directly. Without a uid choice in either preferences or
+the environment, an existing capture keeps its previous backend. With no
+seccomp choices, the filter is an enforced denylist. Log only allows the
+blocked calls through and cannot satisfy `require=seccomp`.
 
 ## Known rough edges
 

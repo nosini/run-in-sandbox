@@ -2708,6 +2708,42 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
             env=env or self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         return result, marker.exists()
 
+    def test_saved_security_choices_override_environment_on_real_launches(self):
+        nr = {"x86_64": 308, "aarch64": 268}.get(os.uname().machine)
+        if nr is None:
+            self.skipTest("no setns syscall number for this architecture")
+        # setns(-1, 0) is EBADF under the denylist or log mode; the enforced
+        # allowlist returns ENOSYS before the syscall reaches the kernel.
+        probe = ("import ctypes; c=ctypes.CDLL(None,use_errno=True); "
+                 f"c.syscall({nr},-1,0); print(ctypes.get_errno())")
+        env = {**self.env, "SANDBOX_SEPARATE_UID": "systemd",
+               "SANDBOX_SECCOMP_POLICY": "allowlist", "SANDBOX_SECCOMP": "log"}
+        defaults = "separate_uid=0\nseccomp_policy=denylist\nseccomp=enforce\nrequire=seccomp\n"
+        self.save_prefs(None, defaults)
+        for own, error in (("", 9), ("seccomp_policy=allowlist\n", 38),
+                           ("seccomp_policy=allowlist\nseccomp=log\nrequire=\n", 9)):
+            with self.subTest(preferences=own):
+                self.save_prefs("prefs", own)
+                result = subprocess.run([str(ROOT / "sandbox-game"), "--headless", "--name", "prefs",
+                                         str(self.game), "/usr/bin/python3", "-c", probe],
+                                        env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(error))
+                capture = self.home / "game-sandboxes/prefs"
+                self.assertFalse((capture / "uid").exists())
+                self.assertFalse((capture / "managed-uid").exists())
+                self.assertEqual((capture / "home").stat().st_uid, os.getuid())
+        self.save_prefs("prefs", "seccomp=log\n")
+        result, ran = self.launch_marked("prefs", "--headless", env=env)
+        self.assertFalse(ran)
+        self.assertIn("seccomp: SANDBOX_SECCOMP=log", result.stderr)
+        self.save_prefs(None, defaults.replace("separate_uid=0", "separate_uid=systemd"))
+        self.save_prefs("prefs", "separate_uid=0\n")
+        result, ran = self.launch_marked("prefs", "--headless", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(ran)
+        self.assertFalse((self.home / "game-sandboxes/prefs/managed-uid").exists())
+
     def test_required_protections_refuse_before_the_game_runs(self):
         # The test's runtime folder has no sandbox sound server, so playback-only
         # sound cannot be had; seccomp's log mode and a shared display contradict
@@ -2785,6 +2821,19 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
         self.assertRegex(out, r"(ok|!!)\s+require\s+defaults: landlock")
         self.assertRegex(out, r"!!\s+require\s+needs-sound: audio; cannot launch here: audio: no playback-only")
         self.assertNotIn("inherits", out)
+
+    def test_check_uses_each_scopes_seccomp_mode_over_environment(self):
+        self.env["SANDBOX_SECCOMP"] = "log"
+        self.save_prefs(None, "require=seccomp\nseccomp=enforce\n")
+        self.save_prefs("logging", "seccomp=log\n")
+        out = self.cli("--check", check=False).stdout
+        self.assertRegex(out, r"ok\s+require\s+defaults: seccomp")
+        self.assertRegex(out, r"!!\s+require\s+logging: seccomp; cannot launch here: seccomp:")
+        self.save_prefs(None, "require=seccomp\nseccomp=log\n")
+        self.save_prefs("logging", "seccomp=enforce\n")
+        out = self.cli("--check", check=False).stdout
+        self.assertRegex(out, r"!!\s+require\s+defaults: seccomp; cannot launch here: seccomp:")
+        self.assertRegex(out, r"ok\s+require\s+logging: seccomp")
 
     def test_standard_input_reaches_the_game_with_and_without_network(self):
         payload = "input for the game\n"
@@ -3483,6 +3532,33 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual(result.returncode, 0, result.stderr)
         return recorded.read_text().splitlines()
 
+    def test_nautilus_security_choices_save_game_defaults_and_inheritance(self):
+        (self.game / "start.sh").write_text("#!/bin/sh\n")
+        defaults = "separate_uid=systemd\nseccomp_policy=allowlist\nseccomp=enforce\n"
+        self.save_prefs(None, defaults)
+        self.preferences([])
+        request = json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
+        self.assertEqual(request["security"]["game"],
+                         {"separate_uid": "", "seccomp_policy": "", "seccomp": ""})
+        self.assertEqual(request["security"]["all"]["separate_uid"], "systemd")
+        own = {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "log"}
+        self.env["TEST_VALUES"] = json.dumps(own)
+        self.preferences(["X11, in gamescope (private Xwayland)", "Off", "Off", "This game only"])
+        path = self.home / ".config/sandbox-game/games/game"
+        for key, value in own.items():
+            self.assertIn(f"{key}={value}\n", path.read_text())
+        self.assertEqual((path.parent.parent / "defaults").read_text(), defaults)
+        self.env["TEST_VALUES"] = json.dumps({"separate_uid": "1", "seccomp": "enforce"})
+        self.preferences(["X11, in gamescope (private Xwayland)", "Off", "Off", "All games (defaults)"])
+        self.assertIn("separate_uid=1\n", (path.parent.parent / "defaults").read_text())
+        self.assertIn("seccomp_policy=allowlist\n", (path.parent.parent / "defaults").read_text())
+        self.assertIn("separate_uid=0\n", path.read_text())
+        self.env["TEST_VALUES"] = json.dumps(dict.fromkeys(own, ""))
+        self.preferences(["X11, in gamescope (private Xwayland)", "Off", "Off", "This game only"])
+        self.assertNotIn("separate_uid=", path.read_text())
+        self.assertNotIn("seccomp_policy=", path.read_text())
+        self.assertNotIn("seccomp=", path.read_text())
+
     def test_launcher_gives_dotnet_only_to_programs_needing_it(self):
         recorded = self.stub_launcher()
         game = self.dotnet_launcher()
@@ -4172,6 +4248,19 @@ class SeparateUidTests(unittest.TestCase):
     save_prefs = SecurityTests.save_prefs
     launch_marked = SecurityTests.launch_marked
 
+    def test_saved_backend_overrides_environment_and_can_be_disabled(self):
+        self.save_prefs(None, "separate_uid=1\n")
+        self.env["SANDBOX_SEPARATE_UID"] = "0"
+        self.run_guest('printf save > "$HOME/save"')
+        capture = self.home / "game-sandboxes/game"
+        self.assertTrue((capture / "uid").exists())
+        self.assertNotEqual((capture / "home/save").stat().st_uid, os.getuid())
+        self.save_prefs("game", "separate_uid=0\n")
+        self.env["SANDBOX_SEPARATE_UID"] = "1"
+        self.run_guest('cat "$HOME/save"')
+        self.assertFalse((capture / "uid").exists())
+        self.assertEqual((capture / "home/save").stat().st_uid, os.getuid())
+
     def test_requirements_hold_under_a_uid_of_its_own(self):
         # Without the sandbox sound server a uid of its own gets no sound at
         # all, which is what "audio" asks; log mode still contradicts "seccomp".
@@ -4463,6 +4552,18 @@ class SystemdBackendTests(unittest.TestCase):
     def setUp(self):
         SecurityTests.setUp(self)
         self.env["SANDBOX_SEPARATE_UID"] = "systemd"
+
+    def test_saved_backend_overrides_environment_and_can_be_disabled(self):
+        SecurityTests.save_prefs(self, None, "separate_uid=systemd\n")
+        self.env["SANDBOX_SEPARATE_UID"] = "0"
+        self.run_guest('printf save > "$HOME/save"')
+        capture = self.home / "game-sandboxes/game"
+        self.assertEqual((capture / "managed-uid").read_text().strip(), "1")
+        SecurityTests.save_prefs(self, "game", "separate_uid=0\n")
+        self.env["SANDBOX_SEPARATE_UID"] = "systemd"
+        self.assertEqual(self.run_guest('cat "$HOME/save"').stdout, "save")
+        self.assertFalse((capture / "managed-uid").exists())
+        self.assertEqual((capture / "home/save").stat().st_uid, os.getuid())
 
     # sandbox-attach and capture upkeep as for the other backends.
     test_attach_uses_target_root_and_cwd = SecurityTests.test_attach_uses_target_root_and_cwd

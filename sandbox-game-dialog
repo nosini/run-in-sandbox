@@ -17,6 +17,16 @@ DISPLAY_CHOICES = {
     "host-x11": "Host X11 (other X apps can watch and control it)",
 }
 
+SECURITY_CHOICES = {
+    "separate_uid": [("0", "None — run as the desktop user"),
+                     ("1", "Subordinate uid — newuidmap (persistent uid)"),
+                     ("systemd", "Systemd — nsresourced / mountfsd (transient uid)")],
+    "seccomp_policy": [("denylist", "Denylist — block known dangerous calls"),
+                       ("allowlist", "Allowlist — also block calls outside the allowed list")],
+    "seccomp": [("enforce", "Enforce — refuse blocked calls"),
+                ("log", "Log only — allow calls and request audit logging")],
+}
+
 
 class Appearance:
     """Application-wide theme; previewing never writes the desktop settings."""
@@ -173,6 +183,13 @@ class Preferences:
         if self.runtime != "proton":
             self.runtime = "auto"
         self.scope = "game"
+        # Keep each scope's protection choices separate, including unsaved
+        # edits. An inherited choice must stay inherited after saving.
+        self.security_scope = "game"
+        scopes = request.get("security", {"game": self.values})
+        self.security_values = {scope: {key: scopes.get(scope, {}).get(key, "") for key in SECURITY_CHOICES}
+                                for scope in ("game", "all")}
+        self.values.update(self.security_values["game"])
         if self.values.get("host_x11") == "1":
             self.display = "host-x11"
         elif self.values.get("wayland_x11") == "1" and self.values.get("wayland") == "1":
@@ -234,6 +251,11 @@ class Preferences:
         """Why the visible settings cannot be saved, or None."""
         if self.scope == "clear":
             return None
+        for key, choices in SECURITY_CHOICES.items():
+            if self.values[key] not in ("", *(value for value, _ in choices)):
+                return f"Unknown {key} setting: {self.values[key]}"
+        if "seccomp" in self.values["require"].split(",") and self.values["seccomp"] == "log":
+            return "An enforced syscall filter is required; select Enforce instead of Log only."
         if self.lan_allow_controls and lan_error(self.values["lan_allow"]):
             return lan_error(self.values["lan_allow"])
         if self.hosts_controls and hosts_error(self.values["hosts"]):
@@ -263,6 +285,13 @@ class Preferences:
         self.runtime = runtime
         if self.display not in self.displays:
             self.display = "wayland" if self.display == "wayland-x11" and "wayland" in self.displays else "x11"
+
+    def set_scope(self, scope):
+        self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
+        self.scope = scope
+        if scope != "clear":
+            self.security_scope = scope
+            self.values.update(self.security_values[scope])
 
     def result(self):
         if self.scope == "clear":
@@ -305,6 +334,7 @@ class Preferences:
             result["hosts"] = hosts_value(self.values["hosts"])
             result["hosts_writable"] = self.values["hosts_writable"]
         result["require"] = self.values["require"]
+        result.update({key: self.values[key] for key in SECURITY_CHOICES})
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -577,6 +607,13 @@ class Dialog:
         self.switch("hosts_writable", "The game may edit its hosts file too",
                     self.state.values["hosts_writable"] == "1",
                     lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
+        self.section("Sandbox protections", "Saved choices override environment variables. "
+                     "Unset game choices use the defaults, then the environment. "
+                     "Without a uid choice, an existing sandbox keeps its previous backend.")
+        for key, label in (("separate_uid", "Separate uid backend"),
+                           ("seccomp_policy", "Seccomp filter"), ("seccomp", "Seccomp mode")):
+            self.dropdown(key, label, [("", "Use defaults, then environment"), *SECURITY_CHOICES[key]],
+                          self.state.values[key], lambda *_, key=key: self.set_value(key, self.selected(key)))
         self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
         for key, label in REQUIREMENTS:
             self.switch("require_" + key, label, key in self.state.values["require"].split(","),
@@ -622,7 +659,12 @@ class Dialog:
         self.state.resolution = self.selected("resolution")
 
     def scope_changed(self, *_):
-        self.state.scope = self.selected("scope")
+        self.state.set_scope(self.selected("scope"))
+        self.updating = True
+        for key, choices in SECURITY_CHOICES.items():
+            inherit = "Use environment" if self.state.scope == "all" else "Use defaults, then environment"
+            self.set_options(key, [("", inherit), *choices], self.state.values[key])
+        self.updating = False
         for key, row in self.rows.items():
             if key not in ("scope", "appearance"):
                 row.set_sensitive(self.state.scope != "clear")

@@ -37,8 +37,8 @@ for key, value in zip(fields, form):
     if key == "display":
         state.display = next(k for k, label in module["DISPLAY_CHOICES"].items() if label == value)
     elif key == "scope":
-        state.scope = {"This game only": "game", "All games (defaults)": "all",
-                       "Clear this game's settings": "clear"}[value]
+        state.set_scope({"This game only": "game", "All games (defaults)": "all",
+                         "Clear this game's settings": "clear"}[value])
     elif key == "mangohud":
         state.values[key] = "1" if value == "On" else "0"
     elif key == "mod_loaders" or key == "net":
