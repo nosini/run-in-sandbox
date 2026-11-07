@@ -764,8 +764,9 @@ Examples
   sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 
 Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBOX_TOOLS_DIR,
-SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, SANDBOX_SEPARATE_UID=1, SANDBOX_X11_TIMEOUT=SECONDS,
-MANGOHUD=1. Sound is playback only once `install.sh --restrict-audio` has set that up.
+SANDBOX_SECCOMP=log, SANDBOX_SECCOMP_POLICY=allowlist, SANDBOX_GPU_CARD=1,
+SANDBOX_SEPARATE_UID=1, SANDBOX_X11_TIMEOUT=SECONDS, MANGOHUD=1. Sound is playback only
+once `install.sh --restrict-audio` has set that up.
 More in the README.
 EOF
 }
@@ -2688,6 +2689,8 @@ EOF
 # ---- seccomp ---------------------------------------------------------------
 # Compiled by sandbox-seccomp, which sits beside this script and says what it
 # blocks and why. Refuse to start without it rather than quietly run unfiltered.
+# It reads SANDBOX_SECCOMP_POLICY=allowlist itself; a policy it cannot build
+# stops the launch here too, rather than fall back to the default one.
 # bwrap reads the filter from an fd, so it is unlinked as soon as that is open.
 SECCOMP="$(helper sandbox-seccomp)"
 [ -n "$SECCOMP" ] || { echo "sandbox-seccomp not found; run install.sh" >&2; exit 1; }

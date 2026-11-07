@@ -1295,6 +1295,32 @@ is 64-bit and `arch=40000003` 32-bit, and the two number syscalls differently;
 `clone3` is left out of the log: glibc tries it for every thread and falls
 back to `clone`, and its hits would bury everything else. Expect `clone` from
 a `bwrap` under gamescope too — its image loader trying to sandbox itself.
+Where the audit rules begin with `-a never,task`, as openSUSE's do, no hits
+were recorded at all in testing, by auditd or the kernel log; `strace -f`
+inside the sandbox, run through `sandbox-attach --exec` or as the game's
+command, shows the refused calls instead.
+
+**An allowlist.** `SANDBOX_SECCOMP_POLICY=allowlist` adds a
+second stage to the filter: after the denylist, every syscall a game is not
+known to need is refused with `ENOSYS`, the error programs take to mean "this
+kernel is too old" and work around. A syscall added to the kernel later, or
+one nobody thought to block, is then refused too. Everything the denylist
+does still holds, with the same errors, on both the 64-bit and the 32-bit
+syscall tables. On top of it, `setns`, `chroot`, Linux AIO, POSIX message
+queues, `fanotify` and the other calls listed in `sandbox-seccomp` are
+refused, and `personality()` can only ask, or ask for plain or 32-bit Linux.
+Programs brought in with `sandbox-attach` get the filter the game was
+started with, whatever their own environment says. An unknown value in the
+variable stops the launch, as does a libseccomp too old to know the Landlock
+calls; neither falls back to the default. With `SANDBOX_SECCOMP=log` as well,
+what the allowlist would refuse is logged instead.
+
+It is opt-in, and the denylist alone stays the default. It has run the test
+suite, the system's Wine (64- and 32-bit), 32-bit programs, threads, child
+processes, sockets and networking, and `sandbox-attach`, but not Proton, a GPU,
+real sound or actual games. [docs/seccomp-allowlist.md](docs/seccomp-allowlist.md) records what
+was covered and how the list was chosen. If a game fails under it and works
+without it, that is worth a report.
 
 **Landlock.** The mounts decide what a game can reach; Landlock then holds it
 to the same from inside, a second lock on the same door. `sandbox-landlock`

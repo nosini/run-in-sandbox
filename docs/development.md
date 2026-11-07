@@ -4,7 +4,8 @@ This is for working on the sandbox itself. For installing and using it, see
 the [README](../README.md).
 
 Planned security work is tracked in
-[security-hardening-plan.md](security-hardening-plan.md).
+[security-hardening-plan.md](security-hardening-plan.md), and what of it was
+tested, and how, in [security-hardening-validation.md](security-hardening-validation.md).
 
 ## Running the tests
 

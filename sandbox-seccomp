@@ -2,10 +2,10 @@
 # sandbox-seccomp            write the filter to stdout, as bwrap --seccomp wants
 # sandbox-seccomp CMD...     install it on this process and exec CMD
 # sandbox-seccomp --status   build it, and say whether socket families are filtered
-#   The seccomp filter every sandbox runs under. The second form is how
-#   sandbox-attach brings a program into a running sandbox under the same
-#   filter as the game: nsenter cannot install one, and a program left
-#   unfiltered next to the game is one it could ptrace its way into.
+#   The seccomp filter every sandbox runs under. What sandbox-attach brings
+#   into a running sandbox is started by the sandbox's own sandbox-landlock,
+#   which is under the game's filter already, and inherits it from there; the
+#   second form is for running something under the same filter elsewhere.
 #
 #   SANDBOX_SECCOMP=log turns every block into a log entry and lets the call
 #   through: for finding out which rule a game trips over, never for playing.
@@ -13,6 +13,13 @@
 #     sudo ausearch -m SECCOMP -ts recent | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort | uniq -c
 #   counts them, and without it they land in the kernel log (journalctl -k).
 #   clone3 alone is still refused unlogged, see below.
+#
+#   SANDBOX_SECCOMP_POLICY=allowlist adds the allowlist further
+#   down to the denylist: every call not named there is refused as well. It
+#   reaches whatever sandbox-attach starts, since that inherits the game's
+#   filter, and nothing attached can be put under the denylist alone. With
+#   SANDBOX_SECCOMP=log, a call the allowlist would refuse is logged instead.
+#   Anything else in the variable is refused, not taken for the default.
 #
 # A denylist, starting from Flatpak's -- which Steam, Proton and Chromium
 # already run under -- plus what podman's default adds that a game has no use
@@ -52,6 +59,7 @@ import glob
 import os
 import struct
 import sys
+import tempfile
 
 EPERM, ENOSYS, EAFNOSUPPORT = errno.EPERM, errno.ENOSYS, errno.EAFNOSUPPORT
 ACT_ALLOW, ACT_LOG = 0x7FFF0000, 0x7FFC0000
@@ -83,9 +91,10 @@ BLOCK = {
         "set_mempolicy_home_node", "migrate_pages",
         # namespaces and mounts -- nested user namespaces are also switched
         # off by bwrap --disable-userns; this is the second lock on that door.
-        # Not setns or chroot, which Flatpak also blocks: sandbox-attach puts
-        # this filter on before nsenter, which needs both, and neither is any
-        # use to a game that has no capabilities in any namespace.
+        # Not setns or chroot, which Flatpak also blocks: neither is any use
+        # to a game that has no capabilities in any namespace. (sandbox-attach
+        # once put this filter on before nsenter, which needs both; it no
+        # longer runs anything there, and the allowlist leaves both out.)
         "unshare", "mount", "umount", "umount2", "pivot_root",
         # from podman's default: large, frequently exploited, never needed
         "bpf", "perf_event_open",
@@ -184,11 +193,13 @@ def load_lib():
         ctypes.POINTER(ArgCmp)]
     lib.seccomp_export_bpf.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.seccomp_load.argtypes = [ctypes.c_void_p]
+    lib.seccomp_attr_set.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32]
     return lib
 
 
-def build(lib):
-    ctx = lib.seccomp_init(ACT_ALLOW)
+def context(lib, default):
+    """A filter for the native architecture and its 32-bit one."""
+    ctx = lib.seccomp_init(default)
     if not ctx:
         sys.exit("sandbox-seccomp: seccomp_init failed")
     compat = COMPAT.get(lib.seccomp_arch_native())
@@ -196,17 +207,30 @@ def build(lib):
         rc = lib.seccomp_arch_add(ctx, compat)
         if rc < 0 and rc != -errno.EEXIST:
             sys.exit(f"sandbox-seccomp: cannot add 32-bit arch: {os.strerror(-rc)}")
+    return ctx
+
+
+def add_rule(lib, ctx, action, name, *cmps):
+    nr = lib.seccomp_syscall_resolve_name(name.encode())
+    if nr == -1:            # older libseccomp than the syscall: skip it
+        return
+    arr = (ArgCmp * len(cmps))(*cmps) if cmps else None
+    rc = lib.seccomp_rule_add_array(ctx, action, nr, len(cmps), arr)
+    if rc < 0:
+        sys.exit(f"sandbox-seccomp: rule for {name}: {os.strerror(-rc)}")
+
+
+def log_mode():
+    return os.environ.get("SANDBOX_SECCOMP") == "log"
+
+
+def build(lib):
+    ctx = context(lib, ACT_ALLOW)
 
     def rule(action, name, *cmps):
-        nr = lib.seccomp_syscall_resolve_name(name.encode())
-        if nr == -1:            # older libseccomp than the syscall: skip it
-            return
-        arr = (ArgCmp * len(cmps))(*cmps) if cmps else None
-        rc = lib.seccomp_rule_add_array(ctx, action, nr, len(cmps), arr)
-        if rc < 0:
-            sys.exit(f"sandbox-seccomp: rule for {name}: {os.strerror(-rc)}")
+        add_rule(lib, ctx, action, name, *cmps)
 
-    log = os.environ.get("SANDBOX_SECCOMP") == "log"
+    log = log_mode()
     if log:
         print("sandbox-seccomp: SANDBOX_SECCOMP=log -- logging, NOT blocking",
               file=sys.stderr)
@@ -248,9 +272,249 @@ def build(lib):
     return ctx
 
 
+# ---- the allowlist ---------------------------------------------------------
+# SANDBOX_SECCOMP_POLICY=allowlist. The denylist above names what is known to
+# be dangerous; this names what a game is known to need, so that a syscall
+# added to the kernel next year, or one nobody thought to list, is refused
+# too. docs/seccomp-allowlist.md records what has been run under it and what
+# has not.
+#
+# It does not replace the denylist but runs after it, as one program: the
+# denylist first, and wherever that lets a call through, this. So every rule
+# above holds here as well, with its own errno -- EPERM for the keyring and
+# for clone with CLONE_NEWUSER, ENOSYS for clone3, EAFNOSUPPORT for the
+# socket families, and the same compromise over socketcall on i386 -- and
+# this list only has to say which calls exist for a game at all. One program,
+# not two filters stacked by the kernel, because stacked filters disagreeing
+# over an errno settle it by which was loaded last, not by which is right; and
+# not one libseccomp filter holding both, because libseccomp turns every rule
+# that lets i386 socket() through for some families into one that lets
+# socketcall() make sockets of any family.
+#
+# Anything not listed fails with ENOSYS, as in podman's default: what
+# programs take to mean "this kernel is too old for that" and take their
+# fallback, where EPERM tends to be taken as a real failure. Not a kill: a
+# game that probes an unusual call should get on without it, not crash.
+#
+# The list starts from podman's default allowlist (containers/common), which
+# is what millions of containers already run under, less what needs a
+# capability no sandbox has and what no game has a use for, and was then
+# checked against Wine, Python, the shell tools and the sandbox's own helpers
+# running under it (docs/seccomp-allowlist.md). A trace of what one
+# game called would have been shorter, and would have missed every fallback
+# and error path it did not take that day. Names are resolved per
+# architecture, so the i386 and arm forms (mmap2, *_time64, *32, ...) are here
+# beside the 64-bit ones, and a name an architecture lacks is skipped there.
+ALLOW = [
+    # starting, running and ending programs, and threads
+    "execve", "execveat", "exit", "exit_group", "fork", "vfork", "clone",
+    "wait4", "waitid", "waitpid", "set_tid_address", "set_robust_list",
+    "get_robust_list", "rseq", "restart_syscall", "prctl", "arch_prctl",
+    "set_thread_area", "get_thread_area", "set_tls", "cacheflush", "breakpoint",
+    # 16- and 32-bit code segments: Wine needs it on x86 for both
+    "modify_ldt",
+    # who and where a process is; the set*id calls can only give up ids here,
+    # where there is no capability to take others with
+    "getpid", "getppid", "gettid", "getpgid", "getpgrp", "getsid", "setsid",
+    "setpgid", "getuid", "geteuid", "getgid", "getegid", "getresuid",
+    "getresgid", "getgroups", "getuid32", "geteuid32", "getgid32", "getegid32",
+    "getresuid32", "getresgid32", "getgroups32", "setuid", "setgid",
+    "setreuid", "setregid", "setresuid", "setresgid", "setfsuid", "setfsgid",
+    "setgroups", "setuid32", "setgid32", "setreuid32", "setregid32",
+    "setresuid32", "setresgid32", "setfsuid32", "setfsgid32", "setgroups32",
+    "capget", "capset", "uname", "sysinfo", "umask", "getcwd", "chdir",
+    "fchdir", "getrandom", "getcpu",
+    # limits, priorities and CPUs, of one's own processes
+    "getrlimit", "ugetrlimit", "setrlimit", "prlimit64", "getrusage", "times",
+    "getpriority", "setpriority", "ioprio_get", "ioprio_set", "sched_yield",
+    "sched_getaffinity", "sched_setaffinity", "sched_getparam",
+    "sched_setparam", "sched_getscheduler", "sched_setscheduler",
+    "sched_getattr", "sched_setattr", "sched_get_priority_max",
+    "sched_get_priority_min", "sched_rr_get_interval",
+    "sched_rr_get_interval_time64",
+    # signals; sigreturn is how i386 glibc returns from a plain handler
+    "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigreturn",
+    "rt_sigpending", "rt_sigsuspend", "rt_sigtimedwait",
+    "rt_sigtimedwait_time64", "rt_sigqueueinfo", "rt_tgsigqueueinfo",
+    "sigaltstack", "signalfd", "signalfd4", "kill", "tkill", "tgkill",
+    "pidfd_open", "pidfd_send_signal", "pause", "alarm", "getitimer",
+    "setitimer",
+    # one process reaching into another: wineserver and Proton read and write
+    # other processes' memory and registers, and Cheat Engine, attached, does
+    # the game's. Yama and Landlock decide which processes; kcmp, which Mesa
+    # uses to compare file descriptions, only works where ptrace would.
+    "ptrace", "process_vm_readv", "process_vm_writev", "kcmp",
+    # memory; memfd_create for Wine, Mesa and Wayland buffers, membarrier for
+    # JITs (.NET, V8). userfaultfd's kernel-fault kind is refused above.
+    "brk", "mmap", "mmap2", "munmap", "mremap", "mprotect", "madvise",
+    "mincore", "msync", "mlock", "mlock2", "munlock", "mlockall",
+    "munlockall", "membarrier", "memfd_create", "userfaultfd",
+    # files, directories and their descriptors
+    "open", "openat", "openat2", "creat", "close", "close_range", "read",
+    "write", "readv", "writev", "pread64", "pwrite64", "preadv", "pwritev",
+    "preadv2", "pwritev2", "lseek", "_llseek", "dup", "dup2", "dup3", "fcntl",
+    "fcntl64", "flock", "fsync", "fdatasync", "sync", "syncfs",
+    "sync_file_range", "sync_file_range2", "arm_sync_file_range", "fallocate",
+    "truncate", "truncate64", "ftruncate", "ftruncate64", "fadvise64",
+    "fadvise64_64", "arm_fadvise64_64", "readahead", "sendfile", "sendfile64",
+    "splice", "tee", "copy_file_range", "stat", "lstat", "fstat", "stat64",
+    "lstat64", "fstat64", "newfstatat", "fstatat64", "statx", "statfs",
+    "fstatfs", "statfs64", "fstatfs64", "access", "faccessat", "faccessat2",
+    "mkdir", "mkdirat", "rmdir", "rename", "renameat", "renameat2", "link",
+    "linkat", "unlink", "unlinkat", "symlink", "symlinkat", "readlink",
+    "readlinkat", "chmod", "fchmod", "fchmodat", "fchmodat2", "chown",
+    "fchown", "lchown", "fchownat", "chown32", "fchown32", "lchown32",
+    "utime", "utimes", "futimesat", "utimensat", "utimensat_time64",
+    "getdents", "getdents64", "pipe", "pipe2",
+    # FIFOs and sockets in the file system; device nodes need a capability
+    "mknod", "mknodat",
+    # extended attributes: Wine keeps DOS file attributes in them
+    "getxattr", "lgetxattr", "fgetxattr", "setxattr", "lsetxattr",
+    "fsetxattr", "listxattr", "llistxattr", "flistxattr", "removexattr",
+    "lremovexattr", "fremovexattr",
+    # devices: GPUs, sound, input, terminals, NTSYNC all speak ioctl
+    "ioctl", "inotify_init", "inotify_init1", "inotify_add_watch",
+    "inotify_rm_watch",
+    # waiting for things
+    "poll", "ppoll", "ppoll_time64", "select", "_newselect", "pselect6",
+    "pselect6_time64", "epoll_create", "epoll_create1", "epoll_ctl",
+    "epoll_wait", "epoll_pwait", "epoll_pwait2", "eventfd", "eventfd2",
+    "timerfd_create", "timerfd_settime", "timerfd_settime64",
+    "timerfd_gettime", "timerfd_gettime64",
+    # clocks and timers, read and used; not set
+    "clock_gettime", "clock_gettime64", "clock_getres", "clock_getres_time64",
+    "clock_nanosleep", "clock_nanosleep_time64", "nanosleep", "gettimeofday",
+    "time", "timer_create", "timer_settime", "timer_settime64",
+    "timer_gettime", "timer_gettime64", "timer_getoverrun", "timer_delete",
+    # futexes; futex_waitv is Proton's fsync
+    "futex", "futex_time64", "futex_waitv",
+    # sockets -- the families are the denylist's to refuse, socketcall too
+    "socket", "socketpair", "socketcall", "bind", "connect", "listen",
+    "accept", "accept4", "getsockname", "getpeername", "getsockopt",
+    "setsockopt", "sendto", "recvfrom", "send", "recv", "sendmsg", "recvmsg",
+    "sendmmsg", "recvmmsg", "recvmmsg_time64", "shutdown",
+    # System V IPC: shared memory for X11's MIT-SHM, and semaphores and
+    # message queues for older engines; ipc is how i386 reaches them. Private
+    # to the sandbox's own IPC namespace.
+    "ipc", "shmget", "shmat", "shmdt", "shmctl", "semget", "semop",
+    "semtimedop", "semtimedop_time64", "semctl", "msgget", "msgsnd", "msgrcv",
+    "msgctl",
+    # further restrictions only: sandbox-landlock, Chromium's own filter
+    "seccomp", "landlock_create_ruleset", "landlock_add_rule",
+    "landlock_restrict_self",
+]
+# Left out on purpose, for the next reader wondering: setns, chroot, mount and
+# the rest of namespace and mount handling, which nothing in a sandbox runs
+# (sandbox-attach enters from outside, through the sandbox's own starter);
+# Linux AIO (io_*), POSIX message queues, fanotify, name_to_handle_at,
+# vmsplice, pkey_*, mseal, map_shadow_stack, process_madvise, pidfd_getfd,
+# memfd_secret, cachestat, the new futex_wait/wake/requeue, listmount,
+# statmount, the lsm_* and *xattrat calls, adjtimex, the old i386 signal
+# calls besides sigreturn, vm86, and everything that needs a capability.
+# Each has a fallback, or is no part of what games and Wine do.
+
+# Programs may ask the kernel to behave as on another Unix, or to make every
+# readable page executable; neither has any business here. Asking which
+# personality is in force (0xffffffff) is fine, and 32-bit Linux is what
+# linux32 asks for. Anything else gets the list's ENOSYS: libseccomp can only
+# say "not one of these" with rules that overlap, and leaves undocumented
+# which of overlapping rules wins.
+PERSONALITIES = (0, 8, 0xFFFFFFFF, 2**64 - 1)    # PER_LINUX, PER_LINUX32, query twice
+
+# sandbox-landlock makes these calls under the filter. If the installed
+# libseccomp is too old to know them they would get ENOSYS, and Landlock
+# would quietly go, as on a kernel without it. Refuse instead.
+REQUIRED = ("landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self")
+POLICIES = ("denylist", "allowlist")
+SCMP_FLTATR_CTL_OPTIMIZE = 8
+
+
+def policy():
+    chosen = os.environ.get("SANDBOX_SECCOMP_POLICY") or "denylist"
+    if chosen not in POLICIES:
+        sys.exit(f"sandbox-seccomp: SANDBOX_SECCOMP_POLICY={chosen}: "
+                 f"not one of {', '.join(POLICIES)}; not building a filter")
+    return chosen
+
+
+def build_allowlist(lib):
+    for name in REQUIRED:
+        if lib.seccomp_syscall_resolve_name(name.encode()) == -1:
+            sys.exit(f"sandbox-seccomp: this libseccomp does not know {name}, "
+                     "which the allowlist must let through; update libseccomp "
+                     "or leave SANDBOX_SECCOMP_POLICY unset")
+    ctx = context(lib, ACT_LOG if log_mode() else act_errno(ENOSYS))
+    # A binary search over the syscall numbers rather than one comparison
+    # after another: a few hundred rules, and Wine makes millions of calls.
+    # Without it the filter is slower, not weaker: no reason to refuse.
+    lib.seccomp_attr_set(ctx, SCMP_FLTATR_CTL_OPTIMIZE, 2)
+    for name in ALLOW:
+        add_rule(lib, ctx, ACT_ALLOW, name)
+    for value in PERSONALITIES:
+        add_rule(lib, ctx, ACT_ALLOW, "personality", ArgCmp(0, CMP_EQ, value, 0))
+    return ctx
+
+
+# Classic BPF, as seccomp takes it: 8-byte instructions of code, jt, jf, k.
+INSN = struct.Struct("=HBBI")
+BPF_CLASS, BPF_RET, BPF_SRC_K, BPF_JA = 0x07, 0x06, 0x00, 0x05
+BPF_MAXINSNS = 4096
+
+
+def export(lib, ctx):
+    with tempfile.TemporaryFile() as f:
+        rc = lib.seccomp_export_bpf(ctx, f.fileno())
+        if rc < 0:
+            sys.exit(f"sandbox-seccomp: cannot export the filter: {os.strerror(-rc)}")
+        f.seek(0)
+        return f.read()
+
+
+def chain(first, then):
+    """One program: FIRST, and where FIRST would allow the call, THEN.
+    Every return of ALLOW in FIRST becomes a jump to THEN's start; THEN
+    starts by loading what it looks at, so nothing carries over. Logging,
+    refusing or killing stays FIRST's to say."""
+    insns = [list(INSN.unpack_from(first, at)) for at in range(0, len(first), INSN.size)]
+    for i, (code, _, _, k) in enumerate(insns):
+        if code & BPF_CLASS != BPF_RET:
+            continue
+        if code != BPF_RET | BPF_SRC_K:     # returns a register: cannot tell
+            sys.exit("sandbox-seccomp: cannot chain the filters: unexpected return")
+        if k == ACT_ALLOW:
+            insns[i] = [BPF_JA, 0, 0, len(insns) - i - 1]
+    program = b"".join(INSN.pack(*insn) for insn in insns) + then
+    if len(program) // INSN.size > BPF_MAXINSNS:
+        sys.exit("sandbox-seccomp: the chained filter is longer than the kernel takes")
+    return program
+
+
+class SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
+
+PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 38, 22, 2
+
+
+def load_program(program):
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p,
+                           ctypes.c_ulong, ctypes.c_ulong]
+    buf = ctypes.create_string_buffer(program, len(program))
+    prog = SockFprog(len(program) // INSN.size, ctypes.addressof(buf))
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, None, 0, 0) < 0 or \
+            libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.addressof(prog), 0, 0) < 0:
+        sys.exit("sandbox-seccomp: cannot install the filter: "
+                 f"{os.strerror(ctypes.get_errno())}")
+
+
 def main():
     lib = load_lib()
+    allowlist = policy() == "allowlist"
     ctx = build(lib)
+    # Built before anything is said, so that --check shows a list this
+    # libseccomp cannot build as the failure it is.
+    program = chain(export(lib, ctx), export(lib, build_allowlist(lib))) if allowlist else None
     if sys.argv[1:] == ["--status"]:    # for sandbox-game --check
         if families_filtered(lib):
             print("socket families filtered")
@@ -262,9 +526,12 @@ def main():
             print(f"socket families not filtered: {path} {why} through socketcall")
         return
     if len(sys.argv) > 1:
-        rc = lib.seccomp_load(ctx)
-        if rc < 0:
-            sys.exit(f"sandbox-seccomp: cannot install the filter: {os.strerror(-rc)}")
+        if allowlist:
+            load_program(program)
+        else:
+            rc = lib.seccomp_load(ctx)
+            if rc < 0:
+                sys.exit(f"sandbox-seccomp: cannot install the filter: {os.strerror(-rc)}")
         try:
             os.execvp(sys.argv[1], sys.argv[1:])
         except OSError as e:
@@ -272,6 +539,10 @@ def main():
     if sys.stdout.isatty():
         sys.exit("sandbox-seccomp: refusing to write a binary filter to a terminal")
     sys.stdout.flush()
+    if allowlist:
+        sys.stdout.buffer.write(program)
+        sys.stdout.flush()
+        return
     rc = lib.seccomp_export_bpf(ctx, sys.stdout.fileno())
     if rc < 0:
         sys.exit(f"sandbox-seccomp: cannot export the filter: {os.strerror(-rc)}")
