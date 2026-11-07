@@ -258,7 +258,7 @@ working directory.
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
 | Tab completion in bash | `bash-completion` | installed by default on most distributions; the completions are loaded through it |
-| `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, `nsenter`, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own-experimental) |
+| `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, `nsenter`, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own) |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | `--dotnet` | a .NET runtime | your distribution's package, or Microsoft's install script into `~/.dotnet` |
 | playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
@@ -870,9 +870,8 @@ the running game at once.
 The game's folder is not, always. What the game changed in it is kept in
 `rw/`, and the game sees that through an overlay. The kernel's overlay usually
 shows a change made straight in `rw/` at once, but does not promise to;
-`fuse-overlayfs`, which a game under a [uid of its own](#a-uid-of-its-own-experimental)
-always gets, keeps what it has read, so a save copied into `rw/` while the game
-runs is not seen until it restarts. `--put` goes through the overlay instead,
+`fuse-overlayfs`, used by the [subordinate uid backend](#a-uid-of-its-own),
+keeps what it has read, so a save copied into `rw/` while the game runs is not seen until it restarts. `--put` goes through the overlay instead,
 as the game does, replacing the file whole; a host path into `rw/` names the
 same file under `/game`:
 
@@ -1322,7 +1321,7 @@ since it can open files and start programs. NW.js 0.110 runs the same without
 the flag — none of its processes carry a seccomp filter beyond this one — so
 it is passed only so that no build goes looking for a setuid helper.
 
-## A uid of its own (experimental)
+## A uid of its own
 
 Everything above runs the game as you. Its own mounts, process list and
 network, Landlock and the seccomp filter keep it from your files and your
@@ -1444,7 +1443,7 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   The launch says so, with the command that gives them back to you:
   `sudo chown -R "$USER": ~/game-sandboxes/NAME`.
 
-### The systemd backend (in development)
+### The systemd backend
 
 `SANDBOX_SEPARATE_UID=systemd` gets the game a uid of its own another way.
 systemd-nsresourced lends each launch a transient range of 64K uids, and
@@ -1452,7 +1451,10 @@ systemd-mountfsd mounts your folders for it idmapped, showing your files as
 the game's. So the capture stays yours on disk: `ls -l` shows you as the
 owner, with no ACL entries, and you edit a save as you would anywhere else.
 The game's folder and Proton go through the kernel's overlay, not
-`fuse-overlayfs`. There is no `/etc/subuid` range and no `newuidmap`.
+`fuse-overlayfs`. Reading game files avoids the FUSE overhead, and edits made
+straight in `rw/` usually show up in the running game immediately. For reliable
+live updates, use `sandbox-attach --put` as described below. There is no
+`/etc/subuid` range and no `newuidmap`.
 
 The game still runs as a uid that is neither yours nor another sandbox's, a
 different one at every launch. Only what the sandbox binds in is shared with
@@ -1467,7 +1469,7 @@ first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
 kernel's mark as well. The old subordinate uid's ACL entries are removed
 before that uid is released.
 
-It is not ready for general use yet. It needs systemd 261.4 or later, on
+It needs systemd 261.4 or later, on
 SELinux systems a policy module for the two services, and for the GPU copies
 of the render nodes that an administrator's helper keeps for you. On openSUSE
 Tumbleweed, `sudo ./install.sh --systemd-backend "$(id -u)"` installs that

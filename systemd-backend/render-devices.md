@@ -1,12 +1,12 @@
-# Render-device lifecycle prototype
+# Render-device lifecycle
 
 This is part of the [systemd backend](README.md); its probes are in
 [`probes/`](probes/) and described in
 [docs/development.md](../docs/development.md). The administrator
 helper provisions render-device aliases for configured host users. It has been
 tested on an isolated VM with SELinux enforcing, including a real udev change
-event and a protected process using an idmapped, bind-mounted alias. It is
-still experimental. The launcher uses these aliases when present;
+event and a protected process using an idmapped, bind-mounted alias. The
+launcher uses these aliases when present;
 `sudo ./install.sh --systemd-backend UID...` installs this setup persistently.
 See [administrator setup](README.md) for installation and removal.
 
