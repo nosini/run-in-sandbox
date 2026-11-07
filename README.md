@@ -1522,6 +1522,19 @@ write to a file whose group the mapping lacks. Other layouts are refused
 before changing a capture, naming the folders to regroup; see
 [Your account's group](systemd-backend/README.md#your-accounts-group).
 
+Expect a launch to take a few seconds longer than under the other backends,
+most of the time. systemd-nsresourced serves requests from a pool of five
+worker processes, and each worker loads its BPF write restriction afresh the
+first time it registers a namespace or a mount, about a second of CPU apiece.
+A launch makes one such request for the namespace and one for each folder it
+delegates, which reaches every worker; the workers are replaced at least every
+five minutes. On a Ryzen 7 3800X VM with systemd 261.4, a game that exits at
+once took 5.1 s to launch more than five minutes after the last launch,
+0.4 s right after one, and 0.2 s under the default backend. The cost is in
+systemd and cannot be avoided from here: nsresourced loads the restriction
+while holding its registry lock, so requests made side by side still wait for
+each other.
+
 ## Preferences file format
 
 ```
