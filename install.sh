@@ -178,7 +178,7 @@ fi
 SATELLITE=0
 if [ -x "$SRC/sandbox-xwayland-satellite" ]; then
     [ -f "$SRC/satellite-LICENSE" ] || {
-        echo "sandbox-xwayland-satellite needs satellite-LICENSE beside it; rerun ./build-satellite.sh" >&2
+        echo "sandbox-xwayland-satellite needs satellite-LICENSE beside it; rerun ./get-satellite.sh" >&2
         exit 1; }
     SATELLITE=1
 fi

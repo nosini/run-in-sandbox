@@ -4,23 +4,31 @@ The private satellite build comes from
 [nosini/xwayland-satellite](https://github.com/nosini/xwayland-satellite).
 Its popup lifetime fixes and regression tests are maintained in that fork.
 
-Build the remote fork and install the launcher:
+Get the fork's prebuilt helper and install the launcher:
 
 ```sh
-./build-satellite.sh
+./get-satellite.sh
 ./install.sh
 ```
 
-Building needs Git, Cargo and Rust, Clang, pkg-config, and the development
-packages for XCB and xcb-util-cursor. Xwayland is required at runtime.
-Build on the machine where it will run, or with compatible libraries.
+`get-satellite.sh` pins a reviewed fork commit, the `sandbox-*` release
+built from it, and that release's SHA-256. It downloads the release's
+x86_64 tarball, refuses it unless the checksum matches and the tarball names
+the pinned commit, and writes `sandbox-xwayland-satellite` and
+`satellite-LICENSE` beside the launcher. The fork's `Release` workflow builds
+the tarball on Ubuntu 24.04; it needs libxcb and xcb-util-cursor at runtime,
+and Xwayland.
 
-The script fetches the reviewed fork commit pinned in `build-satellite.sh`
-from GitHub, checks that it got that commit, builds its locked release
-dependencies, and writes `sandbox-xwayland-satellite` and
-`satellite-LICENSE` beside the launcher. Build output stays in
-`.satellite-build/`; `SATELLITE_BUILD_DIR` selects another build directory.
-These generated files are not tracked by Git.
+`./get-satellite.sh --from-source` builds the same pinned commit here
+instead, as does any machine other than x86_64. That needs Git, Cargo and
+Rust, Clang, pkg-config, and the development packages for XCB and
+xcb-util-cursor. Build on the machine where it will run, or with compatible
+libraries. Work files stay in `.satellite-build/`; `SATELLITE_BUILD_DIR`
+selects another directory. These generated files are not tracked by Git.
+
+To move to a new fork commit, push it with a new `sandbox-*` tag, wait for
+its release, and update `COMMIT`, `TAG` and `SHA256` in `get-satellite.sh`
+from the release's `SHA256SUMS`.
 
 The checkout finds the binary directly. `install.sh` copies it into
 `~/.local/lib/sandbox-game/`. Reinstalling without a built helper keeps the

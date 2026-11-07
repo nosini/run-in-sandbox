@@ -1920,7 +1920,7 @@ if [ "$X11_BACKEND" = satellite ]; then
         echo "sandbox-game: using the private satellite build with popup lifetime fixes" >&2
     else
         SATELLITE_BIN="$(command -v xwayland-satellite)" || {
-            echo "satellite backend needs xwayland-satellite (or ./build-satellite.sh)" >&2; exit 1; }
+            echo "satellite backend needs xwayland-satellite (or ./get-satellite.sh)" >&2; exit 1; }
     fi
     XWAYLAND_BIN="$(command -v Xwayland)" || {
         echo "satellite backend needs xwayland-satellite and Xwayland" >&2; exit 1; }
