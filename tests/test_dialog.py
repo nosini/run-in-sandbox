@@ -413,6 +413,31 @@ sys.exit(main())
                 self.assertIn(b"window opened and closed", result.stdout)
 
 
+class RequiredProtectionTests(unittest.TestCase):
+    def test_result_always_carries_the_requirements_in_canonical_order(self):
+        state = Preferences({"engine": "proton", "values": {}})
+        self.assertEqual(state.result()["require"], "")
+        state = Preferences({"engine": "proton", "values": {"require": "seccomp,bogus,landlock"}})
+        self.assertEqual(state.result()["require"], "landlock,seccomp")
+        # Written by hand: "all", and blanks as well as commas.
+        state = Preferences({"engine": "proton", "values": {"require": "all"}})
+        self.assertEqual(state.result()["require"], "landlock,scoped,private-display,limits,audio,seccomp")
+        state = Preferences({"engine": "proton", "values": {"require": "limits audio"}})
+        self.assertEqual(state.result()["require"], "limits,audio")
+
+    def test_a_private_display_requirement_contradicts_a_desktop_display(self):
+        state = Preferences({"engine": "proton", "values": {"require": "private-display", "wayland": "1"}})
+        self.assertIn("private display", state.error())
+        state.display = "wayland-x11"
+        self.assertIsNotNone(state.error())
+        state.display = "x11"
+        self.assertIsNone(state.error())
+        state.display = "host-x11"
+        self.assertIsNotNone(state.error())
+        state.values["require"] = "landlock"
+        self.assertIsNone(state.error())
+
+
 class NetworkCardPreferenceTests(unittest.TestCase):
     def test_card_address_kind_is_offered_and_saved_only_with_the_internet(self):
         state = Preferences({"engine": "proton", "values": {"net": "0", "mac_vendor": "1"}})

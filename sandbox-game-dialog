@@ -139,6 +139,17 @@ def hosts_value(text):
     return ", ".join(" ".join(line.split()) for line in re.split(r"[,\n]", text) if line.strip())
 
 
+REQUIREMENTS = (
+    ("landlock", "Filesystem restrictions (Landlock): the game will not start without them"),
+    ("scoped", "Signal and abstract socket scoping (Landlock ABI 6): the game will not start without it"),
+    ("private-display", "Private display: no access to the desktop's display server (rules out host X11, "
+                        "plain Wayland and split display); the game will not start without it"),
+    ("limits", "Memory, CPU and task limits: the game will not start without them"),
+    ("audio", "Playback-only sound or none: the game will not start without it"),
+    ("seccomp", "Syscall filter enforced, not logging: the game will not start without it"),
+)
+
+
 class Preferences:
     """Preferences that remain unsaved until the window's Save button is used."""
 
@@ -151,6 +162,11 @@ class Preferences:
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("with_proton", "lan_allow", "hosts"):
             self.values[key] = self.values.get(key, "")
+        asked = [w for w in re.split(r"[\s,]+", self.values.get("require", "")) if w]
+        # "all", written by hand, is every one: shown as none, a save would drop them.
+        if "all" in asked:
+            asked = [key for key, _ in REQUIREMENTS]
+        self.values["require"] = ",".join(key for key, _ in REQUIREMENTS if key in asked)
         self.values["casefold"] = "0" if self.values.get("casefold") == "0" else "1"
         self.values["webgl"] = "vulkan" if self.values.get("webgl") == "vulkan" else "auto"
         self.runtime = self.values.get("launch_with", "auto")
@@ -222,6 +238,9 @@ class Preferences:
             return lan_error(self.values["lan_allow"])
         if self.hosts_controls and hosts_error(self.values["hosts"]):
             return hosts_error(self.values["hosts"])
+        if "private-display" in self.values["require"].split(",") and self.display in (
+                "host-x11", "wayland", "wayland-x11"):
+            return "A private display is required, which the chosen display does not give."
         if self.split_controls and any(c < " " or c == "\x7f" for c in self.values.get("x11_exe", "")):
             return "The X11 executable cannot contain tabs, line breaks or other control characters."
         return None
@@ -285,6 +304,7 @@ class Preferences:
         if self.hosts_controls:
             result["hosts"] = hosts_value(self.values["hosts"])
             result["hosts_writable"] = self.values["hosts_writable"]
+        result["require"] = self.values["require"]
         if self.uses_gamescope:
             # Only these controls are editable here. The persistence layer
             # preserves the destination scope's remaining arguments.
@@ -503,6 +523,13 @@ class Dialog:
         self.switch("hosts_writable", "The game may edit its hosts file too",
                     self.state.values["hosts_writable"] == "1",
                     lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
+        protections = Gtk.Label(label="Required protections: the game will not start when one cannot be enforced",
+                                xalign=0, wrap=True)
+        protections.add_css_class("heading")
+        self.body.append(protections)
+        for key, label in REQUIREMENTS:
+            self.switch("require_" + key, label, key in self.state.values["require"].split(","),
+                        lambda widget, *_, key=key: self.require_changed(key, widget.get_active()))
         resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
                                          "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
         self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
@@ -523,6 +550,12 @@ class Dialog:
         self.error_note.set_visible(False)
         self.body.append(self.error_note)
         self.refresh()
+
+    def require_changed(self, key, wanted):
+        if not self.updating:
+            chosen = set(self.state.values["require"].split(","))
+            chosen = chosen | {key} if wanted else chosen - {key}
+            self.state.values["require"] = ",".join(k for k, _ in REQUIREMENTS if k in chosen)
 
     def set_value(self, key, value):
         if not self.updating:

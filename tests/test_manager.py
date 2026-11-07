@@ -1007,6 +1007,24 @@ class LibraryTests(unittest.TestCase):
             with self.subTest(result=result), self.assertRaises(ValueError):
                 self.library.save_preferences(name, {"scope": "game", **result})
 
+    def test_required_protections_are_saved_inherited_and_validated(self):
+        entry = self.library.create("game")
+        name = entry["name"]
+        self.library.save_preferences(name, {"scope": "game", "require": "landlock,limits"})
+        self.assertEqual(self.library.scope_settings(name)["require"], "landlock,limits")
+        # Nothing required and nothing to turn off: no key.
+        self.library.save_preferences(name, {"scope": "game", "require": ""})
+        self.assertNotIn("require", self.library.scope_settings(name))
+        self.library.save_preferences(name, {"scope": "all", "require": "seccomp"})
+        self.assertEqual(self.library.settings(name)["require"], "seccomp")
+        # The game follows the defaults until it says otherwise, even "none".
+        self.library.save_preferences(name, {"scope": "game", "require": ""})
+        self.assertEqual(self.library.scope_settings(name)["require"], "")
+        self.assertEqual(self.library.settings(name)["require"], "")
+        for bad in ("all", "landlock,nothing", "landlock limits"):
+            with self.subTest(require=bad), self.assertRaises(ValueError):
+                self.library.save_preferences(name, {"scope": "game", "require": bad})
+
     def test_installers_in_shared_folders_see_only_their_own_files(self):
         entry = self.library.create("game")
         for folder in (self.home, self.home / "Downloads"):

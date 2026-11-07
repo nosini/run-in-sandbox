@@ -11,6 +11,7 @@ from importlib.machinery import SourceFileLoader
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -2692,6 +2693,99 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
             ("--ro-bind", str(outside), str(outside)),
         })
 
+    def save_prefs(self, name, text):
+        path = self.home / ".config" / "sandbox-game" / ("defaults" if name is None else f"games/{name}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def launch_marked(self, name, *options, env=None):
+        """A launch whose game leaves a marker: (result, whether it ran)."""
+        marker = self.home / "game-sandboxes" / name / "home" / "ran"
+        marker.unlink(missing_ok=True)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), *options, "--name", name, str(self.game),
+             "/bin/sh", "-c", 'touch "$HOME/ran"'],
+            env=env or self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        return result, marker.exists()
+
+    def test_required_protections_refuse_before_the_game_runs(self):
+        # The test's runtime folder has no sandbox sound server, so playback-only
+        # sound cannot be had; seccomp's log mode and a shared display contradict
+        # their requirements outright. Each refusal comes before the game runs.
+        log = {**self.env, "SANDBOX_SECCOMP": "log"}
+        for options, env, saved, needle in (
+                (["--headless", "--require=audio"], None, None, "audio: no playback-only"),
+                (["--headless"], None, ("game", "require=audio\n"), "audio: no playback-only"),
+                (["--headless"], None, (None, "require=audio\n"), "audio: no playback-only"),
+                (["--headless", "--require", "seccomp"], log, None, "SANDBOX_SECCOMP=log"),
+                (["--headless", "--require=all"], log, None, "seccomp:"),
+                (["--host-x11", "--require=private-display"], None, None, "--host-x11 puts"),
+                (["--wayland", "--require=private-display"], None, None, "without gamescope"),
+                (["--headless", "--require=landlock,bogus"], None, None, "unknown protection requirement"),
+                (["--headless"], None, ("game", "require=landlock, nonsense\n"), "unknown protection")):
+            with self.subTest(options=options, saved=saved):
+                for f in (self.home / ".config" / "sandbox-game").glob("**/*"):
+                    if f.is_file():
+                        f.unlink()
+                if saved:
+                    self.save_prefs("req" if saved[0] else None, saved[1])
+                result, ran = self.launch_marked("req", *options, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(needle, result.stderr)
+                self.assertFalse(ran)
+        # Nothing partial is left mounted or running.
+        self.assertEqual(subprocess.run(["findmnt", "-rn", "-o", "TARGET"], capture_output=True,
+                                        text=True).stdout.count(str(self.base)), 0)
+
+    def test_a_game_relaxes_the_defaults_only_in_its_own_preferences(self):
+        self.save_prefs(None, "require=audio\n")
+        self.save_prefs("relaxed", "require=\n")
+        result, ran = self.launch_marked("relaxed", "--headless")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(ran)
+        # A requirement given on the command line comes on top; it never takes
+        # one away.
+        result, ran = self.launch_marked("relaxed", "--headless", "--require=audio")
+        self.assertFalse(ran)
+        self.save_prefs("strict", "require=seccomp\n")
+        result, ran = self.launch_marked("strict", "--headless", "--require=landlock",
+                                         env={**self.env, "SANDBOX_SECCOMP": "log"})
+        self.assertFalse(ran)
+        self.assertIn("seccomp:", result.stderr)
+        # Without log mode, the same saved requirement lets it start.
+        result, ran = self.launch_marked("strict", "--headless")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(ran)
+
+    def test_required_limits_and_landlock_follow_what_the_machine_can_do(self):
+        check = self.cli("--check", check=False).stdout
+        limits_ok = re.search(r"^\s+ok\s+limits\s", check, re.M) is not None
+        abi = int(subprocess.run([sys.executable, str(ROOT / "sandbox-landlock"), "--abi"],
+                                 capture_output=True, text=True).stdout.strip() or 0)
+        for requirement, possible in (("limits", limits_ok), ("landlock", abi >= 1),
+                                      ("scoped", abi >= 6)):
+            with self.subTest(requirement=requirement, possible=possible):
+                result, ran = self.launch_marked("req-" + requirement, "--headless",
+                                                 "--require=" + requirement)
+                self.assertEqual(ran, possible, result.stderr)
+                if not possible:
+                    self.assertIn(requirement + ":", result.stderr)
+        # Where scoping is required and had, the game cannot signal what is
+        # outside its Landlock domain: bwrap's init, pid 1.
+        if abi >= 6:
+            out = self.run_guest("kill -0 1 2>/dev/null && echo reached || echo refused",
+                                 "--require=scoped")
+            self.assertEqual(out.stdout.strip(), "refused")
+
+    def test_check_shows_saved_requirements(self):
+        self.save_prefs(None, "require=landlock\n")
+        self.save_prefs("needs-sound", "require=audio\n")
+        self.save_prefs("inherits", "net=0\n")
+        out = self.cli("--check", check=False).stdout
+        self.assertRegex(out, r"(ok|!!)\s+require\s+defaults: landlock")
+        self.assertRegex(out, r"!!\s+require\s+needs-sound: audio; cannot launch here: audio: no playback-only")
+        self.assertNotIn("inherits", out)
+
     def test_standard_input_reaches_the_game_with_and_without_network(self):
         payload = "input for the game\n"
         for options in ([], ["--net"]):
@@ -4074,6 +4168,26 @@ class SeparateUidTests(unittest.TestCase):
         out = subprocess.run([str(ROOT / "sandbox-uid"), "ids", str(capture)], env=self.env,
                              capture_output=True, text=True, check=True).stdout.split()
         return int(out[0])
+
+    save_prefs = SecurityTests.save_prefs
+    launch_marked = SecurityTests.launch_marked
+
+    def test_requirements_hold_under_a_uid_of_its_own(self):
+        # Without the sandbox sound server a uid of its own gets no sound at
+        # all, which is what "audio" asks; log mode still contradicts "seccomp".
+        self.save_prefs("uid-req", "require=audio,seccomp\n")
+        result, ran = self.launch_marked("uid-req", "--headless")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(ran)
+        result, ran = self.launch_marked("uid-req", "--headless",
+                                         env={**self.env, "SANDBOX_SECCOMP": "log"})
+        self.assertFalse(ran)
+        # Switching back to running as you keeps the saved requirement, which
+        # then cannot be met without that server.
+        result, ran = self.launch_marked("uid-req", "--headless",
+                                         env={**self.env, "SANDBOX_SEPARATE_UID": "0"})
+        self.assertFalse(ran)
+        self.assertIn("audio: no playback-only", result.stderr)
 
     def test_forget_does_not_allocate_a_uid(self):
         capture = self.home / "game-sandboxes" / "no-uid"

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -I
 """sandbox-landlock [--rw PATH | --ro PATH | --ls PATH | --unix-connect PATH]...
-                 [--unix-connect-where-writable] [--no-abstract-scope]
+                 [--unix-connect-where-writable] [--no-abstract-scope] [--require LIST]
                  [--attach DIR | --gamescope-on-demand | --x11-server[=SECONDS]] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
    sandbox-landlock --has-unix-connect   exit 0 if the kernel can restrict
@@ -25,6 +25,10 @@ reopen as far as the descriptors already go (see main).
 --ro   read and execute
 --ls   list directories only
 --unix-connect-where-writable, --no-abstract-scope, --unix-connect   see below
+--require   fs, scope, unix, comma separated: exit before running CMD, rather
+            than warn and go on, when this kernel cannot restrict files,
+            scope signals and abstract sockets (ABI 6), or restrict connecting
+            to Unix sockets by path (sandbox-game --require)
 
 Landlock also scopes signals and abstract unix sockets to the game's own
 processes, where the kernel supports that (ABI 6).
@@ -795,7 +799,14 @@ def main():
     if args == ["--has-unix-connect"]:  # for sandbox-game --check
         sys.exit(0 if has_unix else 1)
     rules, unix, abstract, attach_dir, on_demand, x11_server = [], False, True, None, False, None
+    required = set()
     while args and args[0] != "--":
+        if args[0] == "--require" and len(args) > 1:
+            required |= set(args[1].split(","))
+            if not required <= {"fs", "scope", "unix"}:
+                sys.exit(__doc__.split("\n\n")[0])
+            args = args[2:]
+            continue
         if args[0] == "--x11-server" or args[0].startswith("--x11-server="):
             seconds = args[0].partition("=")[2] or str(X11_START_TIMEOUT)
             if not re.fullmatch(r"[1-9][0-9]{0,3}", seconds):
@@ -828,6 +839,17 @@ def main():
             beside_x11_server(cmd, x11_server)
     else:
         run = beside_gamescope if on_demand else execute
+
+    # Before anything else, and before CMD: a requirement that cannot be met
+    # stops the launch, where it would otherwise go on with a warning below.
+    missing = [what for need, ok, what in (
+        ("fs", abi >= 1, "no Landlock in this kernel"),
+        ("scope", abi >= 6, f"Landlock ABI {max(abi, 0)} cannot scope signals and abstract sockets"),
+        ("unix", has_unix, "this kernel's Landlock cannot restrict connecting to sockets"))
+        if need in required and not ok]
+    if missing:
+        print(f"sandbox-landlock: required, but {'; '.join(missing)}; not starting", file=sys.stderr)
+        sys.exit(1)
 
     # Made while this process can still create it there.
     listener = listen(attach_dir) if attach_dir else None

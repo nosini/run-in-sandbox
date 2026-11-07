@@ -3,10 +3,10 @@
 # bash-completion picks it up the first time sandbox-game is completed.
 #
 # Completes the options; running sandboxes after --stop; existing ones after
-# --name, --delete and --reset-install; Proton installs after --proton= and
-# --with-proton=; directories for GAMEDIR; and, for
-# the command, paths inside GAMEDIR written the way the sandbox sees them --
-# type /game/ and it lists the game's folder.
+# --name, --delete and --reset-install; requirement names after --require;
+# Proton installs after --proton= and --with-proton=; directories for GAMEDIR;
+# and, for the command, paths inside GAMEDIR written the way the sandbox sees
+# them -- type /game/ and it lists the game's folder.
 
 # bash-completion 2.12 renamed its helpers; use whichever this one has.
 _sandbox_game_init()
@@ -98,7 +98,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -120,6 +120,13 @@ _sandbox_game()
     case $prev in
         --x11-backend)
             COMPREPLY=($(compgen -W 'gamescope satellite' -- "$cur"))
+            return ;;
+        --require)
+            # A comma-separated list: complete the word after the last comma.
+            local done=${cur%"${cur##*,}"}
+            COMPREPLY=($(compgen -P "$done" -W 'landlock scoped private-display limits audio seccomp all' \
+                -- "${cur##*,}"))
+            compopt -o nospace 2>/dev/null
             return ;;
         --stop)
             COMPREPLY=($(compgen -W "$(_sandbox_game_running)" -- "$cur"))
@@ -159,7 +166,7 @@ _sandbox_game()
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-backend --x11-exe --gamescope --host-x11 --headless
             --proton --mod-loaders --steam --hide-tray --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
-            --lan --mac-vendor --hosts --add-host --hosts-writable --ro --name --env --mangohud --hdr --list --stop
+            --lan --mac-vendor --hosts --add-host --hosts-writable --ro --require --name --env --mangohud --hdr --list --stop
             --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
         return
     fi

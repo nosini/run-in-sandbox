@@ -115,6 +115,11 @@
 #               are rewritten and conflicting names elsewhere removed on later
 #               launches. pkexec runs its command as is in here, so a program
 #               that edits /etc/hosts through it gets on.
+#   --require LIST  refuse to start unless these protections hold, where the
+#               launch would otherwise go on with a warning: landlock, scoped,
+#               private-display, limits, audio, seccomp, or all (see
+#               REQUIREMENTS in sandbox-game-lib). Added to what the game's
+#               preferences require (require=); only a change there relaxes those.
 #
 
 #   Default uses gamescope's private Xwayland. --host-x11 opts into the host
@@ -414,12 +419,13 @@ reset_install() {                     # $1 = NAME
 # Sets LIMITS (the scope properties), CPUS, SCOPE (systemd-run up to its
 # options) and UNLIMITED (the controllers a scope here cannot limit, space
 # separated); returns 1 when there is no user manager to ask. It asks with a
-# trial scope carrying the same limits, which names each one its cgroup has no
-# file for: the user manager can only set what it was delegated. openSUSE
-# ships user@.service with Delegate= emptied, and there memory and CPU limits
-# are accepted without a word and never applied.
+# trial scope carrying the same limits, which names each one its cgroup does
+# not hold to -- no file for it, or no limit in it: the user manager can only
+# set what it was delegated. openSUSE ships user@.service with Delegate=
+# emptied, and there memory and CPU limits are accepted without a word and
+# never applied.
 probe_limits() {
-    local controllers=( memory )
+    local controllers=( memory pids )
     LIMITS=( -p MemoryMax=80% -p TasksMax=4096 )
     CPUS="$(nproc 2>/dev/null || echo 1)"
     [ "$CPUS" -lt 2 ] || { LIMITS+=( -p "CPUQuota=$(( (CPUS - 1) * 100 ))%" ); controllers+=( cpu ); }
@@ -435,7 +441,10 @@ probe_limits() {
     command -v systemd-run >/dev/null \
         && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
             d="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)"
-            for c do [ -e "$d/$c.max" ] || printf "%s " "$c"; done' sh "${controllers[@]}" 2>/dev/null)" \
+            for c do
+                v="$(cat "$d/$c.max" 2>/dev/null)" || v=max
+                [ "${v%% *}" != max ] || printf "%s " "$c"
+            done' sh "${controllers[@]}" 2>/dev/null)" \
         || return 1
     UNLIMITED="${UNLIMITED% }"
 }
@@ -598,7 +607,74 @@ check_host() {
     else
         _check_line ok 32-bit "Proton's 32-bit Wine finds the system libraries it needs"
     fi
+
+    # Saved requirements, by game, as a launch would take them -- a game's own
+    # file over the defaults -- and what of each this machine cannot meet.
+    # What a launch's display or sound would contradict is said at launch.
+    local name file all
+    for file in "$CFGDIR/defaults" "$CFGDIR"/games/*; do
+        [ -f "$file" ] || continue
+        if [ "$file" = "$CFGDIR/defaults" ]; then name=""; else name="${file##*/}"; fi
+        all="$(NAME="$name" cfg_get require "")"
+        [ -n "$all" ] || continue
+        # A game's line only where its own file says something: the rest
+        # have the defaults', on the line above.
+        [ -z "$name" ] || file_get "$file" require >/dev/null || continue
+        if ! parse_requirements "$all" 2>/dev/null; then
+            _check_line '!!' require "${name:-defaults}: unknown requirement in '$all'"
+        elif out="$(requirement_failures $R_REQUIRE)" && [ -z "$out" ]; then
+            _check_line ok require "${name:-defaults}: $R_REQUIRE"
+        else
+            _check_line '!!' require "${name:-defaults}: $R_REQUIRE; cannot launch here: ${out//$'\n'/; }"
+        fi
+    done
     return "$failed"
+}
+
+# Why each requirement given cannot be met, a line each with what would help;
+# nothing when all can. Machine-wide unless LAUNCH=1, when this launch's own
+# choices -- display, sound, uid, seccomp mode -- count as well.
+requirement_failures() {
+    local r abi
+    abi="$(python3 "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
+    [[ "$abi" =~ ^[0-9]+$ ]] || abi=0
+    for r in "$@"; do
+        case "$r" in
+            landlock)
+                [ "$abi" -ge 1 ] || echo "landlock: this kernel has no Landlock, or it is not in its lsm= list" ;;
+            scoped)
+                [ "$abi" -ge 6 ] || echo "scoped: signal and abstract socket scoping need Landlock ABI 6 (Linux 6.12); this kernel has $abi" ;;
+            private-display)
+                if [ "${LAUNCH:-0}" = 1 ] && [ "$HEADLESS" = 0 ]; then
+                    if [ "$HOST_X11" = 1 ]; then
+                        echo "private-display: --host-x11 puts the game on the desktop's own X server"
+                    elif [ "$WAYLAND_X11" = 1 ]; then
+                        echo "private-display: split display (--wayland-x11) gives the game the desktop's compositor"
+                    elif [ "$OUTER_DISPLAY" = 0 ]; then
+                        echo "private-display: --wayland without gamescope gives the game the desktop's compositor"
+                    fi
+                fi
+                if [ "${LAUNCH:-0}" = 0 ] || { [ "$HEADLESS" = 0 ] && [ "$OUTER_DISPLAY" = 1 ]; }; then
+                    python3 "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null \
+                        || echo "private-display: this kernel's Landlock cannot keep the game off the desktop's compositor socket"
+                fi ;;
+            limits)
+                if ! probe_limits; then
+                    echo "limits: no systemd user manager to set memory, CPU and task limits"
+                elif [ -n "$UNLIMITED" ]; then
+                    echo "limits: no ${UNLIMITED// / or } limit: the controller is not delegated to the user manager" \
+                         "(README: \"Memory, CPU and task limits\")"
+                fi ;;
+            audio)
+                # A uid of its own gets no sound at all without that server.
+                [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ] \
+                    || { [ "${LAUNCH:-0}" = 1 ] && [ "$SEPARATE_UID" != 0 ]; } \
+                    || echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)" ;;
+            seccomp)
+                [ "${SANDBOX_SECCOMP:-}" != log ] \
+                    || echo "seccomp: SANDBOX_SECCOMP=log lets every call the filter blocks through" ;;
+        esac
+    done
 }
 
 # ---- args ------------------------------------------------------------------
@@ -654,6 +730,11 @@ Access
   --hosts-writable      the game may edit it too; kept in the capture folder
   --ro SRC DST          bind SRC in read-only at DST
 
+Protections
+  --require LIST        refuse to start unless these hold, on top of the saved
+                        require=: landlock, scoped, private-display, limits,
+                        audio, seccomp, or all
+
 Other
   --name NAME           sandbox name, else derived from GAMEDIR
   --env K=V             set a variable inside; repeatable, applied last
@@ -671,7 +752,8 @@ Managing sandboxes
   --delete NAME         delete a sandbox: saves, settings, Wine prefix
   --print-name GAMEDIR  the sandbox name a folder gets
   --list-proton         the Proton installs found, newest first
-  --check               which protections hold on this machine, one line each
+  --check               which protections hold on this machine, one line each,
+                        and whether the saved requirements can be met
   -h, --help            this
 
 Examples
@@ -701,6 +783,7 @@ WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MH
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; HIDE_TRAY=0; MAC_VENDOR=0
 WAYLAND_X11=0; X11_EXE=""; HDR=0; X11_BACKEND=gamescope; X11_BACKEND_SET=0; GS_SET=0
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
+REQUIRE_CLI=""
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -758,6 +841,8 @@ while [ "$#" -gt 0 ]; do
         --add-host=*) HOSTS=1; HOSTS_ADD+=( "${1#--add-host=}" ); shift ;;
         --hosts-writable) HOSTS=1; HOSTS_RW=1; shift ;;
         --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
+        --require)   REQUIRE_CLI+="${2?--require needs a list} "; shift 2 ;;
+        --require=*) REQUIRE_CLI+="${1#--require=} "; shift ;;
         --env)       _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
         --)          shift; break ;;
@@ -945,6 +1030,26 @@ if [ "$SEPARATE_UID" = systemd ] || { [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid
 fi
 # Before anything changes: an unavailable backend leaves the capture as it is.
 [ "$SEPARATE_UID" != systemd ] || "$UIDHELPER" managed-available || exit 1
+
+# ---- required protections --------------------------------------------------
+# What the game's preferences require (require=, its own file over the
+# defaults), and what --require adds: never less. Each one that cannot be had
+# here, or that this launch's own choices rule out, stops it now -- before
+# anything is mounted or run -- where it would otherwise go on with a warning.
+# sandbox-landlock and the limits below check again as they apply them.
+parse_requirements "$(cfg_get require "") $REQUIRE_CLI" || exit 1
+REQUIRE="$R_REQUIRE"
+if [ -n "$REQUIRE" ]; then
+    # shellcheck disable=SC2086  # a list of plain words
+    UNMET="$(LAUNCH=1 requirement_failures $REQUIRE)"
+    if [ -n "$UNMET" ]; then
+        echo "sandbox-game: not starting $NAME: it requires protections that cannot be had here" >&2
+        printf '  %s\n' "${UNMET//$'\n'/$'\n'  }" >&2
+        echo "  (its preferences require: $(cfg_get require "")${REQUIRE_CLI:+; --require: ${REQUIRE_CLI% }})" >&2
+        exit 1
+    fi
+fi
+required() { [[ " $REQUIRE " == *" $1 "* ]]; }
 if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
     if [ "$SEPARATE_UID" = 0 ]; then
         echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
@@ -2063,6 +2168,9 @@ if [ -S "$SANDBOX_PULSE" ]; then
     AUDIO_ARGS=( --ro-bind "$SANDBOX_PULSE" "$RT/pulse/native"
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 else
+    [ "$SEPARATE_UID" != 0 ] || ! required audio || {
+        echo "sandbox-game: not starting $NAME: it requires playback-only sound, and there is no sandbox sound server" >&2
+        exit 1; }
     [ "$SEPARATE_UID" != 0 ] || {     # it gets none of these then
     echo "sandbox-game: warning: no playback-only sound server; the game can record and load sound server modules" >&2
     echo "                       (./install.sh --restrict-audio sets one up)" >&2; }
@@ -2594,11 +2702,18 @@ exec 9< "$SECCOMP_BPF"; rm -f "$SECCOMP_BPF"
 # not the game's reach. systemd-run execs bwrap in place, so --die-with-parent
 # still means this shell.
 if probe_limits; then
+    # Asked once more, now that they are applied: required, they must hold.
+    if [ -n "$UNLIMITED" ] && required limits; then
+        echo "sandbox-game: not starting $NAME: it requires limits, and ${UNLIMITED// / and } cannot be limited" >&2
+        exit 1
+    fi
     SCOPE+=( --unit "sandbox-game-$NAME-$$" "${LIMITS[@]}" -- )
     [ -z "$UNLIMITED" ] || echo "sandbox-game: warning: running without ${UNLIMITED// / or } limits: the systemd" \
         "user manager has no ${UNLIMITED// / or } controller delegated to it" \
         "(see \"Memory, CPU and task limits\" in the README)" >&2
 else
+    required limits && { echo "sandbox-game: not starting $NAME: it requires limits, and there is no systemd user manager" >&2
+                         exit 1; }
     SCOPE=()
     echo "sandbox-game: warning: no systemd user manager; running without memory, CPU or task limits" >&2
 fi
@@ -2775,6 +2890,11 @@ BWRAP+=( --remount-ro /etc )
 LANDLOCK="$(helper sandbox-landlock)"
 [ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found; run install.sh" >&2; exit 1; }
 LL_ARGS=( --ls / --ro /run/sandbox-landlock )
+# Required (see "required protections"), they stop the game from starting.
+LL_REQUIRE=()
+required landlock && LL_REQUIRE+=( fs )
+required scoped && LL_REQUIRE+=( scope )
+[ "${#LL_REQUIRE[@]}" = 0 ] || LL_ARGS+=( --require "$(IFS=,; echo "${LL_REQUIRE[*]}")" )
 # A tmpfs made read-only once filled -- /etc -- is read-only to Landlock too.
 REMOUNTED_RO=" "
 for ((i = 0; i < ${#BWRAP[@]} - 1; i++)); do
@@ -2834,6 +2954,8 @@ if [ "$OUTER_DISPLAY" = 1 ]; then
     # The outer domain may write in /run/sandbox-attach, for the inner
     # sandbox-landlock to make the socket there before restricting itself.
     INNER_DISPLAY_RULES=(); INNER_DISPLAY_ENV=(); GS_START=( -- "${GS_CMD[@]}" -- )
+    INNER_REQUIRE=()
+    ! required private-display || INNER_REQUIRE=( --require unix )
     if [ "$WAYLAND_X11" = 1 ]; then
         # The game draws on the desktop, so the X11 server goes beside it,
         # not above: closing gamescope's window would end the game with it.
@@ -2858,7 +2980,8 @@ if [ "$OUTER_DISPLAY" = 1 ]; then
     fi
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach "${GS_START[@]}" \
         "${INNER_DISPLAY_ENV[@]}" /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" \
-        --unix-connect-where-writable --no-abstract-scope --attach /run/sandbox-attach -- "$@"
+        --unix-connect-where-writable --no-abstract-scope \
+        ${INNER_REQUIRE[@]+"${INNER_REQUIRE[@]}"} --attach /run/sandbox-attach -- "$@"
 else
     set -- /run/sandbox-landlock "${LL_ARGS[@]}" --attach /run/sandbox-attach -- "$@"
 fi

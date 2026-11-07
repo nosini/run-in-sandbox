@@ -1313,7 +1313,7 @@ read only if it was opened for reading, written only if for writing — the
 log is written, never read back — and no ioctls on a terminal reopened so.
 `/dev/console`, where bwrap puts the terminal a game was started from, gets
 no rule of its own. On a kernel without Landlock the game starts regardless, with a
-warning.
+warning — unless it requires Landlock (see [Required protections](#required-protections)).
 
 Stray descriptors are also simply closed, whatever their number: only stdin,
 stdout and stderr are passed into the sandbox, so a file or directory left
@@ -1346,8 +1346,9 @@ systemctl --user status sandbox-game-<name>-<pid>.scope   # memory, CPU and task
 The memory and CPU limits need those controllers delegated to the systemd
 user manager, as upstream systemd does and Fedora and Arch leave it. openSUSE
 does not: it empties `Delegate=` in `user@.service` for performance reasons, and
-the limits are then accepted and never applied. `sandbox-game` checks, and
-says at launch which limits are missing. To have them:
+the limits are then accepted and never applied. `sandbox-game` checks that each
+limit is actually in force in a trial scope, not just accepted, and says at
+launch which limits are missing. To have them:
 
 ```sh
 sudo mkdir -p /etc/systemd/system/user@.service.d
@@ -1367,6 +1368,39 @@ forbidden here, and a page with Node.js in it could not be sandboxed anyway,
 since it can open files and start programs. NW.js 0.110 runs the same without
 the flag — none of its processes carry a seccomp filter beyond this one — so
 it is passed only so that no build goes looking for a setuid helper.
+
+### Required protections
+
+Where a protection cannot be had — no Landlock in the kernel, no memory
+controller delegated, no playback-only sound server — a game normally starts
+anyway, with a warning. A game can instead *require* protections, and is then
+refused, with what is missing and what would help, before anything of it
+runs. The preferences window has a switch for each (**Required protections**),
+`require=` in the [preferences file](#preferences-file-format) holds them, and
+`--require LIST` adds to them for one launch:
+
+| Requirement | The game cannot … | Needs |
+|---|---|---|
+| `landlock` | reach past its mounts | Landlock in the kernel |
+| `scoped` | signal, or connect to abstract sockets of, anything outside its own Landlock domain | Landlock ABI 6 (Linux 6.12) |
+| `private-display` | reach the desktop's display server | a private display (the default gamescope, or `--headless`), not `--host-x11`, plain `--wayland` or split display; and a kernel whose Landlock can restrict connecting to sockets |
+| `limits` | take more than 80% of memory, all cores or 4096 tasks | the memory, CPU and pids controllers delegated to the user manager, each limit verified in force |
+| `audio` | record, or load sound server modules | `./install.sh --restrict-audio`; under a uid of its own no sound at all also qualifies |
+| `seccomp` | make the calls the filter blocks | not `SANDBOX_SECCOMP=log` |
+
+`all` stands for all of them. A game's own `require=` replaces the defaults'
+as every key does — `require=` with nothing after it is how one game is let off
+what the defaults require — and `--require` only ever adds: relaxing a
+requirement takes a change to the saved preferences. The requirements are
+checked before anything is mounted, and again where each protection is put in
+place: `sandbox-landlock` refuses to start the game when the kernel cannot
+do what is required, rather than warn. They hold however the game is started
+— the manager, the file manager, a shortcut, an installer, the shell — since
+`sandbox-game` reads them itself, and what `sandbox-attach` brings in runs
+inside the same Landlock domain, seccomp filter and scope. `sandbox-game
+--check` lists the defaults' requirements and every game's own, and says what
+this machine cannot meet; what a launch's own display or sound settings
+contradict is said when it is started.
 
 ## A uid of its own
 
@@ -1588,6 +1622,7 @@ lan_allow=10.0.50.105:443, 192.168.1.0/24
 private_hosts=0|1
 hosts=10.0.50.105 lobby.example.com login.example.com, 255.255.221.21 telemetry.example.com
 hosts_writable=0|1
+require=landlock,scoped,private-display,limits,audio,seccomp
 ```
 
 A key left out of a game's file comes from `defaults`; a key there with
@@ -1632,6 +1667,8 @@ needed by Direct3D; the native launcher manages its own prefix.
 `lan` and `lan_allow` apply only with `net=1`.
 `hosts` and `hosts_writable` apply only with `private_hosts=1`; commas separate
 the entries in `hosts`.
+`require` lists the [required protections](#required-protections), separated by
+commas; `all` means every one, and an empty value none.
 
 ## Known rough edges
 

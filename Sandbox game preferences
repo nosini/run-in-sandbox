@@ -50,7 +50,7 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     dotnet "$(cfg_get dotnet 0)" with_proton "$(cfg_get with_proton '')" \
     lan "$(cfg_get lan 0)" lan_allow "$(cfg_get lan_allow '')" mac_vendor "$(cfg_get mac_vendor 0)" \
     private_hosts "$(cfg_get private_hosts 0)" hosts "$(cfg_get hosts '')" \
-    hosts_writable "$(cfg_get hosts_writable 0)" <<'PY'
+    hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" <<'PY'
 import json, sys
 name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
