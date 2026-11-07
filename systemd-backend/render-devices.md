@@ -42,18 +42,21 @@ deny **new opens**. A regrant creates a fresh inode; old references stay denied.
 Already-open DRM descriptors are not revoked by chmod/chown. Physical unplug
 behavior for those descriptors remains the driver's responsibility.
 
-The [udev rules](systemd-render-devices.rules) run a short reconciliation on
-add/change/remove events. All invocations use a root-only lock and inspect
-current sysfs state after acquiring it. They do not blindly trust an event's
-old device number. A removal path is used only for comparison: a delayed remove
-for a currently live path revokes the old alias before publishing a fresh one.
-If the path now names another device, its current identity controls publication.
-The [oneshot unit](sandbox-game-render-devices.service) enables reconciliation and
-remains active to track the mount's lifetime; its boot ordering precedes user
-sessions. Reload applies allowlist changes without replacing unchanged aliases.
-On stop (including a failed start), it disables reconciliation and revokes
-aliases before systemd unmounts the tree. A queued udev helper sees the disabled
-marker and cannot regrant access. An explicit service start enables it again.
+The [udev rule](systemd-render-devices.rules) asks the service to reload on
+add/change/remove events; it never runs the helper itself, so every run has the
+unit's sandbox. A reload requested while one runs is queued again, not merged
+into it. All runs use a root-only lock and inspect current sysfs state after
+acquiring it; they take nothing from the event. Each alias records its device's
+sysfs and `/dev` inodes, so a device removed and re-added under the same path
+before a run gets a fresh alias, and the old one is revoked.
+The [oneshot unit](sandbox-game-render-devices.service) enables reconciliation and remains
+active to track the mount's lifetime; its boot ordering precedes user sessions.
+Reload applies allowlist changes without replacing unchanged aliases. On stop
+(including a failed start), it disables reconciliation and revokes aliases
+before systemd unmounts the tree; systemd ends a running reload first, and
+later events cannot reload the inactive service. The disabled marker also stops
+any other helper run from regranting access. An explicit service start enables
+it again.
 
 Root-controlled ancestors are opened without following symlinks. Publication
 uses a hardlink prepared in the root-only directory and an atomic rename over
@@ -110,13 +113,13 @@ sudo python3 -I systemd-backend/test_render_devices.py -v
 ```
 
 All **21 tests pass**, covering initial creation, unchanged/reused devices,
-delayed removals, parallel reconciliation, malformed configuration, source and
-destination symlinks, primary-node exclusion, published aliases moved/hardlinked
-by a user, allowlist revocation and interrupted creation/publication. They also
-check queued events after stop and revocation with invalid config/absent sysfs.
-They create synthetic
-sysfs/device fixtures under a private `/var/lib` test directory and remove them.
-No physical device is removed or unbound.
+devices replaced at the same path, parallel reconciliation, malformed
+configuration, source and destination symlinks, primary-node exclusion,
+published aliases moved/hardlinked by a user, allowlist revocation and
+interrupted creation/publication. They also check queued events after stop and
+revocation with invalid config/absent sysfs. They create synthetic sysfs/device
+fixtures under a private `/var/lib` test directory and remove them. No physical
+device is removed or unbound.
 
 The protected access check runs as the ordinary user:
 

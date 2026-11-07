@@ -306,7 +306,7 @@ def activation_state(state, action):
         return False
 
 
-def reconcile(paths=Paths(), removed=None, activation="keep"):
+def reconcile(paths=Paths(), activation="keep"):
     with ExitStack() as cleanup:
         state = root_directory(paths.state, create=True)
         cleanup.callback(os.close, state)
@@ -340,7 +340,6 @@ def reconcile(paths=Paths(), removed=None, activation="keep"):
                 metadata = json.loads(read_root_file(objects, key + ".json"))
                 st = os.stat(key, dir_fd=objects, follow_symlinks=False)
                 keep = (expected is not None and metadata["source"] == expected[2]
-                        and metadata["source"]["sys_path"] != removed
                         and stat.S_ISCHR(st.st_mode) and st.st_rdev == expected[2]["rdev"]
                         and st.st_uid == expected[0] and st.st_gid == expected[0]
                         and st.st_ino == metadata["inode"])
@@ -386,20 +385,14 @@ def reconcile(paths=Paths(), removed=None, activation="keep"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--removed", help="udev DEVPATH being removed; compare only, never opened")
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--enable", action="store_true", help="activate reconciliation for this mount")
     actions.add_argument("--disable", action="store_true", help="disable reconciliation and revoke aliases")
     args = parser.parse_args()
     require(os.geteuid() == 0, "this administrator helper must run as root")
-    if args.removed is not None:
-        require(args.removed.startswith("/devices/") and len(args.removed) <= 4096
-                and "\0" not in args.removed and "\n" not in args.removed,
-                "invalid removed DEVPATH")
     os.umask(0o077)
     runtime_mount(Paths().state)
-    reconcile(removed=args.removed,
-              activation="enable" if args.enable else "disable" if args.disable else "keep")
+    reconcile(activation="enable" if args.enable else "disable" if args.disable else "keep")
 
 
 if __name__ == "__main__":

@@ -107,11 +107,16 @@ class RenderLifecycle(unittest.TestCase):
             os._exit(1)
         self.assertEqual(os.waitpid(pid, 0)[1], 0)
 
-    def test_delayed_remove_for_same_live_path_replaces_alias_and_revokes_old(self):
+    def test_device_replaced_at_same_path_between_events_gets_a_fresh_inode(self):
+        # Remove and add can both be handled by one later reconciliation; the
+        # recorded sysfs and device inodes, not the path, identify the device.
         self.reconcile()
         old = self.held()
-        removed = helper.device(self.paths, "renderD128")["sys_path"]
-        self.reconcile(removed=removed)
+        shutil.rmtree(self.paths.sysfs / "devices/gpu0")
+        self.source.unlink()
+        os.mknod(self.source, stat.S_IFCHR | 0o600, os.makedev(226, 128))
+        self.make_sysdev("gpu0")
+        self.reconcile()
         self.revoked(old)
         self.assertNotEqual(os.fstat(old).st_ino, self.alias.stat().st_ino)
         self.assert_private_identity()
@@ -119,13 +124,12 @@ class RenderLifecycle(unittest.TestCase):
     def test_reused_minor_with_new_sysfs_device_gets_a_fresh_inode(self):
         self.reconcile()
         old = self.held()
-        old_path = helper.device(self.paths, "renderD128")["sys_path"]
         self.make_sysdev("gpu1")
         self.reconcile()
         self.revoked(old)
         inode = self.alias.stat().st_ino
-        # An old remove event must not erase the currently live new device.
-        self.reconcile(removed=old_path)
+        # A late event for the old device must not erase the live new one.
+        self.reconcile()
         self.assertEqual(self.alias.stat().st_ino, inode)
         self.assert_private_identity()
 

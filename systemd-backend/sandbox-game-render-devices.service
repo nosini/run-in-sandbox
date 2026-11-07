@@ -9,9 +9,10 @@ RequiresMountsFor=/usr/local/libexec/sandbox-game
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/libexec/sandbox-game/systemd-render-devices --enable
+# The udev rule reloads on render-node events.
 ExecReload=/usr/local/libexec/sandbox-game/systemd-render-devices
 # Also runs after a failed start. Ordering keeps the mount available until
-# this finishes; queued udev helpers see the disabled marker and cannot regrant.
+# this finishes; systemd ends a running reload first.
 ExecStopPost=/usr/local/libexec/sandbox-game/systemd-render-devices --disable
 UMask=0077
 NoNewPrivileges=yes
