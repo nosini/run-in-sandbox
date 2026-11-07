@@ -4138,6 +4138,38 @@ class SystemdBackendTests(unittest.TestCase):
                 self.assertEqual((capture / 'home/save').read_text(), 'x' * (cycle + 1))
                 self.assertFalse((capture / 'work/work').exists())
 
+    def test_managed_namespace_cannot_write_where_it_was_not_given(self):
+        # nsresourced's BPF restriction, not file permissions, keeps a managed
+        # namespace to the mounts it was given. Nothing else fails without it:
+        # an unattached restriction (from a service policy refusing it, say)
+        # leaves every launch working. Under /var/tmp, since another uid
+        # must reach the folder: file permissions refuse with EACCES, the
+        # restriction with EPERM.
+        shared = Path(tempfile.mkdtemp(prefix='sandbox-restrict-', dir='/var/tmp'))
+        self.addCleanup(shutil.rmtree, shared, ignore_errors=True)
+        shared.chmod(0o1777)
+        result = subprocess.run([sys.executable, '-I', '-c', r'''
+import ctypes, errno, os, sys
+from importlib.machinery import SourceFileLoader
+import importlib.util
+loader = SourceFileLoader("sandbox_uid", sys.argv[1])
+uid = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(uid)
+ns = uid.managed_namespace(f"restrict{os.getpid()}")
+if ctypes.CDLL(None, use_errno=True).setns(ns, 0x10000000) != 0:
+    sys.exit("setns failed")
+os.setresgid(0, 0, 0)
+os.setresuid(0, 0, 0)
+try:
+    os.close(os.open(os.path.join(sys.argv[2], "x"), os.O_CREAT | os.O_WRONLY, 0o644))
+except OSError as error:
+    print(errno.errorcode[error.errno])
+else:
+    print("created")
+''', str(ROOT / 'sandbox-uid'), str(shared)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.stdout.strip(), 'EPERM', result.stderr)
+        self.assertEqual(list(shared.iterdir()), [])
+
     def test_public_game_owned_by_another_user(self):
         source = os.environ.get('SANDBOX_TEST_FOREIGN_GAME')
         if not source:

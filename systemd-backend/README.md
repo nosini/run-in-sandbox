@@ -140,11 +140,40 @@ only the per-user installation and its optional sound setup.
 Tumbleweed's policy. It has no game domain, per-game labels or relabeling.
 The services take folders of your home and your runtime directory by
 descriptor, and handle namespaces; their Varlink checks that the caller owns
-what it hands over stay in place. It grants no access to file data in your
-home. The rule that reads process-type files is for namespace proc files.
+what it hands over stay in place. The launcher passes those folders as
+`O_PATH` descriptors, so neither service may list them or read files in them,
+and neither may issue ioctl calls on them (one read-only command excepted).
+Stock policy lets mountfsd mount nothing at all; the module gives it the
+capabilities and namespace access its worker needs. nsresourced gets
+`sys_admin` only for loading its BPF write restriction (see below).
 
-Without it the services answer `io.systemd.System` with ENXIO, and mountfsd's
-debug log says `SCM_RIGHTS truncated`: SELinux kept the descriptors from them.
+Upstream policy (Fedora's, which openSUSE's follows) still gives mountfsd no
+`setuid`, `setgid`, `sys_admin`, user-namespace or nsfs access, so all of the
+module's mountfsd rules go beyond it: they match what upstream already grants
+nsresourced, plus `sys_ptrace` inside user namespaces and namespace creation
+for the idmapping.
+Neither service may take descriptors for your folders upstream. nsresourced's
+`sys_admin` is upstream from Fedora v45.22 and openSUSE 20261030; the module
+keeps it for older policies.
+
+Without the module the services answer `io.systemd.System` with ENXIO, and
+mountfsd's debug log says `SCM_RIGHTS truncated`: SELinux kept the descriptors
+from them.
+
+Every rule was checked by removing it on an enforcing Tumbleweed VM and
+running the storage tests, the render-alias access probe and the write
+restriction check from [validation.md](validation.md); each removal broke one
+of them. Rules found unnecessary that way were dropped: `sys_chroot`, reading
+the callers' process files, and nsresourced's runtime-directory access,
+which stock policy already grants. A rule refused at run time shows as an AVC
+denial; the one for `/proc/pressure` is expected and harmless.
+
+nsresourced's `sys_admin` is the subtle one. It loads its BPF restriction once
+per boot, and keeps it pinned. Without `sys_admin`, libbpf cannot find the
+overlay module's types: the restriction then refuses every overlay mount, and
+only a reboot replaces it. A restriction whose programs are not attached
+fails open: on the VM, launches still worked, but a managed namespace could
+write anywhere its uid could. Only the write restriction check notices that.
 
 It was written for and tested on Tumbleweed only. The installer builds and
 loads it automatically. To build a temporary manual fixture instead, with the

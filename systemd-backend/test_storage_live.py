@@ -24,6 +24,7 @@ TESTS = (
     'test_repeated_launches_and_stops_release_the_managed_namespace',
     'test_concurrent_captures_keep_their_overlays_and_saves_separate',
     'test_public_game_owned_by_another_user',
+    'test_managed_namespace_cannot_write_where_it_was_not_given',
 )
 
 

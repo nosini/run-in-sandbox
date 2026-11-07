@@ -1061,7 +1061,9 @@ def managed_namespace(name):
 def delegate(path, ns, read_only):
     """A detached mount of PATH, a folder of yours, idmapped for NS: your
     files its root's."""
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    # O_PATH: the service policy (systemd-backend/sandbox_game_systemd.te)
+    # never lets mountfsd read the folders it is given.
+    fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         reply, fds = varlink(MOUNTFS, "io.systemd.MountFileSystem.MountDirectory", {
             "directoryFileDescriptor": 0, "userNamespaceFileDescriptor": 1, "mode": "root",

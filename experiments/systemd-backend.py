@@ -130,7 +130,7 @@ def empty_namespace():
 
 
 def delegate(directory, namespace, read_only):
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         result, fds = call("io.systemd.MountFileSystem", "MountDirectory", {
             "directoryFileDescriptor": 0, "userNamespaceFileDescriptor": 1,

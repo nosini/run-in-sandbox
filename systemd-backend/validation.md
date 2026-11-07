@@ -25,7 +25,7 @@ home-path labels before user files are created. No additional policy is loaded.
 The baseline uses the work directory's filesystem. For tmpfs, ext4 and XFS,
 the default matrix tests the source and capture both on that filesystem,
 only the source there, and only the capture there. The other side uses the
-baseline filesystem. Eight checks run in each layout:
+baseline filesystem. Nine checks run in each layout:
 
 - transient identities, ownership and persistence across allocations;
 - switching available backends without losing saves or overlay data;
@@ -35,7 +35,9 @@ baseline filesystem. Eight checks run in each layout:
 - repeated exits/stops, with namespace registry entries released;
 - concurrent captures with separate overlays and saves, including stopping
   one while the other keeps running;
-- public foreign-owned game data and refusal to delegate its closed directory.
+- public foreign-owned game data and refusal to delegate its closed directory;
+- nsresourced's write restriction: a managed namespace cannot create a file
+  in a world-writable folder it was not given (launches work without it).
 
 Logs and `results.json` remain in the work directory. Unavailable services,
 skipped checks and empty test runs are failures, even if unittest exits zero.
