@@ -1,7 +1,8 @@
 # Render-device lifecycle prototype
 
-This is part of the [systemd backend](README.md); its experiments are in
-[`experiments/`](../experiments/README.md). The administrator
+This is part of the [systemd backend](README.md); its probes are in
+[`probes/`](probes/) and described in
+[docs/development.md](../docs/development.md). The administrator
 helper provisions render-device aliases for configured host users. It has been
 tested on an isolated VM with SELinux enforcing, including a real udev change
 event and a protected process using an idmapped, bind-mounted alias. It is
@@ -125,7 +126,7 @@ The protected access check runs as the ordinary user:
 
 ```sh
 mkdir -p ~/run-in-sandbox/builds/systemd-probe
-python3 -I experiments/systemd-access.py \
+python3 -I systemd-backend/probes/access.py \
   --work-dir ~/run-in-sandbox/builds/systemd-probe \
   --device-dir "/run/sandboxgame/render/$(id -u)"
 ```

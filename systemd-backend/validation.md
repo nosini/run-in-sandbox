@@ -63,12 +63,12 @@ layout explicitly; supporting it remains open.
 
 ## Graphics evidence
 
-The [media probe](../experiments/media.md) creates a private headless compositor
+The [media probe](probes/media.py) creates a private headless compositor
 and audio graph. Ordinary mode allows software rendering and reports it.
 A DRM open or ioctl alone is not acceleration evidence. To require hardware:
 
 ```sh
-dbus-run-session -- python3 -I experiments/systemd-media.py \
+dbus-run-session -- python3 -I systemd-backend/probes/media.py \
   --work-dir "$HOME/work/run-in-sandbox/m-hw" \
   --device-dir "/run/sandboxgame/render/$(id -u)" --require-hardware
 ```

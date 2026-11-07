@@ -2,7 +2,7 @@
 """Test idmapped sockets and cross-namespace access; optional render-node alias.
 
 Run from a checkout with the delegation services available:
-  python3 -I experiments/systemd-access.py --work-dir /path/to/scratch
+  python3 -I systemd-backend/probes/access.py --work-dir /path/to/scratch
   ... --device-dir /path/to/caller-owned/render-alias-directory
 
 The optional alias must already exist; this script never creates device nodes,
@@ -23,7 +23,7 @@ import tempfile
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location(
-    "storage_probe", Path(__file__).with_name("systemd-backend.py"))
+    "storage_probe", Path(__file__).with_name("storage.py"))
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
@@ -193,7 +193,7 @@ def main():
     args = parser.parse_args()
     probe.require(os.getuid() != 0, "run as an ordinary user")
     probe.require(os.uname().machine in ("x86_64", "aarch64"), "unsupported syscall ABI")
-    checkout = Path(__file__).resolve().parents[1]
+    checkout = Path(__file__).resolve().parents[2]
     helper = os.memfd_create("probe-landlock", os.MFD_CLOEXEC)
     os.write(helper, (checkout / "sandbox-landlock").read_bytes())
     seccomp = os.memfd_create("probe-seccomp", os.MFD_CLOEXEC)

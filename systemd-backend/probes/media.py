@@ -22,7 +22,7 @@ import wave
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location(
-    "access_probe", Path(__file__).with_name("systemd-access.py"))
+    "access_probe", Path(__file__).with_name("access.py"))
 access = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(access)
 probe = access.probe
@@ -233,7 +233,7 @@ def main():
                         help='private compositor renderer (default: gl for hardware checks, otherwise pixman)')
     args = parser.parse_args()
     probe.require(os.getuid() != 0, 'run as an ordinary user')
-    checkout = Path(__file__).resolve().parents[1]
+    checkout = Path(__file__).resolve().parents[2]
     # Keep logs on failure/success for inspection; caller chooses the scratch dir.
     root = args.work_dir.resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -247,7 +247,7 @@ def main():
     flags = subprocess.check_output(['pkg-config', '--cflags', '--libs',
                                     'egl', 'gl', 'wayland-client', 'wayland-egl'], text=True).split()
     subprocess.run(['gcc', '-Wall', '-Wextra', '-Werror', '-O2', '-I', str(assets),
-                    str(checkout / 'experiments/media-client.c'),
+                    str(Path(__file__).with_name('media-client.c')),
                     str(assets / 'xdg-shell-protocol.c'), '-o', str(assets / 'media-client'),
                     *flags], check=True)
     with wave.open(str(assets / 'tone.wav'), 'wb') as output:

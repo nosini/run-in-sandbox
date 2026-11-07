@@ -1609,20 +1609,7 @@ and gamescope's reaper restarts it forever. In that combination the shim is
 preloaded into the game instead, against gamescope's general advice. Either
 route reads the same config.
 
-## Security regression checks
+## Development
 
-Run on the host with Python 3 and bubblewrap installed:
-
-```sh
-python3 tests/test_security.py -v
-```
-
-The tests use temporary homes and captures. They exercise real filesystem and
-network isolation, the seccomp filter and the user-namespace block, environment
-filtering, the read-only tools folder and namespace attachment; display and
-audio argument checks use recorders so they do not open windows or play sound.
-
-They run without the systemd scope, because their private runtime directory
-hides the user manager. The exception is the check that commands reach the
-game unaltered by `systemd-run`, which uses the real one, and skips when no
-user manager is reachable rather than pass having tested nothing.
+Running the tests, the systemd backend's probes and notes on how the pieces
+behave are in [docs/development.md](docs/development.md).

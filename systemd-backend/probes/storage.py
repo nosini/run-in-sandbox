@@ -2,7 +2,7 @@
 """Disposable, unprivileged nsresourced/mountfsd experiment; not a launcher.
 
 Run from a checkout on a host with both systemd sockets active:
-    python3 -I experiments/systemd-backend.py --work-dir /path/to/scratch
+    python3 -I systemd-backend/probes/storage.py --work-dir /path/to/scratch
 
 Only synthetic files are delegated. Two independent allocations reuse the
 same storage, checking on-disk ownership and persistence after each exits.
@@ -309,7 +309,7 @@ def main():
     args = parser.parse_args()
     require(os.getuid() != 0, "run as a regular user, not root")
     require(os.uname().machine in ("x86_64", "aarch64"), "unsupported syscall ABI")
-    checkout = Path(__file__).resolve().parents[1]
+    checkout = Path(__file__).resolve().parents[2]
     helper = os.memfd_create("probe-landlock", os.MFD_CLOEXEC)
     os.write(helper, (checkout / "sandbox-landlock").read_bytes())
     seccomp = os.memfd_create("probe-seccomp", os.MFD_CLOEXEC)

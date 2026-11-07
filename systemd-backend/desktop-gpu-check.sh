@@ -352,7 +352,7 @@ for tool in gcc pkg-config weston pipewire wireplumber pactl dbus-run-session wa
 done
 if [ -z "$missing" ]; then
     probe="$scratch/m"
-    dbus-run-session -- python3 -I "$checkout/experiments/systemd-media.py" --work-dir "$probe" \
+    dbus-run-session -- python3 -I "$checkout/systemd-backend/probes/media.py" --work-dir "$probe" \
         --device-dir "/run/sandboxgame/render/$(id -u)" --require-hardware \
         > "$results/media-probe.log" 2>&1
     status=$?
