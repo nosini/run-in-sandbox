@@ -141,12 +141,20 @@ path validation, not an accelerated result.
 
 The complete private media probe passed playback and recording/module denial.
 Earlier attempts intermittently failed Pulse connection setup with "Protocol
-error"; these remain failures, not evidence of recording denial. Media startup
-stability remains open. Boot checks, accelerated OpenGL/Vulkan, DMA-BUF,
-gamescope/Xwayland, actual games, multiple physical GPUs and physical hotplug
-remain unvalidated.
+error"; these remain failures, not evidence of recording denial. The same
+failure occurs with no sandbox: about 1 in 75 short `pactl` clients of the
+restricted server (`audio/sandbox-pulse.conf`) on the probe's private graph,
+and none of the unrestricted server's. pipewire-pulse 1.6.9 (and master)
+replies to SET_CLIENT_NAME after its first sync even when WirePlumber has
+not yet let the client see its own client object; the reply then carries
+index 4294967295 and libpulse rejects it. This affects the restricted sound
+server under every backend and needs an upstream PipeWire change.
+
+Boot checks, accelerated OpenGL/Vulkan, DMA-BUF, gamescope/Xwayland, actual
+games, multiple physical GPUs and physical hotplug remain unvalidated.
 
 One full-suite run made alongside the loop-mount matrix also saw a single
 ordinary-backend overlay mount fail with `EPERM`. Twelve focused repetitions
-passed, as did the later full suite; its cause remains unconfirmed. Keep this
+passed, as did the later full suite and two more run during a complete
+storage matrix; its cause remains unconfirmed. Keep this
 stress result in scope before declaring general-use readiness.

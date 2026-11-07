@@ -104,5 +104,6 @@ The complete ordinary media check passed again, including playback verified
 by the control recording and denied source/monitor capture. Other attempts
 intermittently failed Pulse connection setup with `Protocol error`; the probe
 keeps those as failures and does not reinterpret them as recording denial.
-Media startup stability remains open. See the [validation runbook](../systemd-backend/validation.md)
-for storage, graphics and the pending boot/hardware checks.
+The cause is a race in pipewire-pulse's restricted connection setup, not
+the managed backend. See the [validation runbook](../systemd-backend/validation.md)
+for that, storage, graphics and the pending boot/hardware checks.

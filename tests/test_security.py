@@ -3705,6 +3705,32 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertIn("DISPLAY", args)
         self.assertNotIn("WAYLAND_DISPLAY", args)
 
+    def test_host_x11_authority_is_a_copy(self):
+        # Bound, your 0600 file is unreadable to a uid of the sandbox's own,
+        # and the systemd backend would have to share your home for it.
+        auth = self.home / ".Xauthority"
+        auth.write_bytes(b"cookie")
+        auth.chmod(0o600)
+        self.env.pop("XAUTHORITY", None)
+        args = self.recorded_args("--host-x11")
+        self.assertNotIn(str(auth), args)
+        i = args.index("/tmp/.Xauthority")
+        self.assertEqual(args[i - 2], "--ro-bind-data")
+
+    def test_host_x11_game_reads_the_authority(self):
+        if not Path("/tmp/.X11-unix").is_dir():
+            self.skipTest("no /tmp/.X11-unix to bind")
+        auth = self.home / ".Xauthority"
+        auth.write_bytes(b"\x01\x00cookie")
+        auth.chmod(0o600)
+        self.env.pop("XAUTHORITY", None)
+        self.env["DISPLAY"] = ":123"
+        result = self.cli("--host-x11", self.game, "/bin/sh", "-ec",
+                          'test "$XAUTHORITY" = /tmp/.Xauthority; test ! -e /proc/self/fd/14; '
+                          'od -An -c "$XAUTHORITY"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["001", "\\0", "c", "o", "o", "k", "i", "e"])
+
     def test_native_wayland_does_not_expose_host_x(self):
         args = self.recorded_args("--wayland")
         self.assertNotIn("gamescope", args)
@@ -3768,6 +3794,8 @@ class SeparateUidTests(unittest.TestCase):
     def setUp(self):
         SecurityTests.setUp(self)
         self.env["SANDBOX_SEPARATE_UID"] = "1"
+
+    test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
 
     def sandbox_uid(self, name):
         capture = self.home / "game-sandboxes" / name
@@ -4064,6 +4092,7 @@ class SystemdBackendTests(unittest.TestCase):
     test_attach_cannot_be_steered_into_another_sandbox = \
         SecurityTests.test_attach_cannot_be_steered_into_another_sandbox
     test_list_reset_install_and_delete = SecurityTests.test_list_reset_install_and_delete
+    test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
 
     def test_attached_programs_run_as_the_game_without_our_groups(self):
         name = "attach-ids-" + self.base.name

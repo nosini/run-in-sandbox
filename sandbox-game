@@ -1936,10 +1936,14 @@ if [ "$HEADLESS" = 0 ]; then
     if [ "$HOST_X11" = 1 ]; then
         XSOCK_ARGS=( --ro-bind /tmp/.X11-unix /tmp/.X11-unix )
         VIDEO_ENV+=( --setenv DISPLAY "${DISPLAY:?--host-x11 needs DISPLAY}" )
+        # A copy, not the file: yours is 0600, which a uid of the sandbox's
+        # own cannot read, and the systemd backend would have to share its
+        # folder -- your home, for ~/.Xauthority -- to bind it at all.
         XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
-        [ ! -f "$XAUTH_HOST" ] || XSOCK_ARGS+=(
-            --ro-bind "$XAUTH_HOST" /tmp/.Xauthority
-            --setenv XAUTHORITY /tmp/.Xauthority )
+        if [ -f "$XAUTH_HOST" ] && exec 14< "$XAUTH_HOST"; then
+            XSOCK_ARGS+=( --ro-bind-data 14 /tmp/.Xauthority
+                          --setenv XAUTHORITY /tmp/.Xauthority )
+        fi
     else
         # Normalize absolute WAYLAND_DISPLAY values to a private socket path.
         case "$WL" in /*) WL_HOST="$WL" ;; *) WL_HOST="$RT/$WL" ;; esac

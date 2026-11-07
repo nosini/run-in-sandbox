@@ -142,8 +142,12 @@ per-game SELinux policy or relabeling step.
      an unwritable overlay with this mapping. Setup/launch now refuse that
      unsupported identity before changing the capture. mountfsd maps the
      caller's uid number for gids too, so new files get gid = uid.
-     Still untested: `--host-x11` delegates `$HOME` for the X authority file
-     (`user_home_dir_t`, perhaps not in `user_home_type`).
+   - `--host-x11` (2026-11-07): binding `~/.Xauthority` made mountfsd delegate
+     your home, which SELinux refused (`user_home_dir_t`, ENXIO); under `1`
+     the 0600 file was unreadable to the sandbox's uid. sandbox-game now
+     passes a copy (`--ro-bind-data`), so nothing is delegated for it. A real
+     X11 handshake with the cookie passes under `systemd`; tests cover all
+     three backends.
 
 2. **Namespace lifetime and the full network policy: done (2026-11-06).**
    - `sandbox-uid managed-launch --net SPEC` creates the game's network
@@ -254,14 +258,20 @@ per-game SELinux policy or relabeling step.
      a GL compositor by default. This VM reports llvmpipe/no render node and
      correctly fails that requirement; no acceleration is claimed.
    - Complete private media playback/recording-denial checks passed again.
-     Intermittent Pulse `Protocol error` connection failures also occurred;
-     media startup stability remains open. These are not counted as capture
-     denial. Commands and limitations are in the [validation runbook](systemd-backend/validation.md).
-   - Full regression suite: 286 tests, 4 skipped. After the final identity
-     guards, 18 focused preflight checks and two normal-identity lifecycle
-     checks passed; the full suite has not been rerun with those guards.
+     The intermittent Pulse `Protocol error` is not this backend's: with no
+     sandbox at all, about 1 in 75 short clients of the restricted server
+     fail (8/600; the unrestricted server on the same graph: 0/600). pipewire-pulse
+     (1.6.9 and master) answers SET_CLIENT_NAME at its first sync, before
+     WirePlumber has let the client see its own object, and sends index
+     4294967295, which libpulse rejects. It affects `--restrict-audio` under
+     every backend. The fix belongs upstream: wait for that object before
+     replying. Commands and limitations are in the [validation runbook](systemd-backend/validation.md).
+   - Full regression suite with the identity guards: 289 tests, 4 skipped;
+     with the `--host-x11` fix, 293 tests, 4 skipped (2026-11-07).
      One earlier overlapping stress run saw an ordinary overlay mount EPERM;
-     12 targeted repetitions and the later full suite passed. Cause unconfirmed.
+     12 targeted repetitions and the later full suite passed. Two more full
+     suites run during the complete storage matrix (2026-11-07) all passed,
+     with the matrix's 10 layouts. Not reproduced; cause unconfirmed.
    - Run accelerated OpenGL and Vulkan rendering through the mapped alias on
      suitable hardware; report the selected renderer/device and reject software
      fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
@@ -306,6 +316,8 @@ per-game SELinux policy or relabeling step.
   Attachment/maintenance logs are in `systemd-attach-20261106/`;
   `final-suite.log` covers the finished step 3 changes.
   Packaging/setup logs are in `systemd-package-20261106/`.
-  Step 5 storage/graphics logs are in `systemd-validation-20261107/`.
+  Step 5 storage/graphics logs are in `systemd-validation-20261107/`; the
+  later suite reruns, `--host-x11`, Pulse race and overlap logs in
+  `systemd-step5b-20261107/`.
   Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
   cross-project findings, including policy/overlay startup ordering and labels.

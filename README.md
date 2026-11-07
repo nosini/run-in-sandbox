@@ -1427,7 +1427,6 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 ### Rough edges
 
-- `--host-x11` does not work: the X authority file is yours alone.
 - `/dev/ntsync` is usually open only to the logged-in user. Proton falls back
   to its other synchronisation without it.
 - A `--stop` in the first moment of a launch, before the game is running,
