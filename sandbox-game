@@ -1551,10 +1551,11 @@ if [ -n "$PROTON$WITH_PROTON" ]; then
 fi
 
 # ---- private hosts file ----------------------------------------------------
-# /etc/hosts is the host's, like the rest of /etc. --hosts gives the game one
+# /etc/hosts is the host's, one of the few files of its /etc the sandbox
+# gets (see "/etc" below). --hosts gives the game one
 # of its own: the host's, with the --add-host names removed from inherited
 # entries before their replacements are added. Name lookups in the sandbox
-# read files before DNS, as on the host (/etc/nsswitch.conf), so this redirects names
+# read files before DNS (the sandbox's nsswitch.conf), so this redirects names
 # for the game alone and leaves the desktop's lookups alone.
 #
 # Read-only, it is made afresh on every launch. --hosts-writable keeps it in
@@ -1622,12 +1623,12 @@ while [ "$#" -gt 0 ]; do
 done
 exec "$@"
 SH
-        HOSTS_ARGS=( --bind "$CAP/hosts" "$(realpath -m /etc/hosts)"
+        HOSTS_ARGS=( --bind "$CAP/hosts" /etc/hosts
                      --perms 0555 --ro-bind-data 4 /run/sandbox-bin/pkexec )
         SANDBOX_PATH="/run/sandbox-bin:$SANDBOX_PATH"
     else
         exec 5< <(hosts_block; hosts_inherited /etc/hosts 2>/dev/null || true)
-        HOSTS_ARGS=( --ro-bind-data 5 "$(realpath -m /etc/hosts)" )
+        HOSTS_ARGS=( --ro-bind-data 5 /etc/hosts )
     fi
 fi
 
@@ -2186,11 +2187,12 @@ TOOLS_ARGS=()
 [ ! -d "$TOOLS" ] || TOOLS_ARGS=( --ro-bind "$TOOLS" /tools )
 
 # ---- identifiers -----------------------------------------------------------
-# /etc, /sys and /proc come from the host, and with them what tells this
-# machine apart from any other: the machine-id (which engines such as Unity
-# turn into a "device ID"), the hostname, the boot ID, MAC addresses and disk,
-# USB and battery serials. Nothing a game legitimately does needs the real
-# ones, so it gets stand-ins -- a machine-id of its own, stable across launches.
+# /sys and /proc come from the host, and with them what tells this machine
+# apart from any other: the boot ID, MAC addresses and disk, USB and battery
+# serials. /etc is the sandbox's own (see "/etc" below), but would still say
+# the machine-id (which engines such as Unity turn into a "device ID") and the
+# hostname. Nothing a game legitimately does needs the real ones, so it gets
+# stand-ins -- a machine-id of its own, stable across launches.
 ID_ARGS=( --hostname localhost )
 if [ -e /etc/machine-id ]; then
     if [ ! -s "$CAP/machine-id" ]; then
@@ -2221,7 +2223,7 @@ ID_ARGS+=( --ro-bind-data 8 /proc/sys/kernel/random/boot_id )
 # The kernel command line too, which tends to name the root filesystem by
 # UUID, and /proc/modules, the driver list /sys/module is hidden for.
 : > "$CAP/.empty"
-for f in /etc/fstab /etc/crypttab /etc/hostid /proc/cmdline /proc/modules \
+for f in /proc/cmdline /proc/modules \
          /sys/class/net/*/address /sys/class/ieee80211/*/macaddress \
          /sys/class/ieee80211/*/addresses /sys/class/bluetooth/*/address \
          /sys/class/input/*/uniq \
@@ -2243,8 +2245,6 @@ for f in /etc/fstab /etc/crypttab /etc/hostid /proc/cmdline /proc/modules \
     # the launch.
     ID_ARGS+=( --ro-bind-try "$CAP/.empty" "$(realpath "$f")" )
 done
-# The SSH host keys identify the machine as surely as a serial number does.
-[ ! -d /etc/ssh ] || ID_ARGS+=( --tmpfs /etc/ssh --remount-ro /etc/ssh )
 
 # ---- network ---------------------------------------------------------------
 # Off unless --net. With it, the sandbox keeps its own network namespace and
@@ -2330,23 +2330,127 @@ if [ "$NET" = 1 ]; then
         chmod 0755 "$PASTA_BIN$suffix.new"
         mv -f "$PASTA_BIN$suffix.new" "$PASTA_BIN$suffix"
     done
-    NET_ARGS=( --ro-bind-data 6 "$(realpath -m /etc/resolv.conf)"
-               --info-fd 10 --block-fd 11 )
-    # The CA certificates, for anything that checks who it is talking to. Some
-    # distributions keep them outside /usr and /etc, with only links in /etc
-    # (openSUSE: /var/lib/ca-certificates); bring in whatever those point at.
-    CA_SEEN=()
-    for f in /etc/ssl/certs /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem \
-             /etc/pki/tls/certs /etc/pki/tls/cert.pem /etc/pki/ca-trust; do
-        [ -e "$f" ] || continue
-        f="$(realpath "$f")"
-        case "$f" in /usr/*|/etc/*) continue ;; esac
-        [ -d /var/lib/ca-certificates ] && [[ "$f" == /var/lib/ca-certificates/* ]] \
-            && f=/var/lib/ca-certificates
-        [[ " ${CA_SEEN[*]-} " == *" $f "* ]] && continue
-        CA_SEEN+=( "$f" ); NET_ARGS+=( --ro-bind "$f" "$f" )
-    done
+    NET_ARGS=( --ro-bind-data 6 /etc/resolv.conf --info-fd 10 --block-fd 11 )
 fi
+# ---- /etc ------------------------------------------------------------------
+# Not the host's /etc, which holds the configuration of everything installed
+# -- and of whatever unrelated software adds there later -- but one of the
+# sandbox's own, with only what games and their runtimes read. Read-only, bar
+# /etc/hosts under --hosts-writable. Anything else a game turns out to need can
+# be added with --ro HOST_PATH /etc/NAME, or here once it is known to be needed.
+# There is no falling back to all of the host's: should this go wrong, the game
+# does not start.
+ETC_KEEP=(
+    ld.so.cache ld.so.conf ld.so.conf.d     # the dynamic loader
+    alternatives                            # links in /usr/bin lead through it
+    os-release lsb-release localtime timezone mtab
+    host.conf gai.conf protocols services   # name lookups
+    fonts mime.types terminfo
+    # Certificates and the TLS libraries' settings, for anything that checks
+    # who it is talking to.
+    ssl/certs ssl/cert.pem ssl/ca-bundle.pem ssl/openssl.cnf
+    pki/tls/certs pki/tls/cert.pem pki/tls/openssl.cnf pki/ca-trust
+    ca-certificates crypto-policies gnutls
+    # The graphics drivers' registries and settings.
+    vulkan glvnd egl OpenCL drirc nvidia libva.conf vdpau_wrapper.cfg
+    udev/udev.conf udev/hwdb.bin            # SDL's controller detection
+    asound.conf alsa openal                 # ALSA's way to the sound server
+    gamescope
+    java 'java-*' mono dotnet               # runtimes from the distribution
+)
+[ "$HOSTS" = 1 ] || ETC_KEEP+=( hosts )
+# Some distributions keep the CA certificates outside /usr and /etc, with only
+# links in /etc (openSUSE: /var/lib/ca-certificates); those links lead on to
+# their own place, brought in as it is.
+ETC_OUTSIDE=()
+for f in /etc/ssl/certs /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem \
+         /etc/pki/tls/certs /etc/pki/tls/cert.pem /etc/pki/ca-trust; do
+    [ -e "$f" ] || continue
+    f="$(realpath "$f")"
+    case "$f" in /usr/*|/etc/*) continue ;; esac
+    [ -d /var/lib/ca-certificates ] && [[ "$f" == /var/lib/ca-certificates/* ]] \
+        && f=/var/lib/ca-certificates
+    [[ " ${ETC_OUTSIDE[*]-} " == *" $f "* ]] || ETC_OUTSIDE+=( "$f" )
+done
+# The rest of the list as bwrap arguments, one per line. A link into /usr,
+# /proc (the sandbox's own) or one of those places stays a link --
+# /etc/localtime names the time zone that way -- and one into /etc brings what
+# it leads to along. Any other
+# leads somewhere the sandbox has nothing of, and only its target comes, in
+# its place: the link's folder does not come with it.
+read -r -d '' ETC_HELPER <<'EOF' || true
+import glob, os, sys
+args = sys.argv[1:]
+names, outside = args[:args.index("--")], args[args.index("--") + 1:]
+out, done = [], set()
+
+def under(path, top):
+    return path == top or path.startswith(top + "/")
+
+def add(path):
+    if path in done or not os.path.lexists(path):
+        return
+    done.add(path)
+    real = os.path.realpath(path)
+    if not os.path.exists(real) or "\n" in path + real:
+        return
+    if os.path.realpath(os.path.dirname(path)) != os.path.dirname(path):
+        # A link on the way to it: what it is, not what that folder holds.
+        out.extend(("--ro-bind", real, path))
+    elif not os.path.islink(path):
+        out.extend(("--ro-bind", path, path))
+    elif any(under(real, top) for top in ("/usr", "/proc", *outside)):
+        out.extend(("--symlink", os.readlink(path), path))
+    elif under(real, "/etc"):
+        add(real)
+        out.extend(("--symlink", os.readlink(path), path))
+    else:
+        out.extend(("--ro-bind", real, path))
+
+for name in names:
+    pattern = os.path.join("/etc", name)
+    for path in sorted(glob.glob(pattern)) if glob.has_magic(name) else [pattern]:
+        add(path)
+for o in outside:
+    out.extend(("--ro-bind", o, o))
+if out:
+    print("\n".join(out))
+EOF
+ETC_LIST="$(python3 -I -c "$ETC_HELPER" "${ETC_KEEP[@]}" -- "${ETC_OUTSIDE[@]}" 18>&-)" || {
+    echo "could not work out the sandbox's /etc; not starting the game" >&2; exit 1; }
+ETC_ARGS=()
+[ -z "$ETC_LIST" ] || mapfile -t ETC_ARGS <<<"$ETC_LIST"
+ETC_ARGS=( --perms 0755 --tmpfs /etc "${ETC_ARGS[@]}" )
+# Accounts: the game's own, root's and nobody's, not the host's list -- and
+# without the real name the host's entry may carry.
+SHELL_PATH="$(getent passwd "$(id -u)" | cut -d: -f7 || true)"
+[[ "$SHELL_PATH" == /* ]] && [ -x "$SHELL_PATH" ] || SHELL_PATH=/bin/sh
+exec 19<<EOF
+root:x:0:0:root:/root:/bin/sh
+$(id -un):x:$(id -u):$(id -g)::$HOME:$SHELL_PATH
+nobody:x:65534:65534:nobody:/:/usr/sbin/nologin
+EOF
+exec 20<<EOF
+root:x:0:
+$(id -gn):x:$(id -g):
+nogroup:x:65534:
+EOF
+# Lookups in the files here and DNS, through no module of the host's choosing:
+# those would go after its accounts and services, which are not here.
+exec 21<<'EOF'
+passwd: files
+group: files
+shadow: files
+hosts: files dns
+networks: files
+protocols: files
+services: files
+ethers: files
+rpc: files
+EOF
+ETC_ARGS+=( --ro-bind-data 19 /etc/passwd --ro-bind-data 20 /etc/group
+            --ro-bind-data 21 /etc/nsswitch.conf )
+
 read -r -d '' NET_HELPER <<'EOF' || true
 import ctypes, fcntl, ipaddress, json, os, shutil, subprocess, sys
 NS_GET_USERNS, NS_GET_PARENT = 0xB701, 0xB702
@@ -2620,7 +2724,7 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
     --die-with-parent --new-session
     "${BASE_ENV[@]}"
     --ro-bind /usr /usr
-    --ro-bind /etc /etc
+    "${ETC_ARGS[@]}"
     "${SYS_ARGS[@]}"
     --symlink usr/lib   /lib
     --symlink usr/lib64 /lib64
@@ -2628,7 +2732,7 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
     --symlink usr/sbin  /sbin
     --proc /proc
     --dev /dev
-    "${ID_ARGS[@]}"                   # after /etc, /sys and /proc, to cover them
+    "${ID_ARGS[@]}"                   # after /sys and /proc, to cover them
     "${HOSTS_ARGS[@]}"
     "${DEVICE_ARGS[@]}"
     --tmpfs /tmp
@@ -2655,6 +2759,8 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
     "${ENV_ARGS[@]}"                  # last, so these win over the above
     --chdir "$CHDIR"
 )
+# Last, once everything bound into /etc has its place there.
+BWRAP+=( --remount-ro /etc )
 
 # ---- landlock --------------------------------------------------------------
 # The mounts above decide what the game can reach; Landlock then holds it to
@@ -2669,6 +2775,11 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
 LANDLOCK="$(helper sandbox-landlock)"
 [ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found; run install.sh" >&2; exit 1; }
 LL_ARGS=( --ls / --ro /run/sandbox-landlock )
+# A tmpfs made read-only once filled -- /etc -- is read-only to Landlock too.
+REMOUNTED_RO=" "
+for ((i = 0; i < ${#BWRAP[@]} - 1; i++)); do
+    [ "${BWRAP[i]}" != --remount-ro ] || REMOUNTED_RO+="${BWRAP[i+1]} "
+done
 i=0
 while [ "$i" -lt "${#BWRAP[@]}" ]; do
     case "${BWRAP[i]}" in
@@ -2682,7 +2793,12 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
             i=$((i + 3)) ;;
         --ro-bind|--ro-bind-try|--ro-bind-data)
                                 LL_ARGS+=( --ro "${BWRAP[i+2]}" ); i=$((i + 3)) ;;
-        --tmpfs|--proc)         LL_ARGS+=( --rw "${BWRAP[i+1]}" ); i=$((i + 2)) ;;
+        --tmpfs|--proc)         if [[ "$REMOUNTED_RO" == *" ${BWRAP[i+1]} "* ]]; then
+                                    LL_ARGS+=( --ro "${BWRAP[i+1]}" )
+                                else
+                                    LL_ARGS+=( --rw "${BWRAP[i+1]}" )
+                                fi
+                                i=$((i + 2)) ;;
         # What bwrap --dev makes, one by one: all of /dev would take in the
         # device nodes bound into it as well, card nodes included. (fd, stdin
         # and the like are links into /proc; ptmx one into pts.) Not console:

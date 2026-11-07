@@ -2608,6 +2608,90 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
         seen = self.cli("--headless", played, "/bin/cat", "/etc/machine-id").stdout.strip()
         self.assertEqual(seen, read("/etc/machine-id"))
 
+    def etc_keep(self):
+        """The top-level names sandbox-game takes from the host's /etc."""
+        text = (ROOT / "sandbox-game").read_text()
+        block = text.split("ETC_KEEP=(", 1)[1].split("\n)", 1)[0]
+        words = " ".join(line.split("#", 1)[0] for line in block.splitlines()).split()
+        return {w.strip("'").split("/", 1)[0] for w in words} | {"hosts"}
+
+    def test_etc_holds_only_what_games_need(self):
+        keep = self.etc_keep()
+        made = {"passwd", "group", "nsswitch.conf", "machine-id", "hostname", "hosts"}
+        probe = ('ls -A /etc; echo ---; cat /etc/passwd; echo ---; cat /etc/group; echo ---; '
+                 'touch /etc/new 2>/dev/null && echo wrote || echo refused; '
+                 '{ echo x >> /etc/hosts; } 2>/dev/null && echo wrote || echo refused; '
+                 'readlink /etc/localtime || true; getent passwd "$(id -u)" | cut -d: -f1,6')
+        listing, passwd, group, rest = self.run_guest(probe).stdout.split("---\n")
+        seen = set(listing.split())
+        allowed = {n for n in keep if any(Path("/etc").glob(n))} | made
+        self.assertLessEqual(seen, allowed)
+        # Everything of the host's that is not on the list stays out.
+        for entry in Path("/etc").iterdir():
+            if not any(entry.match(f"/etc/{n}") for n in allowed):
+                self.assertNotIn(entry.name, seen)
+        users = [line.split(":")[0] for line in passwd.splitlines()]
+        me = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(sorted(users), sorted(["root", "nobody", me]))
+        self.assertEqual(len(group.splitlines()), 3)
+        player = next(line for line in passwd.splitlines() if line.startswith(me + ":"))
+        self.assertEqual(player.split(":")[4], "")         # no real name
+        wrote_etc, wrote_hosts, *tail = rest.splitlines()
+        self.assertEqual((wrote_etc, wrote_hosts), ("refused", "refused"))
+        if Path("/etc/localtime").is_symlink():
+            self.assertEqual(tail[0], os.readlink("/etc/localtime"))
+        self.assertTrue(tail[-1].endswith(":" + str(self.home)), tail)
+        # No resolver without the network.
+        self.assertNotIn("resolv.conf", seen)
+
+    def test_attached_programs_see_the_same_etc(self):
+        name = "etc-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        game = self.attach(name, "--exec", "--", "/bin/sh", "-c", "ls -A /etc; cat /etc/passwd")
+        self.assertEqual(game.returncode, 0, game.stderr)
+        self.assertEqual(game.stdout, self.run_guest("ls -A /etc; cat /etc/passwd").stdout)
+
+    def test_etc_links_stay_links_or_bring_only_their_target(self):
+        # The helper on an /etc of its own making: links into /usr, /proc and
+        # an outside place given stay links, one into /etc brings its target,
+        # any other only its target, and nothing unlisted comes along.
+        text = (ROOT / "sandbox-game").read_text()
+        helper = text.split("read -r -d '' ETC_HELPER <<'EOF' || true\n", 1)[1].split("\nEOF\n", 1)[0]
+        etc, outside = self.base / "etc", self.base / "outside"
+        for d in ("alternatives", "fonts-real", "elsewhere/pki/tls/certs", "unlisted"):
+            (etc / d if not d.startswith("elsewhere") else self.base / d).mkdir(parents=True)
+        outside.mkdir()
+        (outside / "certs").mkdir()
+        (self.base / "hosts-real").write_text("127.0.0.1 x\n")
+        (etc / "secret").write_text("no")
+        links = {"localtime": "/usr/share/zoneinfo/UTC", "mtab": "../proc/self/mounts",
+                 "fonts": "/etc/fonts-real", "hosts": str(self.base / "hosts-real"),
+                 "pki": str(self.base / "elsewhere/pki"), "dangling": "/nonexistent",
+                 "certs": str(outside / "certs")}
+        for name, target in links.items():
+            (etc / name).symlink_to(target)
+        names = ["localtime", "mtab", "fonts", "hosts", "pki/tls/certs", "dangling",
+                 "certs", "alternatives", "missing"]
+        result = subprocess.run(
+            ["bwrap", "--dev-bind", "/", "/", "--bind", str(etc), "/etc", "python3", "-I", "-c",
+             helper, *names, "--", str(outside)], capture_output=True, text=True)
+        if result.returncode and "bwrap" in result.stderr:
+            self.skipTest(f"bwrap cannot run here: {result.stderr.strip()}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        args = [tuple(lines[i:i + 3]) for i in range(0, len(lines), 3)]
+        self.assertEqual(set(args), {
+            ("--symlink", "/usr/share/zoneinfo/UTC", "/etc/localtime"),
+            ("--symlink", "../proc/self/mounts", "/etc/mtab"),
+            ("--ro-bind", "/etc/fonts-real", "/etc/fonts-real"),
+            ("--symlink", "/etc/fonts-real", "/etc/fonts"),
+            ("--ro-bind", str(self.base / "hosts-real"), "/etc/hosts"),
+            ("--ro-bind", str(self.base / "elsewhere/pki/tls/certs"), "/etc/pki/tls/certs"),
+            ("--symlink", str(outside / "certs"), "/etc/certs"),
+            ("--ro-bind", "/etc/alternatives", "/etc/alternatives"),
+            ("--ro-bind", str(outside), str(outside)),
+        })
+
     def test_standard_input_reaches_the_game_with_and_without_network(self):
         payload = "input for the game\n"
         for options in ([], ["--net"]):
@@ -3981,6 +4065,9 @@ class SeparateUidTests(unittest.TestCase):
         self.env["SANDBOX_SEPARATE_UID"] = "1"
 
     test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
+    etc_keep = SecurityTests.etc_keep
+    test_etc_holds_only_what_games_need = SecurityTests.test_etc_holds_only_what_games_need
+    test_attached_programs_see_the_same_etc = SecurityTests.test_attached_programs_see_the_same_etc
 
     def sandbox_uid(self, name):
         capture = self.home / "game-sandboxes" / name
@@ -4278,6 +4365,9 @@ class SystemdBackendTests(unittest.TestCase):
         SecurityTests.test_attach_cannot_be_steered_into_another_sandbox
     test_list_reset_install_and_delete = SecurityTests.test_list_reset_install_and_delete
     test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
+    etc_keep = SecurityTests.etc_keep
+    test_etc_holds_only_what_games_need = SecurityTests.test_etc_holds_only_what_games_need
+    test_attached_programs_see_the_same_etc = SecurityTests.test_attached_programs_see_the_same_etc
 
     def test_attached_programs_run_as_the_game_without_our_groups(self):
         name = "attach-ids-" + self.base.name

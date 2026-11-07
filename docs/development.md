@@ -3,6 +3,9 @@
 This is for working on the sandbox itself. For installing and using it, see
 the [README](../README.md).
 
+Planned security work is tracked in
+[security-hardening-plan.md](security-hardening-plan.md).
+
 ## Running the tests
 
 The tests are in `tests/` and use Python's `unittest`. They make temporary
