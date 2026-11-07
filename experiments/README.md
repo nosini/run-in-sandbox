@@ -181,8 +181,7 @@ The follow-up [render-device lifecycle prototype](../systemd-backend/render-devi
 provides an administrator helper, root-controlled private inode references,
 a dedicated runtime tmpfs, and systemd/udev fixtures. It tests removal and
 regrant against an alias already bound into a running protected client, with
-SELinux enforcing. Actual unplug/replug, reboot and production packaging
-remain untested. The original render node's ownership and ACL are unchanged.
+SELinux enforcing. Reboot and production packaging remain untested. The original render node's ownership and ACL are unchanged.
 Only opening the node and DRM ioctls were tested, not OpenGL/Vulkan rendering
 or a game.
 

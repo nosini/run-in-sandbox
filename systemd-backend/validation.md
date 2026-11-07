@@ -1,8 +1,8 @@
 # Systemd backend validation
 
 The backend remains opt-in. Storage and namespace tests cover several
-filesystems; accelerated graphics, physical GPU lifecycle and boot ordering
-still need validation on a suitable dedicated machine.
+filesystems, and accelerated graphics and real games ran on a desktop GPU;
+boot ordering still needs validation on a suitable dedicated machine.
 
 ## Storage and namespace lifetime
 
@@ -86,9 +86,7 @@ or Proton behavior. On the VM, `--gamescope` aborts identically under
 `SANDBOX_SEPARATE_UID=0` and `systemd`: gamescope selects llvmpipe and fails
 `vkAllocateMemory` before showing anything. llvmpipe has no
 `VK_EXT_physical_device_drm`, so the card/render node matching gamescope does
-on real GPUs is not exercised there. Those require their own workloads and renderer/device
-evidence. Physical hotplug tests need disposable hardware without disrupting
-another user.
+on real GPUs is not exercised there; see the desktop results below.
 
 ## On a desktop with a GPU
 
@@ -106,7 +104,7 @@ runs `vulkaninfo`, `eglinfo`, `vkcube` in a window and inside gamescope, and
 `glxinfo` in gamescope's Xwayland, as throwaway games under
 `SANDBOX_SEPARATE_UID=0` and `systemd`, and the hardware-only media probe
 when its build tools are there. Missing tools are skipped and named
-(`vulkan-tools`, `mesa-demos`, `gamescope`). Your per-user installation,
+(`vulkan-tools`, `Mesa-demo-egl`, `gamescope`). Your per-user installation,
 settings and games are not used. Logs and `summary.txt` stay in
 `.gpu-check/DATE` in the checkout.
 
@@ -190,8 +188,9 @@ index 4294967295 and libpulse rejects it. This affects the restricted sound
 server under every backend. Fixing it would mean patching PipeWire, which
 this project does not carry; it is a known limitation.
 
-Boot checks, accelerated OpenGL/Vulkan, DMA-BUF, gamescope/Xwayland, actual
-games, multiple physical GPUs and physical hotplug remain unvalidated.
+Boot checks, DMA-BUF on its own and multiple GPUs remain unvalidated. On the
+desktop (see above), Vulkan, OpenGL, gamescope/Xwayland and real games --
+Proton, NW.js, Ren'Py, mkxp-z, Pixel Game Maker MV -- ran on the GPU.
 
 One full-suite run made alongside the loop-mount matrix also saw a single
 ordinary-backend overlay mount fail with `EPERM`. Twelve focused repetitions

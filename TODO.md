@@ -73,8 +73,8 @@ The [GPU lifecycle prototype](systemd-backend/render-devices.md) adds a root hel
 udev/systemd fixtures and a dedicated runtime tmpfs. Its 21 lifecycle tests and
 live bind-mounted-alias allowlist/mount-stop revocation/regrant tests pass with
 SELinux enforcing. Stopping the service also prevents queued events regranting.
-The real udev change hook and runtime mount recreation also pass; physical
-unplug/replug, reboot ordering and production packaging still need validation.
+The real udev change hook and runtime mount recreation also pass; reboot
+ordering still needs validation.
 
 The [display/audio probe](experiments/media.md) now passes a real Wayland/EGL
 window and playback-only Pulse clients through managed idmaps, bwrap, seccomp
@@ -229,8 +229,8 @@ per-game SELinux policy or relabeling step.
      install cleanup, unit/udev validation, removal and original socket-state
      preservation. Full suite: 276 tests, 3 skipped; 14 focused setup tests;
      21 render lifecycle tests; live allowlist and mount-cycle revocation.
-     A running game blocks install/removal and keeps working. Physical GPU
-     hotplug, boot testing and acceleration remain in step 5.
+     A running game blocks install/removal and keeps working. Boot testing
+     and acceleration were left to step 5.
 
 5. **Graphics and lifecycle validation: in progress (2026-11-07).**
    - Added `systemd-backend/test_storage_live.py`: Btrfs baseline plus tmpfs,
@@ -291,11 +291,6 @@ per-game SELinux policy or relabeling step.
      12 targeted repetitions and the later full suite passed. Two more full
      suites run during the complete storage matrix (2026-11-07) all passed,
      with the matrix's 10 layouts. Not reproduced; cause unconfirmed.
-   - Run accelerated OpenGL and Vulkan rendering through the mapped alias on
-     suitable hardware; report the selected renderer/device and reject software
-     fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
-     Xwayland, a native game and a Proton game. Check whether card-node metadata
-     access needed by gamescope requires additional handling.
    - On the user's desktop (2026-11-07; RX 9070 XT, Mesa 26.2.5, gamescope
      3.16.31, systemd 261.4; `desktop-gpu-check.sh`): under `systemd` the game
      had the helper's copy of renderD128 (yours, 0600) and the capture was
@@ -306,7 +301,7 @@ per-game SELinux policy or relabeling step.
      included. So nested gamescope needs no extra card-node handling.
      Window presentation to the compositor and to gamescope went through
      DMA-BUF implicitly; not checked on its own. Still open: EGL directly
-     (no mesa-demos there).
+     (no Mesa-demo-egl there).
    - Real games on the desktop (2026-11-07, `desktop-gpu-check.sh --game`,
      separate `NAME-systemd-test` captures): a Proton game (DW-Proton 11,
      MangoHud, gamescope by its preferences) built its prefix, ran on the RX
@@ -316,24 +311,26 @@ per-game SELinux policy or relabeling step.
      user's. The first uninstall right after a game was refused:
      nsresourced unregisters a namespace a moment after its processes end;
      the script now waits for that, and later runs removed the setup cleanly.
-     Not yet run for real under this backend: a native Linux game (ELF or
-     .sh), mkxp-z and the Pixel Game Maker MV player.
+     Then, all with the render node copy open in the game's own process and
+     the capture all the user's: a Ren'Py game (its SDL has no Wayland driver,
+     so gamescope's Xwayland, as under any backend), a Pixel Game Maker MV game
+     through the native player, and an RPG Maker VX game through mkxp-z (GL
+     through ANGLE on Vulkan on the RX 9070 XT). mkxp-z exited 134 after
+     "Shutting down.": a segfault in MangoHud's exit handler calling
+     wl_proxy_destroy on an already closed Wayland connection, not this
+     backend's; to confirm, that game without MangoHud should exit 0.
    - gamescope on the VM (2026-11-07, 3.16.31 nested in GNOME): under `0` and
      `systemd` alike it selects llvmpipe, then aborts on `vkAllocateMemory`
      (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) before any window; unsandboxed
      headless gamescope runs. llvmpipe lacks `VK_EXT_physical_device_drm`, so
      gamescope's card/render node matching is never reached there: the
      card-node question needs a real GPU.
-   - The VM's llvmpipe result neither proves nor rules out acceleration through
-     this backend. Opening the alias and a DRM version ioctl are already proven;
-     accelerated rendering is not. Suitable hardware access must be provided
-     within the authorized test environment; desktop access is not implied.
-   - Validate physical GPU unplug/replug, stale device-number reuse, multiple
-     GPUs, reboot ordering, allowlist changes and orderly service/mount stops.
-     Existing tests cover synthetic lifecycle cases, a real udev change event
-     and live alias revocation/regrant, not physical hotplug or reboot.
-     Suitable GPU access and agreement on a shared-VM reboot window are still
-     pending; no reboot has been performed.
+   - Validate reboot ordering, stale device-number reuse, multiple GPUs,
+     allowlist changes and orderly service/mount stops. Existing tests cover
+     synthetic lifecycle cases, a real udev change event and live alias
+     revocation/regrant, not reboot. A shared-VM reboot window is still
+     pending; no reboot has been performed. Still open on hardware: EGL on
+     its own (openSUSE's Mesa-demo-egl) and DMA-BUF checked on its own.
    - Storage/lifetime checks above cover these four filesystems and public
      foreign ownership, repeated starts/stops, concurrent games and capture
      operations. Keep testing other filesystem/ownership combinations and

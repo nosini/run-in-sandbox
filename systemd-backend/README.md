@@ -2,8 +2,7 @@
 
 `SANDBOX_SEPARATE_UID=systemd` (see "The systemd backend" in the main
 [README](../README.md)) runs unprivileged, but needs administrator setup once.
-The backend remains experimental; accelerated rendering and physical GPU
-hotplug still need validation. It is never selected automatically.
+The backend remains experimental, and is never selected automatically.
 The [validation runbook](validation.md) records coverage and the remaining checks.
 
 The administrator installer supports **openSUSE Tumbleweed** only, with

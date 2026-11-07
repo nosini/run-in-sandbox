@@ -78,7 +78,7 @@ read -r _
     echo "== $(date -Is)"; uname -a; grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
     systemctl --version | head -1
     rpm -q systemd systemd-container gamescope Mesa Mesa-vulkan-device-select libvulkan1 \
-        mesa-demos vulkan-tools 2>&1
+        Mesa-demo-egl Mesa-demo-x vulkan-tools 2>&1
     getenforce 2>/dev/null || echo "no getenforce"
     lspci -nnk 2>/dev/null | grep -A3 -E 'VGA|3D|Display'
     ls -l /dev/dri
@@ -283,7 +283,7 @@ for backend in 0 systemd; do
         run eglinfo "$backend" --wayland eglinfo -B
         note "egl: $(gl_renderer "$results/eglinfo-$backend.log"), $(tail -1 "$results/eglinfo-$backend.log")"
     else
-        note "egl: skipped, no eglinfo (mesa-demos)"
+        note "egl: skipped, no eglinfo (Mesa-demo-egl)"
     fi
     if have vkcube; then
         run vkcube-wayland "$backend" --wayland vkcube --c 300 --wsi wayland

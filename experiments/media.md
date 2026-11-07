@@ -79,8 +79,9 @@ The reported renderer was **llvmpipe (LLVM 23.1.2)**. This demonstrates actual
 software rendering and Wayland protocol/buffer transport, not accelerated
 rendering through the alias. The VM has a virtio GPU; real GPU acceleration,
 DMA-BUF interoperability, Vulkan rendering, nested gamescope/Xwayland, and an
-actual native or Proton game still need separate validation. Physical GPU
-unplug/replug and boot ordering are also outside this test. The production
+actual native or Proton game were validated separately, on a desktop (see
+the [validation runbook](../systemd-backend/validation.md)). Boot ordering is
+outside this test. The production
 launcher and installer remain unchanged.
 
 ## Hardware-required mode (2026-11-07)

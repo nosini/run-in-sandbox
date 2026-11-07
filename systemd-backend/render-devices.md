@@ -161,7 +161,7 @@ a supported administrative revocation procedure.
 The real udev change hook also republished a deliberately removed alias. Mount
 stop/start discarded and rebuilt the runtime tree, and a direct helper call
 with the dedicated mount absent refused to create aliases on the surrounding
-filesystem. Actual unplug/replug and a VM reboot were not performed. Boot
+filesystem. A VM reboot was not performed. Boot
 ordering is supplied by the units but has not been validated through reboot.
 Rendering workloads, multi-GPU hardware and the production installer remain
 separate integration work.
