@@ -101,7 +101,8 @@ systemd-backend/desktop-gpu-check.sh
 It installs the administrator setup with sudo and removes it again at the
 end (keeping one that was there before, or with `--keep-setup`). Then it
 runs `vulkaninfo`, `eglinfo`, `vkcube` in a window and inside gamescope, and
-`glxinfo` in gamescope's Xwayland, as throwaway games under
+`glxinfo` in gamescope's Xwayland, plus `vkcube` with its Wayland traffic
+logged to count DMA-BUF buffers against shared-memory pools, as throwaway games under
 `SANDBOX_SEPARATE_UID=0` and `systemd`, and the hardware-only media probe
 when its build tools are there. Missing tools are skipped and named
 (`vulkan-tools`, `Mesa-demo-egl`, `gamescope`). Your per-user installation,

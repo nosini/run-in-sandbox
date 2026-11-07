@@ -268,6 +268,14 @@ run() { # NAME BACKEND DISPLAY-OPTION COMMAND...
 # What each log says about the device, in a line.
 vk_device() { grep -m1 -E 'deviceName' "$1" | sed 's/.*= *//'; }
 vk_type() { grep -m1 -E 'deviceType' "$1" | sed 's/.*= *//'; }
+# How a client's frames reached its compositor, from its Wayland traffic:
+# buffers made from DMA-BUF descriptors -- the GPU's own memory, handed over
+# -- or pools of shared memory, which a software renderer copies into.
+frames_via() {
+    printf 'DMA-BUF buffers %s, shared-memory pools %s' \
+        "$(grep -cE '\.create_immed\(|zwp_linux_buffer_params_v1#[0-9]+\.create\(' "$1")" \
+        "$(grep -cE 'wl_shm#[0-9]+\.create_pool\(' "$1")"
+}
 gl_renderer() { grep -m1 -E 'OpenGL (renderer string|core profile renderer)' "$1" | sed 's/.*: *//'; }
 
 for backend in 0 systemd; do
@@ -289,7 +297,13 @@ for backend in 0 systemd; do
     if have vkcube; then
         run vkcube-wayland "$backend" --wayland vkcube --c 300 --wsi wayland
         note "vkcube (wayland): $(grep -m1 'Selected' "$results/vkcube-wayland-$backend.log"), $(tail -1 "$results/vkcube-wayland-$backend.log")"
+        run dmabuf-wayland "$backend" --wayland WAYLAND_DEBUG=client vkcube --c 60 --wsi wayland
+        note "frames to the desktop: $(frames_via "$results/dmabuf-wayland-$backend.log"), $(tail -1 "$results/dmabuf-wayland-$backend.log")"
         if have gamescope; then
+            # vkcube talks X11 to gamescope's Xwayland; gamescope's Vulkan
+            # layer in it hands the frames to gamescope over Wayland.
+            run dmabuf-gamescope "$backend" --gamescope WAYLAND_DEBUG=client vkcube --c 60 --wsi xcb
+            note "frames to gamescope: $(frames_via "$results/dmabuf-gamescope-$backend.log"), $(tail -1 "$results/dmabuf-gamescope-$backend.log")"
             run gamescope "$backend" --gamescope vkcube --c 300 --wsi xcb
             note "vkcube in gamescope: $(grep -m1 'Selected' "$results/gamescope-$backend.log"), $(tail -1 "$results/gamescope-$backend.log")"
             note "gamescope device: $(grep -m1 'selecting physical device' "$results/gamescope-$backend.log" | sed 's/.*vulkan:[^ ]* //')"
