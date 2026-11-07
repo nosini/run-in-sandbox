@@ -1025,6 +1025,27 @@ class LibraryTests(unittest.TestCase):
             with self.subTest(require=bad), self.assertRaises(ValueError):
                 self.library.save_preferences(name, {"scope": "game", "require": bad})
 
+    def test_defaults_can_be_read_and_saved_without_a_sandbox(self):
+        self.assertEqual(self.library.scope_settings(None, defaults=True), {})
+        self.library.save_preferences(None, {"scope": "all", "net": "1", "separate_uid": "systemd",
+                                             "seccomp_policy": "allowlist", "env": "DEFAULT=1"})
+        defaults = self.library.scope_settings(None, defaults=True)
+        self.assertEqual(defaults["separate_uid"], "systemd")
+        self.assertEqual(defaults["seccomp_policy"], "allowlist")
+        self.assertEqual(defaults["env"], "DEFAULT=1")
+        self.assertFalse(self.library.root.exists())
+        self.assertFalse((self.library.config / "games").exists())
+        for scope in ("game", "clear"):
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                self.library.save_preferences(None, {"scope": scope})
+            self.assertEqual(self.library.scope_settings(None, defaults=True), defaults)
+        name = self.library.create("game")["name"]
+        self.library.save_preferences(name, {"scope": "game", "net": "0", "separate_uid": "0"})
+        own = self.library.scope_settings(name)
+        self.library.save_preferences(None, {"scope": "all", "net": "1", "separate_uid": "1"})
+        self.assertEqual(self.library.scope_settings(name), own)
+        self.assertEqual(self.library.settings(name)["separate_uid"], "0")
+
     def test_security_choices_save_each_scope_and_restore_inheritance(self):
         name = self.library.create("game")["name"]
         defaults = {"separate_uid": "systemd", "seccomp_policy": "allowlist", "seccomp": "enforce"}

@@ -104,14 +104,15 @@ def main():
 
     class PreferencePane(dialogs.Dialog):
         """The existing preference editor, embedded instead of opening a window."""
-        def __init__(self, manager, request):
+        def __init__(self, manager, request, name=None, notify=None):
             self.Gtk = Gtk
             self.appearance = manager.appearance
             self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
             self.rows, self.widgets, self.choices = {}, {}, {}
             self.build_preferences(request)
             self.manager = manager
-            self.name = manager.selected["name"]
+            self.name = name
+            self.notify = notify or manager.toast
             self.env = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                     top_margin=8, left_margin=8, right_margin=8, bottom_margin=8,
                                     accepts_tab=False)
@@ -119,13 +120,17 @@ def main():
             # Each file's own list, never the merged view: saving that would copy
             # the defaults into this game, or this game's list into the defaults.
             self.env_text = {scope: "\n".join(value.split()) for scope, value in request["env"].items()}
-            self.env_scope = "game"
-            self.env.get_buffer().set_text(self.env_text["game"])
+            self.env_scope = self.state.scope
+            self.env.get_buffer().set_text(self.env_text[self.env_scope])
             frame = Gtk.Frame()
             frame.set_child(self.env)
-            self.row("env", "Environment variables for the selected scope (one NAME=value per line). "
-                     "A game's own list replaces the defaults' list.", frame)
-            save = Gtk.Button(label="Save settings", halign=Gtk.Align.END)
+            label = ("Default environment variables (one NAME=value per line). A game's own list replaces these."
+                     if self.state.defaults_only else
+                     "Environment variables for the selected scope (one NAME=value per line). "
+                     "A game's own list replaces the defaults' list.")
+            self.row("env", label, frame)
+            save = Gtk.Button(label="Save defaults" if self.state.defaults_only else "Save settings",
+                              halign=Gtk.Align.END)
             save.add_css_class("suggested-action")
             save.connect("clicked", self.save)
             self.body.append(save)
@@ -162,7 +167,7 @@ def main():
                 self.manager.library.save_preferences(self.name, result)
                 self.appearance.save(self.selected("appearance"))
                 self.error_note.set_visible(False)
-                self.manager.toast("Settings saved")
+                self.notify("Defaults saved" if self.state.defaults_only else "Settings saved")
             except (OSError, ValueError) as error:
                 self.error_note.set_label(str(error))
                 self.error_note.set_visible(True)
@@ -184,6 +189,8 @@ def main():
             self.installers = set()
             self.last_poll = 0
             self.selected = None
+            self.defaults_window = None
+            self.defaults_preferences = None
             self.pending = set()
             self.refreshing = False
             self.search_pending, self.search_request = False, None
@@ -205,6 +212,7 @@ def main():
             header.pack_start(add)
             menu = Gio.Menu()
             for label, action in (("Add game", "add"), ("Refresh library", "refresh"),
+                                  ("Default settings…", "defaults"),
                                   ("Game folders…", "game-folders"),
                                   ("Check system", "check"), ("Quit", "quit")):
                 menu.append(label, "app." + action)
@@ -304,6 +312,7 @@ def main():
             threading.Thread(target=self.icon_worker, daemon=True).start()
             for name, callback in (("add", lambda *_: self.add_game()),
                                     ("refresh", lambda *_: self.reload(rescan=True, search=True)),
+                                    ("defaults", lambda *_: self.open_defaults()),
                                     ("game-folders", lambda *_: self.game_folders()),
                                     ("check", lambda *_: self.check_system()),
                                     ("quit", lambda *_: self.window.close())):
@@ -312,6 +321,7 @@ def main():
                 app.add_action(action)
             app.set_accels_for_action("app.add", ["<Control>n"])
             app.set_accels_for_action("app.refresh", ["<Control>r"])
+            app.set_accels_for_action("app.defaults", ["<Control>comma"])
             app.set_accels_for_action("app.quit", ["<Control>q"])
             self.reload(search=True)
             GLib.timeout_add_seconds(2, self.poll)
@@ -755,13 +765,55 @@ def main():
                 if error:
                     self.label(self.settings_page, str(error))
                     return
-                self.preferences = PreferencePane(self, request)
+                self.preferences = PreferencePane(self, request, name=entry["name"])
                 self.settings_page.append(self.preferences.body)
                 if entry["kind"] == "existing":
                     entry["engine"] = self.preferences.state.engine
                     self.install_row.set_visible(entry["engine"] == "proton")
                     self.tools.set_visible(entry["engine"] == "proton")
             self.work(load, loaded)
+
+        def open_defaults(self):
+            if self.defaults_window is not None:
+                self.defaults_window.present()
+                return
+            window = Adw.Window(title="Default settings", transient_for=self.window, modal=True,
+                                destroy_with_parent=True, default_width=820, default_height=740)
+            self.defaults_window = window
+            overlay = Adw.ToastOverlay()
+            window.set_content(overlay)
+            view = Adw.ToolbarView()
+            view.add_top_bar(Adw.HeaderBar())
+            overlay.set_child(view)
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14,
+                           margin_start=24, margin_end=24, margin_top=12, margin_bottom=24)
+            self.label(body, "Loading defaults…", "dim-label")
+            scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+            scroll.set_child(self.clamp(body))
+            view.set_content(scroll)
+            def closed(*_):
+                self.defaults_window = None
+                self.defaults_preferences = None
+                self.appearance.preview(self.appearance.saved_theme)
+                return False
+            window.connect("close-request", closed)
+            def load():
+                values = self.library.scope_settings(None, defaults=True)
+                return dict(defaults=True, game="Defaults for all games", can_proton=True,
+                            values=values, security={"all": values},
+                            env={"all": values.get("env", "")}, protons=self.protons())
+            def loaded(request, error):
+                if self.defaults_window is not window:
+                    return
+                self.clear(body)
+                if error:
+                    self.label(body, str(error), "error")
+                    return
+                self.defaults_preferences = PreferencePane(self, request,
+                    notify=lambda message: overlay.add_toast(Adw.Toast.new(message)))
+                body.append(self.defaults_preferences.body)
+            self.work(load, loaded)
+            window.present()
 
         def tab_changed(self, *_):
             if self.tabs.get_visible_child_name() == "logs" and self.selected:

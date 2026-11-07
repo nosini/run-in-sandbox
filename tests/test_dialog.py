@@ -14,6 +14,27 @@ Preferences = MODULE["Preferences"]
 
 
 class PreferencePolicyTests(unittest.TestCase):
+    def test_defaults_editor_covers_all_runtimes_and_uses_only_default_security(self):
+        values = {"launch_with": "proton", "proton": "Test-Proton", "mod_loaders": "1",
+                  "casefold": "0", "webgl": "vulkan", "dotnet": "1", "with_proton": "Other-Proton",
+                  "mangohud": "1", "separate_uid": "systemd", "seccomp_policy": "allowlist",
+                  "seccomp": "enforce"}
+        state = Preferences({"defaults": True, "can_proton": True, "values": values,
+                             "security": {"all": values, "game": {"separate_uid": "0"}}})
+        self.assertEqual(state.scope, "all")
+        self.assertTrue(state.proton_controls)
+        self.assertTrue(state.nwjs_controls)
+        self.assertTrue(state.dotnet_controls)
+        self.assertTrue(state.with_proton_controls)
+        self.assertEqual(set(state.displays), set(MODULE["DISPLAY_CHOICES"]))
+        saved = state.result()
+        for key, value in values.items():
+            self.assertEqual(saved[key], value)
+        state.set_runtime("auto")
+        self.assertTrue(state.nwjs_controls)
+        self.assertTrue(state.proton_controls)
+        self.assertEqual(state.result()["scope"], "all")
+
     def test_security_choices_follow_scope_and_preserve_drafts(self):
         own = {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "log"}
         defaults = {"separate_uid": "systemd", "seccomp_policy": "allowlist", "seccomp": "enforce"}
@@ -248,6 +269,22 @@ class GtkDialogTests(unittest.TestCase):
         self.addCleanup(dialog.window.destroy)
         self.app = app
         return dialog
+
+    def test_defaults_editor_shows_all_runtime_controls_without_scope_picker(self):
+        dialog = self.create("preferences", {"defaults": True, "can_proton": True, "values": {
+            "launch_with": "proton", "webgl": "vulkan", "dotnet": "1", "separate_uid": "systemd"}})
+        self.assertNotIn("scope", dialog.widgets)
+        self.assertEqual(dialog.state.scope, "all")
+        self.assertEqual(dialog.selected("separate_uid"), "systemd")
+        self.assertEqual(dialog.choices["separate_uid"][0], ("", "Use environment"))
+        for key in ("proton", "casefold", "webgl", "dotnet", "with_proton", "mangohud"):
+            self.assertTrue(dialog.rows[key].get_visible(), key)
+        dialog.widgets["launch_with"].set_selected(0)
+        self.assertTrue(dialog.rows["webgl"].get_visible())
+        self.assertTrue(dialog.rows["proton"].get_visible())
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["scope"], "all")
+        self.assertEqual(self.responses[0][1]["webgl"], "vulkan")
 
     def test_security_dropdowns_keep_scopes_and_saved_choices_separate(self):
         dialog = self.create("preferences", {"engine": "native", "security": {

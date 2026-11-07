@@ -617,7 +617,8 @@ PY
 
     def scope_settings(self, name, defaults=False):
         """One file's own values, for editors that write back to that file."""
-        self.capture(name)
+        if not defaults:
+            self.capture(name)
         return read_settings(self.config / "defaults" if defaults else self.config / "games" / name)
 
     def update_settings(self, name, changes, defaults=False):
@@ -634,14 +635,17 @@ PY
 
     def shared(self, name, function, *args):
         """Run sandbox-game-lib code, so preferences mean what they do in the file manager."""
-        self.capture(name)
+        if name is not None:
+            self.capture(name)
         script = ('set -uo pipefail\n. "$1/sandbox-game-lib"\n'
                   'CFGDIR="$2" NAME="$3" SANDBOX="$4"\nshift 4\n' + function)
-        return subprocess.run(["bash", "-c", script, "shared", str(self.helpers), str(self.config), name,
+        return subprocess.run(["bash", "-c", script, "shared", str(self.helpers), str(self.config), name or "",
                                str(self.backend), *args], stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, errors="replace", timeout=20)
 
     def save_preferences(self, name, result):
+        if name is None and result.get("scope") != "all":
+            raise ValueError("Choose a game to save or clear its settings")
         saved = self.shared(name, 'prefs_save "$1"', json.dumps(result))
         if saved.returncode:
             raise ValueError(saved.stderr.strip() or "Cannot save preferences")

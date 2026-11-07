@@ -193,6 +193,12 @@ choice; a game's own list replaces the defaults' list. Save changes before
 launching; changes apply on the next launch. **Logs** shows
 the latest launch output, with an option to open the full log file.
 
+The manager menu's **Default settings…** (**Ctrl+,**) opens a separate window
+for viewing and editing the defaults, including the uid backend and seccomp
+filter. It works with an empty library and shows settings for every runtime.
+**Save defaults** applies the changes; closing the window leaves unsaved changes
+alone. Each game's own settings still take precedence.
+
 **Delete sandbox** removes its captured files, saves and Windows prefix after
 confirmation. An existing game folder outside the sandbox is kept. A Windows
 game installed into the sandbox is deleted with it.

@@ -11,6 +11,145 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"), "needs a display")
 class ManagerGuiTests(unittest.TestCase):
+    def test_defaults_window_without_selection_reads_saves_and_cancels(self):
+        try:
+            import gi
+            gi.require_version("Gtk", "4.0")
+            gi.require_version("Adw", "1")
+        except (ImportError, ValueError):
+            self.skipTest("GTK 4 and libadwaita are not installed")
+        script = r'''
+import os, runpy, sys, traceback
+from pathlib import Path
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gio, GLib, Gtk
+module = runpy.run_path(sys.argv[1])
+config = Path.home() / ".config/sandbox-game"
+defaults = config / "defaults"
+own = config / "games/unselected"
+before = defaults.read_bytes()
+game_before = own.read_bytes()
+stage = 0
+failure = []
+
+def children(widget):
+    yield widget
+    child = widget.get_first_child()
+    while child:
+        yield from children(child)
+        child = child.get_next_sibling()
+
+def tick():
+    global stage
+    app = Gio.Application.get_default()
+    if not app or not hasattr(app, "manager"):
+        return True
+    manager = app.manager
+    try:
+        assert manager.selected is None
+        if stage == 0:
+            app.activate_action("defaults", None)
+            assert manager.defaults_window
+        elif stage in (1, 2, 3):
+            pane = manager.defaults_preferences
+            if pane is None:
+                return True
+            window = manager.defaults_window
+            assert pane.state.scope == "all"
+            assert "scope" not in pane.widgets
+            if stage == 1:
+                assert pane.selected("separate_uid") == "systemd"
+                assert pane.selected("seccomp_policy") == "allowlist"
+                assert pane.selected("webgl") == "vulkan"
+                for key in ("proton", "casefold", "webgl", "dotnet", "with_proton"):
+                    assert pane.rows[key].get_visible(), key
+                app.activate_action("defaults", None)
+                assert manager.defaults_window is window
+                pane.widgets["net"].set_active(True)
+                pane.widgets["separate_uid"].set_selected(1)
+                pane.env.get_buffer().set_text("CANCELLED=1")
+                pane.widgets["appearance"].set_selected(2)
+                window.close()
+                assert defaults.read_bytes() == before
+                assert own.read_bytes() == game_before
+                assert not (config / "interface").exists()
+                assert manager.appearance.saved_theme == "system"
+                app.activate_action("defaults", None)
+            elif stage == 2:
+                assert not pane.widgets["net"].get_active()
+                assert pane.selected("separate_uid") == "systemd"
+                assert pane.selected("appearance") == "system"
+                buffer = pane.env.get_buffer()
+                assert buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False) == "DEFAULT=1"
+                pane.widgets["net"].set_active(True)
+                pane.widgets["separate_uid"].set_selected(2)
+                pane.widgets["seccomp_policy"].set_selected(1)
+                buffer.set_text("env=BAD=1")
+                pane.save()
+                assert pane.error_note.get_visible()
+                assert defaults.read_bytes() == before
+                buffer.set_text("DEFAULT=2\nSECOND=3")
+                next(w for w in children(window) if isinstance(w, Gtk.Button)
+                     and w.get_label() == "Save defaults").emit("clicked")
+                assert not pane.error_note.get_visible(), pane.error_note.get_label()
+                values = manager.library.scope_settings(None, defaults=True)
+                assert values["net"] == "1"
+                assert values["separate_uid"] == "1"
+                assert values["seccomp_policy"] == "denylist"
+                assert values["env"] == "DEFAULT=2 SECOND=3"
+                assert values["webgl"] == "vulkan"
+                assert values["gamescope_args"] == "-r 60"
+                assert values["future_setting"] == "keep"
+                assert own.read_bytes() == game_before
+                assert not manager.library.root.exists()
+                window.close()
+                app.activate_action("defaults", None)
+            else:
+                assert pane.widgets["net"].get_active()
+                assert pane.selected("separate_uid") == "1"
+                assert pane.selected("seccomp_policy") == "denylist"
+                window.close()
+                manager.window.close()
+                print("Defaults window passed", flush=True)
+                return False
+        stage += 1
+        return True
+    except BaseException:
+        failure.append(traceback.format_exc())
+        app.quit()
+        return False
+
+def expired():
+    failure.append("Timed out at defaults stage " + str(stage))
+    app = Gio.Application.get_default()
+    if app:
+        app.quit()
+    return False
+GLib.timeout_add(100, tick)
+GLib.timeout_add_seconds(15, expired)
+code = module["main"]()
+if failure:
+    print("\n".join(failure), file=sys.stderr)
+    sys.exit(1)
+sys.exit(code)
+'''
+        with tempfile.TemporaryDirectory(prefix="manager-defaults-gui-") as temporary:
+            env = {**os.environ, "HOME": temporary, "XDG_CONFIG_HOME": str(Path(temporary) / ".config"),
+                   "XDG_DATA_HOME": str(Path(temporary) / ".local/share")}
+            env.pop("PROTON_DIR", None)
+            config = Path(temporary) / ".config/sandbox-game"
+            (config / "games").mkdir(parents=True)
+            (config / "defaults").write_text("net=0\nseparate_uid=systemd\nseccomp_policy=allowlist\n"
+                "seccomp=enforce\ncasefold=0\nwebgl=vulkan\nenv=DEFAULT=1\n"
+                "gamescope_args=-r 60\nfuture_setting=keep\n")
+            (config / "games/unselected").write_text("net=1\nseparate_uid=0\nenv=GAME=1\n")
+            result = subprocess.run([sys.executable, "-c", script, str(ROOT / "sandbox-manager")],
+                                    env=env, capture_output=True, text=True, timeout=25)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Defaults window passed", result.stdout)
+
     def test_create_select_program_save_settings_and_confirm_delete(self):
         try:
             import gi

@@ -165,6 +165,7 @@ class Preferences:
 
     def __init__(self, request):
         self.request = request
+        self.defaults_only = bool(request.get("defaults"))
         self.values = dict(request.get("values", {}))
         self.values["x11_backend"] = "satellite" if self.values.get("x11_backend") == "satellite" else "gamescope"
         for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
@@ -182,14 +183,14 @@ class Preferences:
         self.runtime = self.values.get("launch_with", "auto")
         if self.runtime != "proton":
             self.runtime = "auto"
-        self.scope = "game"
+        self.scope = "all" if self.defaults_only else "game"
         # Keep each scope's protection choices separate, including unsaved
         # edits. An inherited choice must stay inherited after saving.
-        self.security_scope = "game"
-        scopes = request.get("security", {"game": self.values})
+        self.security_scope = self.scope
+        scopes = request.get("security", {self.scope: self.values})
         self.security_values = {scope: {key: scopes.get(scope, {}).get(key, "") for key in SECURITY_CHOICES}
                                 for scope in ("game", "all")}
-        self.values.update(self.security_values["game"])
+        self.values.update(self.security_values[self.scope])
         if self.values.get("host_x11") == "1":
             self.display = "host-x11"
         elif self.values.get("wayland_x11") == "1" and self.values.get("wayland") == "1":
@@ -204,6 +205,8 @@ class Preferences:
 
     @property
     def engine(self):
+        if self.defaults_only:
+            return ""  # Defaults cover every engine, independently of Launch with.
         return "proton" if self.runtime == "proton" else self.request.get("engine", "")
 
     @property
@@ -228,12 +231,16 @@ class Preferences:
     @property
     def dotnet_controls(self):
         """Only for a program recognised as needing a .NET runtime."""
-        return self.native and bool(self.request.get("dotnet"))
+        return self.defaults_only or (self.native and bool(self.request.get("dotnet")))
 
     @property
     def with_proton_controls(self):
         """A native launcher beside Windows programs may run Wine itself."""
-        return self.native and bool(self.request.get("can_proton"))
+        return self.defaults_only or (self.native and bool(self.request.get("can_proton")))
+
+    @property
+    def nwjs_controls(self):
+        return self.defaults_only or self.engine == "nwjs"
 
     @property
     def lan_controls(self):
@@ -315,7 +322,7 @@ class Preferences:
             for key, fallback in (("proton", "auto"), ("mod_loaders", "0"), ("steam", "0"),
                                   ("hide_tray", "0")):
                 result[key] = self.values.get(key, fallback)
-        if self.engine == "nwjs":
+        if self.nwjs_controls:
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
         if self.dotnet_controls:
@@ -531,6 +538,11 @@ class Dialog:
         heading = Gtk.Label(label=request.get("game", ""), xalign=0, wrap=True, selectable=True)
         heading.add_css_class("title-2")
         self.body.append(heading)
+        if self.state.defaults_only:
+            note = Gtk.Label(label="Used when a game has no setting of its own. "
+                                   "Individual game settings take precedence.", xalign=0, wrap=True)
+            note.add_css_class("dim-label")
+            self.body.append(note)
         self.section("Interface")
         self.dropdown("appearance", "Appearance (all dialogs)",
                       [("system", "System"), ("light", "Light"), ("dark", "Dark")],
@@ -612,15 +624,17 @@ class Dialog:
                      "Without a uid choice, an existing sandbox keeps its previous backend.")
         for key, label in (("separate_uid", "Separate uid backend"),
                            ("seccomp_policy", "Seccomp filter"), ("seccomp", "Seccomp mode")):
-            self.dropdown(key, label, [("", "Use defaults, then environment"), *SECURITY_CHOICES[key]],
+            inherit = "Use environment" if self.state.defaults_only else "Use defaults, then environment"
+            self.dropdown(key, label, [("", inherit), *SECURITY_CHOICES[key]],
                           self.state.values[key], lambda *_, key=key: self.set_value(key, self.selected(key)))
         self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
         for key, label in REQUIREMENTS:
             self.switch("require_" + key, label, key in self.state.values["require"].split(","),
                         lambda widget, *_, key=key: self.require_changed(key, widget.get_active()))
-        self.section("Save settings")
-        self.dropdown("scope", "Save for", [("game", "This game only"), ("all", "All games (defaults)"),
-                                            ("clear", "Clear this game's settings")], "game", self.scope_changed)
+        if not self.state.defaults_only:
+            self.section("Save settings")
+            self.dropdown("scope", "Save for", [("game", "This game only"), ("all", "All games (defaults)"),
+                                                ("clear", "Clear this game's settings")], "game", self.scope_changed)
         self.scope_note = Gtk.Label(xalign=0, wrap=True)
         self.scope_note.add_css_class("dim-label")
         self.scope_note.set_visible(False)
@@ -698,7 +712,7 @@ class Dialog:
         self.rows["steam"].set_visible(self.state.proton_controls)
         self.rows["hide_tray"].set_visible(self.state.proton_controls)
         for key in ("casefold", "webgl"):
-            self.rows[key].set_visible(self.state.engine == "nwjs")
+            self.rows[key].set_visible(self.state.nwjs_controls)
         self.rows["resolution"].set_visible(self.state.uses_gamescope)
         # Split display keeps gamescope windowed (see sandbox-game).
         self.rows["fullscreen"].set_visible(self.state.uses_gamescope and self.state.display != "wayland-x11")
