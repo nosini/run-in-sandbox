@@ -272,7 +272,7 @@ def main():
             self.play.add_css_class("suggested-action")
             self.play.connect("clicked", self.play_clicked)
             hero.append(self.play)
-            self.detail.append(hero)
+            self.detail.append(self.clamp(hero))
             self.tabs = Gtk.Stack(vexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE)
             self.tabs.connect("notify::visible-child-name", self.tab_changed)
             switcher = Gtk.StackSwitcher(stack=self.tabs, halign=Gtk.Align.CENTER)
@@ -284,16 +284,19 @@ def main():
             self.log_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
                                          wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=10,
                                          right_margin=10, top_margin=10, bottom_margin=10)
-            log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            log_buttons = Gtk.Box(spacing=8)
-            self.button(log_buttons, "Refresh log", lambda *_: self.update_log())
-            self.button(log_buttons, "Open log file", lambda *_: self.open_path(
-                self.library.log_path(self.selected["name"])))
-            log_box.append(log_buttons)
+            log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
+                              margin_top=12, margin_bottom=12)
+            actions = self.section(log_box, "Latest run", "Output from the game's most recent launch.")
+            self.action(actions, "Refresh log", "Read the latest output from disk.", "Refresh log",
+                        lambda *_: self.update_log())
+            self.action(actions, "Log file", "Open the full log in the default application.", "Open log file",
+                        lambda *_: self.open_path(self.library.log_path(self.selected["name"])))
             log_scroll = Gtk.ScrolledWindow(vexpand=True)
             log_scroll.set_child(self.log_view)
-            log_box.append(log_scroll)
-            self.tabs.add_titled(log_box, "logs", "Logs")
+            frame = Gtk.Frame(vexpand=True)
+            frame.set_child(log_scroll)
+            log_box.append(frame)
+            self.tabs.add_titled(self.clamp(log_box), "logs", "Logs")
             self.content.add_named(self.detail, "detail")
             content.set_content(self.content)
             self.split.set_content(Adw.NavigationPage.new(content, "Sandbox Manager"))
@@ -347,12 +350,48 @@ def main():
                 toast.set_use_markup(False)
             self.overlay.add_toast(toast)
 
+        @staticmethod
+        def clamp(widget):
+            clamp = Adw.Clamp(maximum_size=760, tightening_threshold=560)
+            clamp.set_child(widget)
+            return clamp
+
+        def section(self, box, title, description=None):
+            group, rows = dialogs.preference_group(Gtk, title, description)
+            box.append(group)
+            return rows
+
+        def control(self, rows, title, widget, description=None):
+            row = dialogs.preference_row(Gtk, Adw, title, widget)
+            if description:
+                self.label(row.get_child(), description, "dim-label")
+            rows.append(row)
+            return row
+
+        def action(self, rows, title, description, label, callback, style=None):
+            row = Adw.ActionRow(title=title, subtitle=description, use_markup=False,
+                                title_lines=0, subtitle_lines=0)
+            button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
+            if style:
+                button.add_css_class(style)
+            button.connect("clicked", callback)
+            row.add_suffix(button)
+            row.set_activatable_widget(button)
+            rows.append(row)
+            return button
+
+        def info(self, rows, title, text):
+            row = Adw.ActionRow(title=title, subtitle=text, use_markup=False,
+                                title_lines=0, subtitle_lines=0, subtitle_selectable=True)
+            rows.append(row)
+            return row
+
         def page(self, name, title):
             body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
             body.set_margin_top(12)
             body.set_margin_bottom(12)
             scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-            scroll.set_child(body)
+            scroll.set_child(self.clamp(body))
             self.tabs.add_titled(scroll, name, title)
             return body
 
@@ -528,19 +567,16 @@ def main():
 
         def build_overview(self, entry):
             self.clear(self.overview)
-            self.label(self.overview, "Game details", "title-3")
+            details = self.section(self.overview, "Game details")
             name = Gtk.Entry(text=entry["title"], placeholder_text="Display name")
-            name_label = self.label(self.overview, "Display name")
-            name_label.set_mnemonic_widget(name)
-            self.overview.append(name)
-            self.label(self.overview, "Shown in the library. Your sandbox folder and saves keep their existing locations.",
-                       "dim-label")
-            self.label(self.overview, "Launch", "title-3")
-            self.label(self.overview, entry.get("program") or entry.get("selection") or
-                       "Locate this game's folder to enable launching.", "dim-label")
+            self.control(details, "Display name", name,
+                         "Shown in the library. Your sandbox folder and saves keep their existing locations.")
+            launch = self.section(self.overview, "Launch")
+            self.info(launch, "Game or launcher", entry.get("program") or entry.get("selection") or
+                      "Locate this game's folder to enable launching.")
             args = Gtk.Entry(text=entry.get("arguments", ""), placeholder_text="Launch arguments (optional)")
-            args.set_visible(entry["kind"] == "windows")
-            self.overview.append(args)
+            args_row = self.control(launch, "Launch arguments (optional)", args)
+            args_row.set_visible(entry["kind"] == "windows")
             def save(*_):
                 # Only what was edited, over the entry as saved now: a search
                 # may have reconnected the game since this page was built. A
@@ -555,43 +591,49 @@ def main():
                     self.reload(entry["name"])
                 except (OSError, ValueError) as error:
                     self.toast(error)
-            self.button(self.overview, "Save game details", save)
+            save_button = self.button(self.overview, "Save game details", save, "suggested-action")
+            save_button.set_halign(Gtk.Align.END)
             self.build_shortcuts(entry)
             total, last = self.library.stats(entry["name"])
             played = f"{total // 3600}h {total % 3600 // 60}m" if total else "Not played yet"
             last_text = datetime.fromtimestamp(last).strftime("%d %b %Y, %H:%M") if last else "Never"
-            self.label(self.overview, "Activity", "title-3")
-            self.activity = self.label(self.overview, f"Time played: {played}\nLast played: {last_text}")
-            self.label(self.overview, "Files", "title-3")
-            files = Gtk.Box(spacing=8)
-            self.button(files, "Open sandbox folder", lambda *_: self.open_path(self.library.capture(entry["name"])))
-            self.button(files, "Locate game", lambda *_: self.locate(entry))
-            self.overview.append(files)
+            activity = self.section(self.overview, "Activity")
+            self.info(activity, "Time played", played)
+            self.info(activity, "Last played", last_text)
+            files = self.section(self.overview, "Files")
+            self.action(files, "Sandbox folder", str(self.library.capture(entry["name"])), "Open sandbox folder",
+                        lambda *_: self.open_path(self.library.capture(entry["name"])))
+            self.action(files, "Game folder", "Open the installed game or locate an external game folder.",
+                        "Locate game", lambda *_: self.locate(entry))
             row = self.rows.get(entry["name"])
             if entry["kind"] == "existing":
-                self.button(self.overview, "Game folders…", lambda *_: self.game_folders())
                 folder = row.folder if row and row.entry is entry else "present"
+                description = "Default locations to search for external games."
                 if folder == "missing":
-                    self.label(self.overview, "Game folder missing. Add its parent location in Game folders to "
-                               "search automatically, or use Locate game to choose a match.", "dim-label")
+                    description = ("Game folder missing. Add its parent location to search automatically, "
+                                   "or use Locate game to choose a match.")
                 elif folder == "unavailable":
-                    self.label(self.overview, "The drive holding this game is not available. Connect it to play, "
-                               "or use Locate game to choose another copy.", "dim-label")
-            self.label(self.overview, str(self.library.capture(entry["name"])), "dim-label")
+                    description = ("The drive holding this game is not available. Connect it to play, "
+                                   "or use Locate game to choose another copy.")
+                self.action(files, "Game folders", description, "Game folders…", lambda *_: self.game_folders())
             location = row.location if row and row.entry is entry else self.library.installation(entry)
-            self.label(self.overview, {"sandbox": "Installation: inside this sandbox",
-                "external": "Installation: external game folder", "unknown": "Installation location unknown"}[location],
-                "dim-label")
-            self.size_label = self.label(self.overview, "")
-            self.button(self.overview, "Calculate storage used", lambda *_: self.storage(entry))
-            self.label(self.overview, "Maintenance", "title-3")
-            self.maintenance = Gtk.Box(spacing=8)
-            self.button(self.maintenance, "Reset install changes", lambda *_: self.confirm_operation(entry, "reset-install"))
-            self.button(self.maintenance, "Delete sandbox", lambda *_: self.confirm_operation(entry, "delete"), "destructive-action")
-            self.overview.append(self.maintenance)
+            self.info(files, "Installation", {"sandbox": "Inside this sandbox", "external": "External game folder",
+                                            "unknown": "Installation location unknown"}[location])
+            self.size_label = Gtk.Label(label="Not calculated", xalign=0, selectable=True, wrap=True)
+            storage = self.control(files, "Storage used", self.size_label)
+            calculate = self.button(storage.get_child(), "Calculate storage used", lambda *_: self.storage(entry))
+            calculate.set_halign(Gtk.Align.START)
+            self.maintenance = self.section(self.overview, "Maintenance")
+            self.action(self.maintenance, "Reset install changes", "Discard changes written to the game folder. "
+                        "Files recognized as saves and the Windows prefix are kept.", "Reset install changes",
+                        lambda *_: self.confirm_operation(entry, "reset-install"))
+            self.action(self.maintenance, "Delete sandbox", "Remove this sandbox's data, including saves "
+                        "and the Windows prefix.", "Delete sandbox",
+                        lambda *_: self.confirm_operation(entry, "delete"), "destructive-action")
 
         def build_shortcuts(self, entry):
-            self.label(self.overview, "Shortcuts", "title-3")
+            shortcuts = self.section(self.overview, "Shortcuts",
+                                     "Start the game as Play does, without opening this window.")
             present = self.library.shortcuts(entry["name"])
             desktop = self.library.desktop_folder() is not None
             for where, text in (("menu", "Show in the applications menu"),
@@ -617,24 +659,26 @@ def main():
                     self.work(lambda: self.library.set_shortcut(entry["name"], check.where, enabled,
                                                                 self.icon_paths.get(entry["name"])), done)
                 check.connect("toggled", toggled)
-                self.overview.append(check)
-            self.label(self.overview, "Shortcuts start the game as Play does, without opening this window." +
-                       ("" if desktop else " There is no desktop folder to place a shortcut in."), "dim-label")
+                self.control(shortcuts, "", check,
+                             "There is no desktop folder to place a shortcut in."
+                             if where == "desktop" and not desktop else None)
 
         def build_programs(self, entry):
             self.clear(self.program_page)
-            self.program_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-            self.program_list.add_css_class("boxed-list")
-            self.label(self.program_page, "Installed programs", "title-3")
-            self.label(self.program_page, "Choose the game or launcher to use when you press Play.", "dim-label")
-            buttons = Gtk.Box(spacing=8)
-            self.install_button = self.button(buttons, "Run installer…", lambda *_: self.choose_installer(entry))
-            self.button(buttons, "Refresh programs", lambda *_: self.scan_programs(entry, rescan=True))
-            self.program_page.append(buttons)
-            self.program_page.append(self.program_list)
-            self.tools = Gtk.Box(spacing=8)
-            for title, command in (("Wine configuration", "winecfg"), ("Registry editor", "regedit")):
-                self.button(self.tools, title, lambda *_, tool=command: self.start(entry, tool=tool))
+            installation = self.section(self.program_page, "Installation")
+            self.install_button = self.action(installation, "Run an installer",
+                "Install or update a Windows program in this sandbox.", "Run installer…",
+                lambda *_: self.choose_installer(entry))
+            self.install_row = self.install_button.get_ancestor(Adw.ActionRow)
+            self.action(installation, "Find installed programs", "Scan the Windows prefix for games and launchers.",
+                        "Refresh programs", lambda *_: self.scan_programs(entry, rescan=True))
+            self.program_list = self.section(self.program_page, "Installed programs",
+                                             "Choose the game or launcher to use when you press Play.")
+            self.tools, tools = dialogs.preference_group(Gtk, "Windows tools")
+            for title, description, command in (
+                    ("Wine configuration", "Change settings for this sandbox's Windows environment.", "winecfg"),
+                    ("Registry editor", "Edit the registry in this sandbox's Windows prefix.", "regedit")):
+                self.action(tools, title, description, title, lambda *_, tool=command: self.start(entry, tool=tool))
             self.tools.set_visible(entry["kind"] == "windows" or entry.get("engine") == "proton")
             self.program_page.append(self.tools)
             self.scan_programs(entry)
@@ -650,7 +694,7 @@ def main():
                 self.clear(self.program_list)
                 self.program_list.append(Gtk.Label(label="Launchers in an existing game are selected when you press Play.",
                                                   wrap=True, margin_top=14, margin_bottom=14))
-                self.install_button.set_visible(entry.get("engine") == "proton")
+                self.install_row.set_visible(entry.get("engine") == "proton")
                 return
             def loaded(programs, error):
                 if error:
@@ -710,12 +754,10 @@ def main():
                     self.label(self.settings_page, str(error))
                     return
                 self.preferences = PreferencePane(self, request)
-                clamp = Adw.Clamp(maximum_size=760, tightening_threshold=560)
-                clamp.set_child(self.preferences.body)
-                self.settings_page.append(clamp)
+                self.settings_page.append(self.preferences.body)
                 if entry["kind"] == "existing":
                     entry["engine"] = self.preferences.state.engine
-                    self.install_button.set_visible(entry["engine"] == "proton")
+                    self.install_row.set_visible(entry["engine"] == "proton")
                     self.tools.set_visible(entry["engine"] == "proton")
             self.work(load, loaded)
 
@@ -747,7 +789,7 @@ def main():
             self.play.set_sensitive(name not in self.pending and (name in self.running or not busy) and
                                     (busy or bool(entry.get("program") if entry["kind"] == "windows" else entry.get("selection"))))
             self.maintenance.set_sensitive(not busy)
-            self.install_button.set_sensitive(not busy)
+            self.install_row.set_sensitive(not busy)
             self.tools.set_sensitive(not busy)
 
         def poll(self, force=False):
@@ -974,7 +1016,7 @@ def main():
                 if not result.stdout.strip():
                     raise ValueError(result.stderr.strip() or "Cannot calculate storage")
                 return result.stdout.split()[0]
-            self.work(calculate, lambda size, error: self.size_label.set_label(f"Storage used: {size}")
+            self.work(calculate, lambda size, error: self.size_label.set_label(size)
                       if not error and self.selected and self.selected["name"] == entry["name"] else None)
 
         def confirm_operation(self, entry, operation):

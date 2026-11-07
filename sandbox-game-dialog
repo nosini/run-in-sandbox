@@ -313,6 +313,47 @@ class Preferences:
         return result
 
 
+def preference_group(Gtk, title, description=None):
+    """A shared heading and boxed list for dialogs and manager pages."""
+    group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    heading = Gtk.Label(label=title, xalign=0, wrap=True)
+    heading.add_css_class("heading")
+    group.append(heading)
+    if description:
+        note = Gtk.Label(label=description, xalign=0, wrap=True)
+        note.add_css_class("dim-label")
+        group.append(note)
+    rows = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+    rows.add_css_class("boxed-list")
+    group.append(rows)
+    return group, rows
+
+
+def preference_row(Gtk, Adw, label, widget):
+    """Keep a control with its label, including on wide windows."""
+    if isinstance(widget, Gtk.Switch):
+        # Keep the switch next to its text even in a maximized manager.
+        row = Adw.ActionRow(title=label, use_markup=False, title_lines=0)
+        row.add_prefix(widget)
+        row.set_activatable_widget(widget)
+    else:
+        # Long choices and descriptions can wrap without competing for width.
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, "set_margin_" + side)(12)
+        if label:
+            title = Gtk.Label(label=label, xalign=0, wrap=True)
+            box.append(title)
+            title.set_mnemonic_widget(widget)
+        widget.set_hexpand(True)
+        box.append(widget)
+        row = Gtk.ListBoxRow(activatable=False)
+        row.set_child(box)
+    if label:
+        widget.set_tooltip_text(label)
+    return row
+
+
 class Dialog:
     def __init__(self, Gtk, app, mode, request, finish, appearance=None):
         self.Gtk = Gtk
@@ -332,7 +373,13 @@ class Dialog:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         for side in ("top", "bottom", "start", "end"):
             getattr(outer, "set_margin_" + side)(20)
-        self.window.set_child(outer)
+        if mode == "preferences":
+            _, _, Adw = gtk_modules()
+            clamp = Adw.Clamp(maximum_size=760, tightening_threshold=560)
+            clamp.set_child(outer)
+            self.window.set_child(clamp)
+        else:
+            self.window.set_child(outer)
         self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.set_child(self.body)
@@ -390,40 +437,11 @@ class Dialog:
         return True
 
     def section(self, title, description=None):
-        Gtk = self.Gtk
-        group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        heading = Gtk.Label(label=title, xalign=0, wrap=True)
-        heading.add_css_class("heading")
-        group.append(heading)
-        if description:
-            note = Gtk.Label(label=description, xalign=0, wrap=True)
-            note.add_css_class("dim-label")
-            group.append(note)
-        self.preference_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.preference_list.add_css_class("boxed-list")
-        group.append(self.preference_list)
+        group, self.preference_list = preference_group(self.Gtk, title, description)
         self.body.append(group)
 
     def row(self, key, label, widget):
-        Gtk = self.Gtk
-        if isinstance(widget, Gtk.Switch):
-            # Keep the switch next to its text even in a maximized manager.
-            row = self.Adw.ActionRow(title=label, use_markup=False, title_lines=0)
-            row.add_prefix(widget)
-            row.set_activatable_widget(widget)
-        else:
-            # Long choices and descriptions can wrap without competing for width.
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            for side in ("top", "bottom", "start", "end"):
-                getattr(box, "set_margin_" + side)(12)
-            title = Gtk.Label(label=label, xalign=0, wrap=True)
-            box.append(title)
-            widget.set_hexpand(True)
-            box.append(widget)
-            row = Gtk.ListBoxRow(activatable=False)
-            row.set_child(box)
-            title.set_mnemonic_widget(widget)
-        widget.set_tooltip_text(label)
+        row = preference_row(self.Gtk, self.Adw, label, widget)
         self.preference_list.append(row)
         self.rows[key], self.widgets[key] = row, widget
 
