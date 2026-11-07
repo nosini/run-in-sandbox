@@ -389,19 +389,46 @@ class Dialog:
         self.finish(1, None)
         return True
 
+    def section(self, title, description=None):
+        Gtk = self.Gtk
+        group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        heading = Gtk.Label(label=title, xalign=0, wrap=True)
+        heading.add_css_class("heading")
+        group.append(heading)
+        if description:
+            note = Gtk.Label(label=description, xalign=0, wrap=True)
+            note.add_css_class("dim-label")
+            group.append(note)
+        self.preference_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.preference_list.add_css_class("boxed-list")
+        group.append(self.preference_list)
+        self.body.append(group)
+
     def row(self, key, label, widget):
         Gtk = self.Gtk
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        title = Gtk.Label(label=label, xalign=0, hexpand=True, wrap=True)
-        box.append(title)
-        box.append(widget)
+        if isinstance(widget, Gtk.Switch):
+            # Keep the switch next to its text even in a maximized manager.
+            row = self.Adw.ActionRow(title=label, use_markup=False, title_lines=0)
+            row.add_prefix(widget)
+            row.set_activatable_widget(widget)
+        else:
+            # Long choices and descriptions can wrap without competing for width.
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            for side in ("top", "bottom", "start", "end"):
+                getattr(box, "set_margin_" + side)(12)
+            title = Gtk.Label(label=label, xalign=0, wrap=True)
+            box.append(title)
+            widget.set_hexpand(True)
+            box.append(widget)
+            row = Gtk.ListBoxRow(activatable=False)
+            row.set_child(box)
+            title.set_mnemonic_widget(widget)
         widget.set_tooltip_text(label)
-        self.body.append(box)
-        self.rows[key], self.widgets[key] = box, widget
+        self.preference_list.append(row)
+        self.rows[key], self.widgets[key] = row, widget
 
     def dropdown(self, key, label, options, current, callback):
         widget = self.Gtk.DropDown()
-        widget.set_size_request(260, -1)
         self.row(key, label, widget)
         self.set_options(key, options, current)
         widget.connect("notify::selected", callback)
@@ -424,24 +451,20 @@ class Dialog:
 
     def entry(self, key, label, value, placeholder):
         widget = self.Gtk.Entry(text=value, placeholder_text=placeholder)
-        widget.set_size_request(260, -1)
         self.row(key, label, widget)
         widget.connect("changed", lambda widget: self.set_value(key, widget.get_text()))
 
     def text_area(self, key, label, text):
         """A label above a multi-line text field, both in one row."""
         Gtk = self.Gtk
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.append(Gtk.Label(label=label, xalign=0, wrap=True))
         view = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False,
                             top_margin=6, bottom_margin=6, left_margin=6, right_margin=6)
         view.set_size_request(-1, 110)
         view.get_buffer().set_text(text)
         frame = Gtk.Frame()
         frame.set_child(view)
-        box.append(frame)
-        self.body.append(box)
-        self.rows[key], self.widgets[key] = box, view
+        self.row(key, label, frame)
+        self.widgets[key] = view
         view.get_buffer().connect("changed", lambda buffer: self.set_value(
             key, buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)))
 
@@ -454,14 +477,17 @@ class Dialog:
 
     def build_preferences(self, request):
         Gtk = self.Gtk
+        _, _, self.Adw = gtk_modules()
         self.state = Preferences(request)
         self.updating = False
         heading = Gtk.Label(label=request.get("game", ""), xalign=0, wrap=True, selectable=True)
         heading.add_css_class("title-2")
         self.body.append(heading)
+        self.section("Interface")
         self.dropdown("appearance", "Appearance (all dialogs)",
                       [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                       self.appearance.saved_theme, lambda *_: self.appearance.preview(self.selected("appearance")))
+        self.section("Launch and display")
         if request.get("can_proton"):
             self.dropdown("launch_with", "Launch with", [("auto", "Automatic"), ("proton", "Proton (Windows .exe)")],
                           self.state.runtime, self.runtime_changed)
@@ -477,7 +503,7 @@ class Dialog:
         self.split_note = Gtk.Label(xalign=0, wrap=True,
             label="")
         self.split_note.add_css_class("dim-label")
-        self.body.append(self.split_note)
+        self.rows["x11_exe"].get_child().append(self.split_note)
         self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
                     lambda widget, *_: self.set_value("mangohud", "1" if widget.get_active() else "0"))
         self.switch("hdr", "HDR, for games that offer it (turn it on in the desktop's display settings too)",
@@ -507,6 +533,16 @@ class Dialog:
             choices.append((native_proton, native_proton))
         self.dropdown("with_proton", "Proton for a program that starts Wine itself", choices, native_proton,
                       lambda *_: self.set_value("with_proton", self.selected("with_proton")))
+        resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
+                                         "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
+        self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
+                      self.state.resolution, self.resolution_changed)
+        self.switch("fullscreen", "Gamescope fullscreen", self.state.fullscreen,
+                    lambda widget, *_: setattr(self.state, "fullscreen", widget.get_active()))
+        self.note = Gtk.Label(xalign=0, wrap=True)
+        self.note.add_css_class("dim-label")
+        self.body.append(self.note)
+        self.section("Network")
         self.switch("net", "Internet (no LAN, nothing on this PC)", self.state.values.get("net") == "1",
                     self.toggle("net"))
         self.switch("lan", "The whole LAN too (still nothing on this PC)", self.state.values["lan"] == "1",
@@ -523,24 +559,13 @@ class Dialog:
         self.switch("hosts_writable", "The game may edit its hosts file too",
                     self.state.values["hosts_writable"] == "1",
                     lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
-        protections = Gtk.Label(label="Required protections: the game will not start when one cannot be enforced",
-                                xalign=0, wrap=True)
-        protections.add_css_class("heading")
-        self.body.append(protections)
+        self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
         for key, label in REQUIREMENTS:
             self.switch("require_" + key, label, key in self.state.values["require"].split(","),
                         lambda widget, *_, key=key: self.require_changed(key, widget.get_active()))
-        resolutions = list(dict.fromkeys(["", self.state.resolution, request.get("resolution", ""),
-                                         "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720"]))
-        self.dropdown("resolution", "Gamescope resolution", [(r, r or "Game default (no override)") for r in resolutions],
-                      self.state.resolution, self.resolution_changed)
-        self.switch("fullscreen", "Gamescope fullscreen", self.state.fullscreen,
-                    lambda widget, *_: setattr(self.state, "fullscreen", widget.get_active()))
+        self.section("Save settings")
         self.dropdown("scope", "Save for", [("game", "This game only"), ("all", "All games (defaults)"),
                                             ("clear", "Clear this game's settings")], "game", self.scope_changed)
-        self.note = Gtk.Label(xalign=0, wrap=True)
-        self.note.add_css_class("dim-label")
-        self.body.append(self.note)
         self.scope_note = Gtk.Label(xalign=0, wrap=True)
         self.scope_note.add_css_class("dim-label")
         self.scope_note.set_visible(False)

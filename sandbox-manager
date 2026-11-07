@@ -121,12 +121,10 @@ def main():
             self.env_text = {scope: "\n".join(value.split()) for scope, value in request["env"].items()}
             self.env_scope = "game"
             self.env.get_buffer().set_text(self.env_text["game"])
-            self.body.append(Gtk.Label(label="Environment variables for the selected scope (one NAME=value "
-                                       "per line). A game's own list replaces the defaults' list.",
-                                       xalign=0, wrap=True))
             frame = Gtk.Frame()
             frame.set_child(self.env)
-            self.body.append(frame)
+            self.row("env", "Environment variables for the selected scope (one NAME=value per line). "
+                     "A game's own list replaces the defaults' list.", frame)
             save = Gtk.Button(label="Save settings", halign=Gtk.Align.END)
             save.add_css_class("suggested-action")
             save.connect("clicked", self.save)
@@ -712,7 +710,9 @@ def main():
                     self.label(self.settings_page, str(error))
                     return
                 self.preferences = PreferencePane(self, request)
-                self.settings_page.append(self.preferences.body)
+                clamp = Adw.Clamp(maximum_size=760, tightening_threshold=560)
+                clamp.set_child(self.preferences.body)
+                self.settings_page.append(clamp)
                 if entry["kind"] == "existing":
                     entry["engine"] = self.preferences.state.engine
                     self.install_button.set_visible(entry["engine"] == "proton")
