@@ -72,12 +72,22 @@ def file_choice(key, values):
     return value
 
 
-def inherit_label(scope):
-    return "Use environment" if scope == "all" else "Use defaults, then environment"
+# The variable each protection choice overrides; unset everywhere, it decides.
+SECURITY_VARIABLES = {"separate_uid": "SANDBOX_SEPARATE_UID", "seccomp_policy": "SANDBOX_SECCOMP_POLICY",
+                      "seccomp": "SANDBOX_SECCOMP"}
 
 
-def security_choices(key, scope, value):
-    choices = [("", inherit_label(scope)), *SECURITY_CHOICES[key]]
+def environment_choice(key, value):
+    """A protection variable's value as sandbox-game reads it, or None if it refuses it."""
+    if key == "separate_uid":
+        return value if value in ("1", "systemd") else "0"
+    if key == "seccomp":
+        return "log" if value == "log" else "enforce"
+    return value if value in ("denylist", "allowlist") else None
+
+
+def security_choices(key, default_label, value):
+    choices = [("", default_label), *SECURITY_CHOICES[key]]
     if value not in {value for value, _ in choices}:
         choices.append((value, f"Invalid saved value: {value}"))
     return choices
@@ -255,7 +265,10 @@ class Preferences:
                                "all": requirements_value(default_require)}
         self.values["require"] = self.require_values[self.scope]
         self.host_seccomp = os.environ.get("SANDBOX_SECCOMP", "")
-        self.default_seccomp = self.security_values["all"]["seccomp"]
+        # The defaults' protection choices as saved, not as edited in the "all" scope.
+        self.saved_defaults = dict(self.security_values["all"])
+        # The backend an existing sandbox keeps while nothing chooses one.
+        self.uid_backend = request.get("uid_backend", "")
         self.display = display_of(self.values)
         self.resolution, self.fullscreen, _ = gamescope_parts(
             self.values.get("gamescope_args", ""))
@@ -330,7 +343,7 @@ class Preferences:
     def effective_seccomp(self):
         mode = self.values["seccomp"]
         if not mode and self.scope == "game":
-            mode = self.default_seccomp
+            mode = self.saved_defaults["seccomp"]
         return mode or self.host_seccomp
 
     def offers_default(self, key):
@@ -370,9 +383,32 @@ class Preferences:
         else:
             self.values[key] = value
 
+    def security_default(self, key):
+        """What an unset protection choice stands for here: a value, and where it is from.
+        The environment is this window's, normally the desktop's that launches games too."""
+        if self.security_scope == "game" and self.saved_defaults[key]:
+            return self.saved_defaults[key], "from the defaults"
+        variable = SECURITY_VARIABLES[key]
+        if os.environ.get(variable):
+            return environment_choice(key, os.environ[variable]), "from " + variable
+        if key == "separate_uid" and self.security_scope == "game" and self.uid_backend in ("1", "systemd"):
+            return self.uid_backend, "this sandbox's current backend"
+        return {"separate_uid": "0", "seccomp_policy": "denylist", "seccomp": "enforce"}[key], "built-in"
+
+    def security_choices(self, key):
+        value, source = self.security_default(key)
+        label = dict(SECURITY_CHOICES[key]).get(value)
+        if label is None and source == "from the defaults":
+            text = f"Default — invalid saved default: {value}"  # games will not start
+        elif label is None:
+            text = f"Default — invalid {SECURITY_VARIABLES[key]}={os.environ[SECURITY_VARIABLES[key]]}"
+        else:
+            text = f"Default — {label.split(' — ')[0]} ({source})"
+        return security_choices(key, text, self.values[key])
+
     def mark_saved(self, result=None):
-        if self.scope == "all":
-            self.default_seccomp = self.values["seccomp"]
+        if self.scope == "all" and self.security_controls:
+            self.saved_defaults.update({key: self.values[key] for key in SECURITY_CHOICES})
         # Later Default choices compare against what the files now hold.
         if result is None or self.scope not in self.files and self.scope != "clear":
             return
@@ -802,10 +838,11 @@ class Dialog:
                     lambda widget, *_: self.set_value("hosts_writable", "1" if widget.get_active() else "0"))
         self.security_group = self.section("Sandbox protections", "Saved choices override environment variables. "
                      "Unset game choices use the defaults, then the environment. "
-                     "Without a uid choice, an existing sandbox keeps its previous backend.")
+                     "Without a uid choice, an existing sandbox keeps its previous backend. "
+                     "Default shows the environment of this window; a launch from elsewhere can differ.")
         for key, label in (("separate_uid", "Separate uid backend"),
                            ("seccomp_policy", "Seccomp filter"), ("seccomp", "Seccomp mode")):
-            self.dropdown(key, label, security_choices(key, self.state.scope, self.state.values[key]),
+            self.dropdown(key, label, self.state.security_choices(key),
                           self.state.values[key], lambda *_, key=key: self.set_value(key, self.selected(key)))
         self.security_group.set_visible(self.state.security_controls)
         self.require_group = self.section("Required protections", "The game will not start when a selected protection cannot be enforced.")
@@ -840,8 +877,6 @@ class Dialog:
     def scope_changed(self, *_):
         self.state.set_scope(self.selected("scope"))
         self.updating = True
-        for key in SECURITY_CHOICES:
-            self.set_options(key, security_choices(key, self.state.scope, self.state.values[key]), self.state.values[key])
         self.security_group.set_visible(self.state.security_controls)
         self.require_group.set_visible(self.state.require_controls)
         for key, _ in REQUIREMENTS:
@@ -862,6 +897,10 @@ class Dialog:
         self.updating = True
         self.base_options["display"] = [(v, DISPLAY_CHOICES[v]) for v in self.state.displays]
         self.update_choices()
+        for key in SECURITY_CHOICES:
+            options = self.state.security_choices(key)
+            if options != self.choices[key] or self.state.values[key] != self.selected(key):
+                self.set_options(key, options, self.state.values[key])
         self.widgets["mangohud"].set_sensitive(self.state.engine != "nwjs")
         self.widgets["mangohud"].set_active(self.state.engine != "nwjs" and self.state.values.get("mangohud") == "1")
         self.updating = False

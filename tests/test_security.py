@@ -3849,6 +3849,18 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         request = json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
         self.assertEqual(request["security"]["all"], {"wayland": "1"})
 
+    def test_preferences_window_learns_the_sandboxs_remembered_uid_backend(self):
+        form = ["", "Off", "Newest installed (auto)", "Off", "Off", "This game only"]
+        self.preferences(form)
+        request = lambda: json.loads(Path(self.env["DIALOG_RECORD"]).read_text())
+        self.assertEqual(request()["uid_backend"], "")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        capture.mkdir(parents=True)
+        (capture / "managed-uid").write_text("1\n")
+        self.preferences(form)
+        self.assertEqual(request()["uid_backend"], "systemd")
+
     def test_split_display_is_saved_and_forwarded_to_the_cli(self):
         (self.game / "play.exe").touch()
         self.env["TEST_VALUES"] = json.dumps({"x11_exe": "Vendor Launcher.exe"})

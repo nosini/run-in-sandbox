@@ -615,6 +615,18 @@ PY
             defaults.pop("wayland_x11", None)
         return {**defaults, **own}
 
+    def uid_backend(self, name):
+        """The uid backend sandbox-game keeps for a sandbox while nothing chooses one."""
+        capture = self.capture(name)
+        try:
+            if (capture / "uid").is_file():
+                return "1"
+            if (capture / "managed-uid").is_file():
+                return "systemd"
+        except OSError:
+            pass
+        return ""
+
     def scope_settings(self, name, defaults=False):
         """One file's own values, for editors that write back to that file."""
         if not defaults:

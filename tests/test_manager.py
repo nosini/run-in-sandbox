@@ -1097,6 +1097,15 @@ class LibraryTests(unittest.TestCase):
                 self.library.save_preferences(name, {"scope": "game", key: bad})
             self.assertEqual(self.library.scope_settings(name), before)
 
+    def test_uid_backend_is_read_from_the_capture_as_sandbox_game_does(self):
+        name = self.library.create("game")["name"]
+        capture = self.library.capture(name)
+        self.assertEqual(self.library.uid_backend(name), "")
+        (capture / "managed-uid").write_text("1\n")
+        self.assertEqual(self.library.uid_backend(name), "systemd")
+        (capture / "uid").write_text("150001\n")
+        self.assertEqual(self.library.uid_backend(name), "1")
+
     def test_legacy_dialog_response_preserves_security_instead_of_copying_or_clearing_it(self):
         import runpy
         Preferences = runpy.run_path(str(ROOT / "sandbox-game-dialog"))["Preferences"]

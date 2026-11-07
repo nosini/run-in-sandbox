@@ -35,10 +35,14 @@ RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
 [[ "$RES" =~ ^[0-9]+x[0-9]+$ ]] || RES=""
 PROTONS="$("$SANDBOX" --list-proton 2>/dev/null)"
 OWN_SETTINGS=0; [ ! -f "$CFGDIR/games/$NAME" ] || OWN_SETTINGS=1
+# The uid backend sandbox-game keeps for this sandbox while nothing chooses one.
+UID_BACKEND=""
+if [ -f "$HOME/game-sandboxes/$NAME/uid" ]; then UID_BACKEND=1
+elif [ -f "$HOME/game-sandboxes/$NAME/managed-uid" ]; then UID_BACKEND=systemd; fi
 
 # JSON is data, never shell code. Folder names and values need no escaping by
 # hand, and all controls keep their values while switching between runtimes.
-REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" "$DOTNET_APP" \
+REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$OWN_SETTINGS" "$DOTNET_APP" "$UID_BACKEND" \
     "$CFGDIR/games/$NAME" "$CFGDIR/defaults" \
     launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
     wayland_x11 "$(cfg_wayland_x11)" x11_exe "$(cfg_get x11_exe '')" \
@@ -54,9 +58,9 @@ REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PRO
     hosts_writable "$(cfg_get hosts_writable 0)" require "$(cfg_get require '')" <<'PY'
 import json, sys
 from pathlib import Path
-name, engine, proton, renpy, resolution, installs, own, dotnet = sys.argv[1:9]
+name, engine, proton, renpy, resolution, installs, own, dotnet, uid_backend = sys.argv[1:10]
 security = {}
-for scope, path in zip(("game", "all"), sys.argv[9:11]):
+for scope, path in zip(("game", "all"), sys.argv[10:12]):
     values = {}
     try:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -69,8 +73,8 @@ for scope, path in zip(("game", "all"), sys.argv[9:11]):
 json.dump(dict(game=name, title="Sandbox preferences", engine=engine,
                can_proton=proton == "1", renpy_x11=renpy == "1", dotnet=dotnet == "1",
                resolution=resolution, protons=installs.splitlines(),
-               game_settings=own == "1", security=security,
-               values=dict(zip(sys.argv[11::2], sys.argv[12::2]))), sys.stdout)
+               game_settings=own == "1", security=security, uid_backend=uid_backend,
+               values=dict(zip(sys.argv[12::2], sys.argv[13::2]))), sys.stdout)
 PY
 )" || die "Cannot prepare preferences."
 if OUT="$(dialog preferences <<<"$REQUEST")"; then :

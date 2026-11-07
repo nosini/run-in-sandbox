@@ -112,11 +112,47 @@ class PreferencePolicyTests(unittest.TestCase):
             state.set_scope(scope)
             self.assertTrue(MODULE["SECURITY_CHOICES"].keys().isdisjoint(state.result()))
 
-    def test_invalid_security_choice_is_visible_and_inherit_labels_stay_consistent(self):
-        for scope in ("game", "all"):
-            choices = MODULE["security_choices"]("seccomp", scope, "on")
-            self.assertEqual(choices[0], ("", MODULE["inherit_label"](scope)))
-            self.assertEqual(choices[-1], ("on", "Invalid saved value: on"))
+    def test_invalid_security_choice_is_visible(self):
+        choices = MODULE["security_choices"]("seccomp", "Default", "on")
+        self.assertEqual(choices[0], ("", "Default"))
+        self.assertEqual(choices[-1], ("on", "Invalid saved value: on"))
+
+    def test_security_default_names_the_value_and_its_source(self):
+        clean = {key: "" for key in MODULE["SECURITY_VARIABLES"].values()}
+        def labels(request, environment=None):
+            with patch.dict(os.environ, {**clean, **(environment or {})}):
+                state = Preferences(request)
+                return {key: state.security_choices(key)[0][1] for key in MODULE["SECURITY_CHOICES"]}
+        self.assertEqual(labels({"security": {"game": {}, "all": {}}}),
+                         {"separate_uid": "Default — None (built-in)",
+                          "seccomp_policy": "Default — Denylist (built-in)",
+                          "seccomp": "Default — Enforce (built-in)"})
+        game = {"security": {"game": {}, "all": {"seccomp_policy": "allowlist"}}, "uid_backend": "systemd"}
+        shown = labels(game, {"SANDBOX_SECCOMP_POLICY": "denylist", "SANDBOX_SECCOMP": "log"})
+        self.assertEqual(shown["separate_uid"], "Default — Systemd (this sandbox's current backend)")
+        self.assertEqual(shown["seccomp_policy"], "Default — Allowlist (from the defaults)")
+        self.assertEqual(shown["seccomp"], "Default — Log only (from SANDBOX_SECCOMP)")
+        # The environment comes before a sandbox's remembered backend; for all
+        # games, neither the defaults' own value nor one sandbox's backend counts.
+        shown = labels(game, {"SANDBOX_SEPARATE_UID": "1"})
+        self.assertEqual(shown["separate_uid"], "Default — Subordinate uid (from SANDBOX_SEPARATE_UID)")
+        game["defaults"] = True
+        game["security"] = {"all": {"seccomp_policy": "allowlist"}}
+        shown = labels(game, {"SANDBOX_SECCOMP_POLICY": "allowlst"})
+        self.assertEqual(shown["separate_uid"], "Default — None (built-in)")
+        self.assertEqual(shown["seccomp_policy"], "Default — invalid SANDBOX_SECCOMP_POLICY=allowlst")
+
+    def test_security_default_follows_saved_defaults_only(self):
+        with patch.dict(os.environ, {key: "" for key in MODULE["SECURITY_VARIABLES"].values()}):
+            state = Preferences({"security": {"game": {}, "all": {}}})
+            state.set_scope("all")
+            state.values["seccomp"] = "log"
+            state.set_scope("game")
+            self.assertEqual(state.security_choices("seccomp")[0][1], "Default — Enforce (built-in)")
+            state.set_scope("all")
+            state.mark_saved({"scope": "all", "seccomp": "log"})
+            state.set_scope("game")
+            self.assertEqual(state.security_choices("seccomp")[0][1], "Default — Log only (from the defaults)")
 
     def test_dropdowns_without_own_values_start_on_default_and_save_nothing(self):
         defaults = {"wayland": "1", "proton": "GE-Test", "gamescope_args": "-W 1280 -H 720"}
@@ -385,7 +421,7 @@ class GtkDialogTests(unittest.TestCase):
         self.assertNotIn("scope", dialog.widgets)
         self.assertEqual(dialog.state.scope, "all")
         self.assertEqual(dialog.selected("separate_uid"), "systemd")
-        self.assertEqual(dialog.choices["separate_uid"][0], ("", "Use environment"))
+        self.assertTrue(dialog.choices["separate_uid"][0][1].startswith("Default — "))
         for key in ("proton", "casefold", "webgl", "dotnet", "with_proton", "mangohud"):
             self.assertTrue(dialog.rows[key].get_visible(), key)
         dialog.widgets["launch_with"].set_selected(0)
@@ -418,6 +454,7 @@ class GtkDialogTests(unittest.TestCase):
         self.assertEqual(dialog.selected("seccomp"), "on")
         self.assertIn("Invalid saved value: on", [label for _, label in dialog.choices["seccomp"]])
         self.assertIn("Unknown seccomp", dialog.state.error())
+        self.assertEqual(dialog.choices["separate_uid"][0][1], "Default — invalid saved default: yes")
         dialog.widgets["seccomp"].set_selected(0)
         self.assertEqual(dialog.state.result()["seccomp"], "")
         self.assertIsNone(dialog.state.error())
@@ -427,7 +464,7 @@ class GtkDialogTests(unittest.TestCase):
         dialog.widgets["scope"].set_selected(0)
         dialog.widgets["scope"].set_selected(1)
         self.assertEqual(dialog.selected("separate_uid"), "")
-        self.assertEqual(dialog.choices["separate_uid"][0][1], MODULE["inherit_label"]("all"))
+        self.assertEqual(dialog.choices["separate_uid"][0][1], dialog.state.security_choices("separate_uid")[0][1])
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["scope"], "all")
 

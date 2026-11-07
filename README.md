@@ -707,6 +707,11 @@ turns off a separate uid, even if the environment enables one. Leaving that
 choice unset preserves an existing sandbox's remembered uid backend when no
 environment variable selects one. Backend changes take effect at the next
 launch and keep the sandbox's files; see [A uid of its own](#a-uid-of-its-own).
+The unset choice reads **Default — …** with the value it currently stands for
+and where that comes from: the defaults, an environment variable, this
+sandbox's current uid backend, or the built-in value. The window resolves
+variables from its own environment, normally the desktop's; a game started
+from a shell with other variables can differ.
 
 **Appearance (all dialogs)** offers **System**, **Light** and **Dark**, with
 an immediate preview. Save remembers the choice for preferences, launcher
