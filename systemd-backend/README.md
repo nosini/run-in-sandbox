@@ -37,7 +37,10 @@ old render aliases before replacing the helper or allowlist. Details of the
 GPU grants and their revocation limits are in [render-devices.md](render-devices.md).
 
 Administrator files live under `/usr/local/libexec/sandbox-game`,
-`/usr/local/lib/systemd/system`, `/etc/udev/rules.d` and `/etc/systemd/system`.
+`/etc/udev/rules.d` and `/etc/systemd/system`. Unit definitions live in `/etc`
+so PID 1 can load them before openSUSE mounts the separate `/usr/local`
+subvolume; the service waits for the helper's filesystem. Updates move units
+from the previous `/usr/local/lib/systemd/system` location automatically.
 The root-owned allowlist is `/etc/sandbox-game/systemd-render-users`;
 `systemd-backend.json` beside it records the installation and previous socket
 enablement. Existing manual fixture installations must be removed first.

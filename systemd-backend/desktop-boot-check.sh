@@ -60,6 +60,7 @@ check() { # TEXT CONDITION...: PASS or FAIL, by the condition's status
 }
 mono() { systemctl show "$1" -p "${2:-ActiveEnterTimestampMonotonic}" --value; }
 earlier() { [ "$1" -gt 0 ] && [ "$2" -gt 0 ] && [ "$1" -le "$2" ]; }
+allows_devices() { [ -n "$1" ] && ! grep -qw nodev <<<"$1"; }
 # When UNIT first logged a line matching PATTERN this boot, in seconds since
 # boot: the journal keeps what systemd forgets of a unit gone idle.
 first() { # UNIT PATTERN
@@ -86,16 +87,16 @@ check "the render helper started before user sessions" earlier "$render_up" "$se
 
 fs="$(findmnt -n -o FSTYPE,OPTIONS /run/sandboxgame/render 2>/dev/null)"
 check "the render store is a tmpfs of its own ($fs)" test "${fs%% *}" = tmpfs
-check "that tmpfs allows device nodes" eval '! grep -qw nodev <<<"${fs#* }"'
+check "that tmpfs allows device nodes" allows_devices "$fs"
 alias="$(ls -ln "/run/sandboxgame/render/$(id -u)"/renderD* 2>&1)"
 note "render copy: $alias"
 check "your render node copy is yours alone" eval \
     "stat -c '%u %g %a' /run/sandboxgame/render/$(id -u)/renderD* | grep -qx '$(id -u) $(id -u) 600'"
 check "it is the GPU's render node" eval \
     "[ \"\$(stat -c '%t:%T' /run/sandboxgame/render/$(id -u)/renderD* | sort)\" = \"\$(stat -c '%t:%T' /dev/dri/renderD* | sort)\" ]"
-others="$(sudo ls /run/sandboxgame/render 2>/dev/null | grep -vx "$(id -u)" | tr '\n' ' ')"
+copies="$(sudo ls /run/sandboxgame/render 2>/dev/null | grep -E '^[0-9]+$' | tr '\n' ' ')"
 allowed="$(sudo cat "$render_users" 2>/dev/null | tr '\n' ' ')"
-note "render copies for: $(id -u) ${others}(allowed: $allowed)"
+note "render copies for: ${copies:-none }(allowed: $allowed)"
 
 # A game under the backend: the first use starts systemd-nsresourced, by
 # its socket, which has to find overlayfs loaded.
@@ -146,10 +147,14 @@ fi
 sudo journalctl -b --no-pager -u sandbox-game-render-devices.service -u run-sandboxgame-render.mount \
     -u modprobe@overlay.service -u systemd-nsresourced.service -u systemd-mountfsd.service \
     -u systemd-nsresourced.socket -u systemd-mountfsd.socket > "$results/journal.txt" 2>&1
+# Failed early unit lookups need not appear in that unit's own journal.
+sudo journalctl -b --no-pager _PID=1 \
+    | grep -E 'sandbox-game-render|run-sandboxgame|usr-local.mount|/usr/local|ordering cycle|deleted to break' \
+    > "$results/boot-ordering.txt"
 systemctl show sandbox-game-render-devices.service run-sandboxgame-render.mount \
-    systemd-user-sessions.service modprobe@overlay.service systemd-nsresourced.service \
+    systemd-user-sessions.service modprobe@overlay.service systemd-nsresourced.service multi-user.target \
     -p Id -p ActiveEnterTimestampMonotonic -p ExecMainExitTimestampMonotonic \
-    -p After -p Requires > "$results/units.txt" 2>&1
+    -p After -p Requires -p Wants -p LoadState -p FragmentPath > "$results/units.txt" 2>&1
 
 note ""
 note "$(grep -c '^PASS' "$summary") passed, $(grep -c '^FAIL' "$summary") failed"

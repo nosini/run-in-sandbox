@@ -3,6 +3,7 @@ Description=Reconcile experimental sandbox render-device aliases
 BindsTo=run-sandboxgame-render.mount
 After=systemd-udevd.service run-sandboxgame-render.mount
 Before=systemd-user-sessions.service
+RequiresMountsFor=/usr/local/libexec/sandbox-game
 
 [Service]
 Type=oneshot

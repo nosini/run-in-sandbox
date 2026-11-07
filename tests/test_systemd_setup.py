@@ -2,9 +2,13 @@
 import importlib.machinery
 import importlib.util
 import hashlib
+from contextlib import ExitStack
+import json
 import os
 from pathlib import Path
 import socket
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -295,3 +299,89 @@ class AdministratorPreflightTests(unittest.TestCase):
                 setup.uninstall()
             self.assertEqual(helper.read_text(), 'manual install')
             run.assert_not_called()
+
+
+class AdministratorLayoutTests(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        self.unitdir = self.root / setup.UNITDIR.relative_to('/')
+        self.legacy = self.root / setup.LEGACY_UNITDIR.relative_to('/')
+        self.wanted = self.root / 'etc/systemd/system/multi-user.target.wants' / setup.RENDER
+        mapped = {key: self.root / getattr(setup, key).relative_to('/') for key in
+                  ('CONFIG', 'STATE', 'USERS', 'UNITDIR', 'LEGACY_UNITDIR', 'HELPER', 'RULE', 'DROPIN')}
+        for key, value in mapped.items():
+            stack.enter_context(mock.patch.object(setup, key, value))
+        legacy_files = (self.legacy / setup.RENDER, self.legacy / setup.MOUNT)
+        stack.enter_context(mock.patch.object(setup, 'LEGACY_FILES', legacy_files))
+        stack.enter_context(mock.patch.object(setup, 'FILES',
+            (setup.HELPER, setup.RULE, setup.DROPIN,
+             self.unitdir / setup.RENDER, self.unitdir / setup.MOUNT, *legacy_files)))
+        # Exercise real file writes/removal, without root or live services.
+        stack.enter_context(mock.patch.object(setup, 'trusted'))
+        stack.enter_context(mock.patch.object(setup, 'users', return_value=[1000]))
+        stack.enter_context(mock.patch.object(setup, 'components'))
+        stack.enter_context(mock.patch.object(setup, 'idle'))
+        stack.enter_context(mock.patch.object(setup, 'load', return_value=SimpleNamespace(managed_available=lambda: None)))
+        stack.enter_context(mock.patch.object(setup.shutil, 'which', return_value='/mock/tool'))
+        stack.enter_context(mock.patch.object(setup, 'output', return_value=''))
+        stack.enter_context(mock.patch.object(setup, 'enabled', return_value=False))
+        self.commands = stack.enter_context(mock.patch.object(setup, 'run', side_effect=self.command))
+
+    def command(self, *args, **kwargs):
+        if args[:2] == ('systemctl', 'disable') and setup.RENDER in args:
+            self.wanted.unlink(missing_ok=True)
+        if args[:2] == ('systemctl', 'enable') and setup.RENDER in args:
+            self.wanted.parent.mkdir(parents=True, exist_ok=True)
+            if not self.wanted.is_symlink():
+                self.wanted.symlink_to('/' + str(self.unitdir.relative_to(self.root) / setup.RENDER))
+
+    def old_install(self):
+        setup.STATE.parent.mkdir(parents=True, exist_ok=True)
+        setup.STATE.write_text(json.dumps({'format': 1, 'selinux': False,
+                                          'sockets_enabled': dict.fromkeys(setup.SOCKETS, False)}))
+        self.legacy.mkdir(parents=True)
+        for name in (setup.RENDER, setup.MOUNT):
+            shutil.copyfile(setup.SOURCE / name, self.legacy / name)
+        self.wanted.parent.mkdir(parents=True, exist_ok=True)
+        self.wanted.symlink_to('/usr/local/lib/systemd/system/' + setup.RENDER)
+
+    def test_update_moves_old_units_and_enablement_then_uninstalls(self):
+        self.old_install()
+        setup.install(['1000'])
+        self.assertEqual(self.wanted.readlink(), Path('/etc/systemd/system') / setup.RENDER)
+        for name in (setup.RENDER, setup.MOUNT):
+            self.assertFalse((self.legacy / name).exists())
+            self.assertEqual((self.unitdir / name).read_bytes(), (setup.SOURCE / name).read_bytes())
+        setup.uninstall()
+        self.assertFalse(self.wanted.is_symlink())
+        self.assertTrue(all(not path.exists() for path in setup.FILES))
+        self.assertFalse(setup.STATE.exists())
+        self.assertTrue(setup.USERS.exists())
+
+    def test_old_layout_can_be_uninstalled_without_updating(self):
+        self.old_install()
+        setup.uninstall()
+        self.assertFalse(self.wanted.is_symlink())
+        self.assertTrue(all(not path.exists() for path in setup.FILES))
+
+    @unittest.skipUnless(shutil.which('systemd-analyze'), 'needs systemd-analyze')
+    def test_boot_transaction_finds_render_units_before_usr_local_is_mounted(self):
+        setup.install(['1000'])
+        # Simulate early boot: /usr/local is not mounted yet. Verify the real
+        # installed layout through systemd, including the WantedBy symlink.
+        shutil.rmtree(self.root / 'usr/local')
+        boot_units = self.root / 'etc/systemd/system'
+        (boot_units / 'multi-user.target').write_text('[Unit]\nDescription=Boot fixture\nDefaultDependencies=no\n')
+        for name in ('sysinit.target', 'basic.target', 'shutdown.target', 'umount.target',
+                     'local-fs-pre.target', 'swap.target'):
+            (boot_units / name).write_text('[Unit]\nDescription=Boot fixture\nDefaultDependencies=no\n')
+        (boot_units / 'usr-local.mount').write_text(
+            '[Mount]\nWhat=tmpfs\nWhere=/usr/local\nType=tmpfs\n')
+        result = subprocess.run(['systemd-analyze', 'verify', '--root=' + str(self.root),
+                                 '--man=no', '--generators=no', 'multi-user.target'],
+                                env={**os.environ, 'SYSTEMD_LOG_LEVEL': 'debug'},
+                                text=True, capture_output=True)
+        for name in (setup.RENDER, setup.MOUNT, 'usr-local.mount'):
+            self.assertIn(f'{name}: Installed new job {name}/start', result.stderr, result.stderr)

@@ -19,7 +19,10 @@ SOURCE = Path(__file__).resolve().parent
 CONFIG = Path('/etc/sandbox-game')
 STATE = CONFIG / 'systemd-backend.json'
 USERS = CONFIG / 'systemd-render-users'
-UNITDIR = Path('/usr/local/lib/systemd/system')
+# PID 1 loads the boot transaction before /usr/local's subvolume is mounted.
+# Unit definitions must be on the root filesystem, including enablement targets.
+UNITDIR = Path('/etc/systemd/system')
+LEGACY_UNITDIR = Path('/usr/local/lib/systemd/system')
 HELPER = Path('/usr/local/libexec/sandbox-game/systemd-render-devices')
 RULE = Path('/etc/udev/rules.d/99-sandbox-game-render.rules')
 DROPIN = Path('/etc/systemd/system/systemd-nsresourced.service.d/50-sandbox-game-overlay.conf')
@@ -29,7 +32,8 @@ SOCKETS = ('systemd-nsresourced.socket', 'systemd-mountfsd.socket')
 SERVICES = ('systemd-nsresourced.service', 'systemd-mountfsd.service')
 RENDER = 'sandbox-game-render-devices.service'
 MOUNT = 'run-sandboxgame-render.mount'
-FILES = (HELPER, RULE, DROPIN, UNITDIR / RENDER, UNITDIR / MOUNT)
+LEGACY_FILES = (LEGACY_UNITDIR / RENDER, LEGACY_UNITDIR / MOUNT)
+FILES = (HELPER, RULE, DROPIN, UNITDIR / RENDER, UNITDIR / MOUNT, *LEGACY_FILES)
 
 
 def require(condition, message):
@@ -191,8 +195,11 @@ def install(values):
         state = {'format': 1, 'sockets_enabled': {s: enabled(s) for s in SOCKETS}, 'selinux': selinux}
         write(STATE, (json.dumps(state, indent=2) + '\n').encode())
     # Revoke before replacing the helper or changing the configured user list.
-    if (UNITDIR / RENDER).exists():
+    if any(path.exists() for path in (UNITDIR / RENDER, LEGACY_UNITDIR / RENDER)):
         run('systemctl', 'stop', RENDER)
+    if any(path.exists() for path in LEGACY_FILES):
+        # Remove the old enablement symlink before enabling the /etc copy.
+        run('systemctl', 'disable', RENDER)
     if selinux:
         with tempfile.TemporaryDirectory(prefix='sandbox-policy-', dir=CONFIG) as tmp:
             mod, pp = str(Path(tmp) / f'{MODULE}.mod'), str(Path(tmp) / f'{MODULE}.pp')
@@ -203,6 +210,8 @@ def install(values):
     write(RULE, (SOURCE / 'systemd-render-devices.rules').read_bytes())
     for name in (RENDER, MOUNT):
         write(UNITDIR / name, (SOURCE / name).read_bytes())
+    for path in LEGACY_FILES:
+        path.unlink(missing_ok=True)
     write(USERS, ''.join(f'{value}\n' for value in allowed).encode())
     write(DROPIN, b'[Unit]\nRequires=modprobe@overlay.service\nAfter=modprobe@overlay.service\n')
     if selinux:
@@ -235,7 +244,7 @@ def uninstall():
     RULE.unlink(missing_ok=True)
     run('udevadm', 'control', '--reload')
     run('udevadm', 'settle')
-    if (UNITDIR / RENDER).exists():
+    if any(path.exists() for path in (UNITDIR / RENDER, LEGACY_UNITDIR / RENDER)):
         run('systemctl', 'disable', '--now', RENDER)
         run('systemctl', 'stop', MOUNT)
     # Never disable a shared socket that was enabled before this installation.

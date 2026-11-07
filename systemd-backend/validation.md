@@ -171,7 +171,25 @@ store must be its dedicated device-enabled tmpfs, with aliases only for the
 allowlisted users. Overlay loading must precede namespace-service startup.
 On SELinux systems, check enforcing mode, loaded policy and new delegation
 AVCs. Then repeat an ordinary unprivileged launch and the storage/media probes,
-plus service/mount stop and regrant. These reboot checks have not yet run.
+plus service/mount stop and regrant.
+
+The first desktop reboot check found the delegation sockets, overlay loading,
+SELinux policy and storage launch working, but the render service and mount
+never started (13 checks passed, 7 failed). The enabled service pointed into
+`/usr/local`, a separate subvolume unavailable when PID 1 loads the boot
+transaction. Both unit definitions now install in `/etc/systemd/system`,
+and the service explicitly waits for the helper's filesystem. Installer
+updates migrate the previous unit files and enablement. A regression checks
+systemd's actual boot transaction with `/usr/local` unavailable.
+
+The repeat desktop reboot check passed all **20 checks** with the corrected
+layout. The dedicated mount started at 17.685s, the render service at 19.522s,
+and user sessions at 20.845s. The caller-owned 0600 render alias matched the
+GPU's device number; overlay loading preceded nsresourced; the storage launch
+wrote and saved successfully with caller-owned captures. SELinux was enforcing
+with the service policy loaded and only the known pressure denial. Removal
+then revoked aliases and removed the setup cleanly. `boot-ordering.txt`
+collects PID 1's relevant diagnostics alongside the unit journal.
 
 ## Results and open checks
 
@@ -199,8 +217,8 @@ index 4294967295 and libpulse rejects it. This affects the restricted sound
 server under every backend. Fixing it would mean patching PipeWire, which
 this project does not carry; it is a known limitation.
 
-Boot checks remain unvalidated; frames reached the compositor and gamescope as
-DMA-BUF under both backends. On the
+Render-service boot activation and ordering passed the desktop reboot check.
+Frames reached the compositor and gamescope as DMA-BUF under both backends. On the
 desktop (see above), Vulkan, OpenGL, EGL, gamescope/Xwayland and real games --
 Proton, NW.js, Ren'Py, mkxp-z, Pixel Game Maker MV -- ran on the GPU.
 

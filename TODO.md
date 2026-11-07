@@ -232,7 +232,7 @@ per-game SELinux policy or relabeling step.
      A running game blocks install/removal and keeps working. Boot testing
      and acceleration were left to step 5.
 
-5. **Graphics and lifecycle validation: in progress (2026-11-07).**
+5. **Graphics and lifecycle validation: done (2026-11-07).**
    - Added `systemd-backend/test_storage_live.py`: Btrfs baseline plus tmpfs,
      ext4 and XFS, with source/capture together and split across filesystems.
      Eight checks per layout cover ownership/persistence, switching backends,
@@ -327,12 +327,25 @@ per-game SELinux policy or relabeling step.
      headless gamescope runs. llvmpipe lacks `VK_EXT_physical_device_drm`, so
      gamescope's card/render node matching is never reached there: the
      card-node question needs a real GPU.
-   - Validate reboot ordering, stale device-number reuse, allowlist changes
-     and orderly service/mount stops. Existing tests cover synthetic
-     lifecycle cases, a real udev change event and live alias
-     revocation/regrant, not reboot. A shared-VM reboot window is still
-     pending; no reboot has been performed. Still open on hardware: DMA-BUF
-     checked on its own -- done on the desktop: vkcube's frames went to the
+   - Desktop reboot check (2026-11-07, `.gpu-check/boot-20261107-034626`):
+     13 passed, 7 failed. The render service and its mount never started;
+     no render aliases existed. Overlayfs loaded before nsresourced,
+     delegation sockets and SELinux policy survived reboot, and the storage
+     launch passed. Setup was removed afterward. Unit definitions in
+     `/usr/local` are unavailable when PID 1 builds its boot transaction,
+     before that separate subvolume mounts. Moved both units to `/etc`,
+     added the helper's mount dependency, and made updates/removal handle
+     the old layout. The early-boot regression uses systemd's actual job
+     transaction with `/usr/local` absent; the old layout fails. The repeat
+     desktop reboot check (`.gpu-check/boot-20261107-035510`) passed all
+     20 checks: mount at 17.685s, render helper at 19.522s, user sessions
+     at 20.845s; overlay loaded before nsresourced. The GPU alias had the
+     right ownership/mode and device number, storage launch/persistence
+     passed, and SELinux stayed enforcing with only the known pressure
+     denial. Administrator setup was removed cleanly. Existing lifecycle tests cover
+     stale device-number reuse, allowlist changes, orderly stops, a real
+     udev change event and live alias revocation/regrant.
+     DMA-BUF checked on its own -- done on the desktop: vkcube's frames went to the
      compositor and to gamescope as DMA-BUF buffers (6 and 3, no shared
      memory) under both backends.
    - Storage/lifetime checks above cover these four filesystems and public
@@ -342,26 +355,28 @@ per-game SELinux policy or relabeling step.
 
 ### Resume information
 
-**Handoff (2026-11-07, end of session).** Step 5 is done except the reboot
-check, which is ready but not yet run:
+**Handoff (2026-11-07, after successful desktop reboot check).** All five
+implementation/validation steps are complete. The backend remains experimental
+and opt-in; documented limitations and coverage boundaries still apply.
 
-- Next: on the user's desktop (openSUSE TW, RX 9070 XT), from the checkout:
-  `systemd-backend/desktop-boot-check.sh before`, reboot, log in, then
-  `systemd-backend/desktop-boot-check.sh after`. Results go to
-  `.gpu-check/boot-DATE/` (summary.txt with PASS/FAIL, journal.txt,
-  units.txt, denials.txt, launch.log). Expect all PASS; the
-  `/proc/pressure` (proc_psi_t) denial for systemd-mountfsd is known and
-  counted apart. If it passes, record it here and in validation.md
-  ("Boot ordering": drop "These reboot checks have not yet run").
-- The desktop may still have the administrator setup installed from an
-  interrupted GPU check (sockets enabled); `before` updates it and
-  `after` offers removal. Otherwise: `sudo ./install.sh
-  --uninstall-systemd-backend`, then remove
-  `/etc/sandbox-game/systemd-render-users` and rmdir `/etc/sandbox-game`
-  `/usr/local/libexec/sandbox-game`.
-- The script was rehearsed on the VM without a reboot (shared VM): all
-  non-reboot checks pass. Not exercised there: the journal-based
-  "overlayfs before nsresourced" check on a fresh boot.
+- Final desktop reboot results: `.gpu-check/boot-20261107-035510`,
+  **20 PASS, 0 FAIL**, administrator setup removed cleanly afterward.
+  Both units loaded from `/etc/systemd/system` and started in order;
+  the render alias, overlay ordering, storage launch and enforcing SELinux
+  checks passed. Only the known `/proc/pressure` denial remains.
+- The first run (`.gpu-check/boot-20261107-034626`, 13 PASS / 7 FAIL)
+  exposed unit definitions being unavailable on the separately mounted
+  `/usr/local` during boot. The installer now uses `/etc/systemd/system`,
+  migrates old units and enablement, and removes either layout. The helper
+  stays in `/usr/local` with an explicit mount dependency. The boot check
+  also collects PID 1 diagnostics and no longer reports a missing store as
+  device-enabled or invents a UID directory in its render-copy listing.
+- Verification of the fix: 27 setup tests pass in the container and on
+  systemd 261.4 in the VM; 21 render lifecycle tests pass as root on the VM.
+  Live old-layout install, migration, repeat install, mount stop/restart
+  and removal pass with SELinux enforcing. The VM was not rebooted because
+  another task has a hold. Setup is removed and sockets restored; logs are
+  in `~/run-in-sandbox/reviews/boot-20261107/`.
 - Optional: the user may want a `dontaudit systemd_mountfsd_t
   proc_psi_t:dir search;` in sandbox_game_systemd.te to quiet that denial;
   not asked for yet.
