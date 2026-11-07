@@ -109,7 +109,7 @@ run() { # NAME BACKEND DISPLAY-OPTION COMMAND...
         XDG_DATA_HOME="$scratch/home/.local/share" SANDBOX_TOOLS_DIR="$scratch/tools" \
         SANDBOX_SEPARATE_UID="$backend" \
         timeout 120 "$checkout/sandbox-game" "$display" "$scratch/games/backend-$backend" \
-        /bin/sh -c "$*" > "$log" 2>&1
+        /bin/sh -c "ls -ln /dev/dri/renderD* 2>&1 | sed 's/^/render node: /'; $*" > "$log" 2>&1
     local status=$?
     echo "exit: $status" >> "$log"
     return "$status"
@@ -123,7 +123,7 @@ for backend in 0 systemd; do
     note ""
     note "== SANDBOX_SEPARATE_UID=$backend"
     if have vulkaninfo; then
-        run vulkaninfo "$backend" --headless vulkaninfo --summary
+        run vulkaninfo "$backend" --wayland vulkaninfo --summary
         note "vulkan: $(vk_device "$results/vulkaninfo-$backend.log") ($(vk_type "$results/vulkaninfo-$backend.log")), $(tail -1 "$results/vulkaninfo-$backend.log")"
     else
         note "vulkan: skipped, no vulkaninfo (vulkan-tools)"
@@ -153,6 +153,15 @@ for backend in 0 systemd; do
     if have glxinfo && have gamescope; then
         run glxinfo-gamescope "$backend" --gamescope glxinfo -B
         note "GL in gamescope's Xwayland: $(gl_renderer "$results/glxinfo-gamescope-$backend.log"), $(tail -1 "$results/glxinfo-gamescope-$backend.log")"
+    fi
+    # Under the systemd backend the game's render node is the helper's copy,
+    # yours and 0600, and the capture is marked as that backend's.
+    note "render node in the game: $(grep -h -m1 '^render node: ' "$results"/*-"$backend".log | head -1 | sed 's/^render node: //')"
+    capture="$scratch/home/game-sandboxes/backend-$backend"
+    if [ -e "$capture/managed-uid" ]; then
+        note "capture: marked for the systemd backend"
+    else
+        note "capture: not marked for the systemd backend"
     fi
 done
 
