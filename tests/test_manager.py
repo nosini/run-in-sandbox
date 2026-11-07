@@ -682,6 +682,24 @@ class LibraryTests(unittest.TestCase):
         self.assertIn("--wayland-x11", flags)
         self.assertIn("--gamescope=-W 1920 -H 1080", flags)
 
+    def test_satellite_split_display_ignores_saved_gamescope_arguments(self):
+        entry = self.library.create("game")
+        self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1"})
+        self.library.update_settings(entry["name"], {
+            "wayland": "1", "wayland_x11": "1", "x11_backend": "satellite",
+            "gamescope_args": "-W 1920 -H 1080 -f"}, defaults=True)
+        flags = self.pref_flags(entry, 1)
+        self.assertIn("--wayland-x11", flags)
+        self.assertIn("--x11-backend=satellite", flags)
+        self.assertFalse([f for f in flags if f.startswith("--gamescope")])
+        self.library.save_preferences(entry["name"], {
+            "scope": "game", "wayland": "1", "wayland_x11": "1", "x11_backend": "gamescope"})
+        self.assertIn("--x11-backend=gamescope", self.pref_flags(entry, 1))
+        self.assertIn("--gamescope=-W 1920 -H 1080 -f", self.pref_flags(entry, 1))
+        native = self.pref_flags(entry, 0)
+        self.assertIn("--wayland", native)
+        self.assertFalse([f for f in native if f.startswith("--x11-backend")])
+
     def test_program_selection_refuses_traversal_external_links_and_missing_files(self):
         entry = self.library.create("game")
         game = Path(entry["directory"])

@@ -254,6 +254,7 @@ working directory.
 | `--mangohud` | `mangohud` | |
 | MangoHud in a 32-bit game | the 32-bit libraries | `lib32-mangohud`, `mangohud-32bit`, `mangohud.i686`, `mangohud:i386` — pick your distro's spelling |
 | `--gamescope` | `gamescope` | |
+| `--wayland-x11 --x11-backend=satellite` | `xwayland-satellite`, `Xwayland` | separate desktop windows for X11 launchers |
 | `--gamescope` **and** `--mangohud` | `mangoapp` | bundled with `mangohud` on some distributions, a separate package on others |
 | resolution list in the gamescope dialog | `xrandr` or `wlr-randr` | `xrandr` may live in `xorg-xrandr` or `x11-xserver-utils` |
 | memory, CPU and task limits | `systemd-run` and a systemd user session | without one the game still starts, with a warning and no limits |
@@ -418,8 +419,8 @@ Some Proton builds can select the graphics driver per process: the game uses
 native Wayland while a launcher or browser helper uses X11. Choose **Native
 Wayland + private X11 (split)** in Display settings for this arrangement.
 The game talks to the desktop's Wayland compositor, as with native Wayland;
-X11 windows run through gamescope's private Xwayland. The host's X server and
-authentication cookie are kept out of the sandbox.
+X11 windows run through gamescope's private Xwayland by default. The host's
+X server and authentication cookie are kept out of the sandbox.
 
 This requires a runner implementing `WINE_GRAPHICS_DRIVER` and per-process
 X11 selection, such as [DWProton 11.0-14](https://github.com/dawn-winery/dwproton-mirror/releases/tag/dwproton-11.0-14).
@@ -431,12 +432,26 @@ adds an executable basename or Windows path fragment through
 sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Example /game/Launcher.exe
 ```
 
-Gamescope's window opens when the first X11 program starts, beside the
-game's. Closing it ends the X11 programs in it, such as a launcher, but not
-the game, and the next X11 program opens it again. A launcher closed this way
-counts as a normal exit, not a failure with exit code 1. It stays a window:
-fullscreen, it would cover the game, so the fullscreen setting is ignored in
-this mode. Gamescope's resolution applies to the X11 windows; the native
+For separate launcher windows on the desktop, choose **Satellite** in
+**Private X11 backend**, or add `--x11-backend=satellite` to that command.
+This optional backend requires `xwayland-satellite` and `Xwayland` on the host.
+It starts a private X server for this sandbox and keeps it running until the
+game exits. Closing a launcher window leaves that server and the game running;
+if the server fails, the launch ends. Gamescope remains the default.
+
+Satellite uses the desktop's window management and scaling. Gamescope's
+resolution and fullscreen settings do not apply; saved arguments are kept for
+switching back. Explicit `--gamescope=ARGS` is rejected with satellite.
+Satellite's window positioning and Wine scaling can differ from gamescope;
+test launcher popups and mixed Wayland/X11 coordinates with your runner.
+
+With the default gamescope backend, its window opens beside the game's when
+the first X11 program starts. Closing it ends the X11 programs in it, such as
+a launcher, but not the game, and the next X11 program opens it again. A
+launcher closed this way counts as a normal exit, not a failure with exit
+code 1. It stays a window: fullscreen, it would cover the game, so the
+fullscreen setting is ignored in this mode. Gamescope's resolution applies
+to the X11 windows; the native
 Wayland game uses its own window and display settings.
 
 Wine places the X11 windows on the same desktop as the game: your monitors
@@ -452,11 +467,12 @@ MangoHud wraps the
 whole Proton command in this mode, so X11 launcher windows can show the
 overlay too. Its shortcut polling normally keeps an X11 connection open even
 inside a native Wayland game, which terminates the game when gamescope closes.
-In split mode the sandbox clears MangoHud's shortcut bindings, keeping the
-overlay and configured FPS limit working without that connection. Its hotkeys
-for toggling the overlay, changing limits and starting recordings are therefore
-unavailable in this mode. Other MangoHud settings still apply, including
-per-executable config files and explicit `MANGOHUD_CONFIG` values. If your
+With the gamescope backend the sandbox clears MangoHud's shortcut bindings,
+keeping the overlay and configured FPS limit working without that connection.
+Its hotkeys for toggling the overlay, changing limits and starting recordings
+are therefore unavailable with that backend. Satellite keeps the shortcuts
+enabled. Other MangoHud settings still apply, including per-executable config
+files and explicit `MANGOHUD_CONFIG` values. If your
 config hides the overlay with `no_display`, set `no_display=0` to show it.
 
 ##### Mods: BepInEx, MelonLoader and other DLL loaders
@@ -650,6 +666,7 @@ Wine themselves](#native-programs-that-need-net-or-run-wine-themselves).
 Turning on **Internet** shows the LAN controls, and **Private hosts file**
 the hosts entries; see [Network](#network).
 Choosing gamescope shows resolution and fullscreen controls inline.
+Split display also offers **Private X11 backend**: gamescope or satellite.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
@@ -695,7 +712,8 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | Option | |
 |---|---|
 | `--wayland` | native Wayland instead of Xwayland. With `--proton` this selects winewayland instead (see below). |
-| `--wayland-x11` | Proton's native Wayland game with gamescope's private X11 for compatible launchers/helpers |
+| `--wayland-x11` | Proton's native Wayland game with private X11 for compatible launchers/helpers |
+| `--x11-backend=gamescope\|satellite` | with `--wayland-x11`: choose the private X11 backend; gamescope is the default |
 | `--x11-exe EXE` | with `--wayland-x11`: an extra executable name or Windows path fragment for the runner's X11 selection |
 | `--name NAME` | override the sandbox name, otherwise derived from the folder |
 | `--net` | internet access, and only that; see [Network](#network) |
@@ -990,6 +1008,11 @@ winewayland must use gamescope instead.
 gamescope's private X11. Its inner Landlock domain permits connecting to the
 desktop's Wayland socket, and nothing else in the folder that holds it, while
 still preventing access to gamescope's processes and descriptors. The host X server remains unavailable.
+With `--x11-backend=satellite`, satellite and its Xwayland run above that same
+inner domain. Their internal Wayland socket is in a separate directory where
+the game has no permission to connect, on kernels supporting the Unix-socket
+restriction. Satellite bridges clipboard selections and forwards Wayland
+interfaces; this is not a claim of equivalent desktop isolation to gamescope.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided. Without it,
 GTK cannot read the desktop's settings, so one is passed in: GNOME's title-bar
@@ -1504,6 +1527,7 @@ Plain `key=value`, read rather than sourced, and meant to be edited by hand:
 ```ini
 wayland=0|1
 wayland_x11=0|1
+x11_backend=gamescope|satellite
 x11_exe=Launcher.exe
 mangohud=0|1
 hdr=0|1
@@ -1547,10 +1571,11 @@ saves untouched. `env` values cannot contain spaces — the list is split on
 them.
 
 `wayland_x11=1` with `wayland=1` selects split display for Windows games;
-`gamescope` does not matter then, and `gamescope_args` always applies. Other
-engines run such a setting as plain native Wayland. `wayland_x11` is read from
-the same file as the rest of the display choice: a game's own file that sets
-`wayland`, `gamescope` or `host_x11` without it does not get split display
+`gamescope` does not matter then. `x11_backend=gamescope` (the default) uses
+`gamescope_args`; `x11_backend=satellite` keeps those arguments but ignores
+them. Other engines run such a setting as plain native Wayland. `wayland_x11`
+is read from the same file as the rest of the display choice: a game's own
+file that sets `wayland`, `gamescope` or `host_x11` without it does not get split display
 from the defaults. `x11_exe` is optional and only applies to that mode. An
 empty value uses the runner's own built-in selection; names and path
 fragments may contain spaces.

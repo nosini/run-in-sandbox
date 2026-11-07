@@ -1936,7 +1936,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         lines = result.stdout.splitlines()
         marks = {line.split()[1]: line.split()[0] for line in lines}
         self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
-                                       "gpu", "gamescope", "network", "ntsync", "32-bit"], result.stdout)
+                                       "gpu", "gamescope", "satellite", "network", "ntsync", "32-bit"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:
         # here at least the playback-only server, the test runtime dir having none.
@@ -2420,8 +2420,123 @@ sys.exit(int(sys.argv[2]))
         self.assertIsNone(settings("--wayland-x11"))
         self.assertIsNone(settings("--wayland", "--mangohud"))
 
+    def test_satellite_split_display_protects_its_internal_wayland_socket(self):
+        self.recorded_args()
+        for name in ("xwayland-satellite", "Xwayland"):
+            executable = self.base / "bin" / name
+            executable.write_text("#!/bin/sh\nexit 99\n")
+            executable.chmod(0o755)
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        args = self.recorded_args("--wayland-x11", "--x11-backend=satellite",
+                                  "--proton=" + str(proton))
+        self.assertNotIn("gamescope", args)
+        self.assertNotIn("--gamescope-on-demand", args)
+        self.assertIn("--x11-server", args)
+        self.assertIn("XDG_RUNTIME_DIR=/run/sandbox-x11", args)
+        server = args.index("xwayland-satellite")
+        self.assertEqual(args[server + 1:server + 4], [":0", "-nolisten", "tcp"])
+        starts = [i for i, a in enumerate(args)
+                  if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"]]
+        outer, inner = [args[i + 1:args.index("--", i)] for i in starts]
+        self.assertIn(("--rw", "/run/sandbox-x11"), list(zip(outer, outer[1:])))
+        self.assertNotIn("/run/sandbox-x11", inner)
+        self.assertIn(("--unix-connect", "/run/host-wayland/wayland-0"), list(zip(inner, inner[1:])))
+        self.assertNotIn(":123", args)
+
+        mangohud = self.base / "bin" / "mangohud"
+        mangohud.write_text('#!/bin/sh\nexec "$@"\n')
+        mangohud.chmod(0o755)
+        args = self.recorded_args("--wayland-x11", "--x11-backend=satellite", "--mangohud", "--hdr",
+                                  "--env=MANGOHUD_CONFIG=read_cfg,toggle_hud=F12",
+                                  "--proton=" + str(proton))
+        values = {args[i + 1]: args[i + 2] for i, a in enumerate(args) if a == "--setenv"}
+        self.assertEqual(values["MANGOHUD_CONFIG"], "read_cfg,toggle_hud=F12")
+        self.assertEqual(values["DXVK_HDR"], "1")
+        self.assertNotIn("--hdr-enabled", args)
+
+    @unittest.skipUnless(os.environ.get("TEST_SATELLITE") == "1", "set TEST_SATELLITE=1 for real satellite/Weston")
+    def test_live_satellite_windows_and_internal_socket_isolation(self):
+        for program in ("weston", "xwayland-satellite", "Xwayland"):
+            if not shutil.which(program):
+                self.skipTest(f"{program} is not installed")
+        self.env["WAYLAND_DISPLAY"] = "satellite-test"
+        log = (self.base / "weston.log").open("w")
+        self.addCleanup(log.close)
+        weston = subprocess.Popen(
+            ["weston", "--backend=headless", "--renderer=pixman", "--no-config",
+             "--socket=satellite-test", "--idle-time=0"], env=self.env, stdout=log, stderr=log)
+        def stop_weston():
+            weston.terminate()
+            weston.wait(timeout=5)
+        self.addCleanup(stop_weston)
+        deadline = time.monotonic() + 5
+        while not (self.runtime / "satellite-test").exists():
+            if weston.poll() is not None or time.monotonic() > deadline:
+                self.fail("headless Weston did not start: " + (self.base / "weston.log").read_text())
+            time.sleep(0.05)
+        proton = self.base / "proton"
+        proton.mkdir()
+        runner = proton / "proton"
+        runner.write_text("#!/bin/sh\nexec /usr/bin/python3 -I /game/probe.py\n")
+        runner.chmod(0o755)
+        (self.game / "probe.py").write_text('''
+import ctypes, os, socket, time
+from pathlib import Path
+assert os.environ['DISPLAY'] == ':0'
+assert os.environ['WAYLAND_DISPLAY'] == '/run/host-wayland/wayland-0'
+with socket.socket(socket.AF_UNIX) as wayland:
+    wayland.connect(os.environ['WAYLAND_DISPLAY'])
+internal = [p for p in Path('/run/sandbox-x11').iterdir() if p.is_socket()]
+assert internal
+for path in internal:
+    try:
+        with socket.socket(socket.AF_UNIX) as bypass:
+            bypass.connect(str(path))
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('satellite internal Wayland socket is accessible')
+x = ctypes.CDLL('libX11.so.6')
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+d = x.XOpenDisplay(None)
+assert d
+x.XDefaultRootWindow.restype = ctypes.c_ulong
+x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+root = x.XDefaultRootWindow(d)
+x.XCreateSimpleWindow.restype = ctypes.c_ulong
+x.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_ulong]
+for name in ('XMapWindow', 'XDestroyWindow'):
+    getattr(x, name).argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+windows = [x.XCreateSimpleWindow(d, root, 0, 0, 320, 240, 0, 0, 0) for _ in range(2)]
+for w in windows:
+    x.XMapWindow(d, w)
+x.XSync(d, 0)
+time.sleep(0.1)
+for w in windows:
+    x.XDestroyWindow(d, w)
+    x.XSync(d, 0)
+    time.sleep(0.1)
+x.XCloseDisplay(d)
+print('X11 windows closed independently; desktop Wayland works; satellite socket denied')
+''')
+        result = self.cli("--wayland-x11", "--x11-backend", "satellite", "--proton=" + str(proton),
+                          self.game, "/game/play.exe")
+        self.assertIn("X11 windows closed independently; desktop Wayland works; satellite socket denied", result.stdout)
+
     def test_split_mode_rejects_incompatible_display_options(self):
         for options, message in ((["--wayland-x11"], "needs --proton"),
+                                 (["--x11-backend=satellite"], "needs --wayland-x11"),
+                                 (["--x11-backend=unknown"], "must be gamescope or satellite"),
+                                 (["--x11-backend", "--proton"], "needs gamescope or satellite"),
+                                 (["--wayland-x11", "--proton", "--x11-backend=satellite", "--gamescope=-f"],
+                                  "arguments cannot be used"),
                                  (["--x11-exe=Launcher.exe"], "needs --wayland-x11"),
                                  (["--proton", "--wayland-x11", "--headless"], "--headless cannot"),
                                  (["--proton", "--wayland-x11", "--host-x11"], "--host-x11 cannot")):

@@ -14,6 +14,19 @@ Preferences = MODULE["Preferences"]
 
 
 class PreferencePolicyTests(unittest.TestCase):
+    def test_satellite_backend_round_trip_and_gamescope_controls(self):
+        state = Preferences({"engine": "proton", "values": {
+            "wayland": "1", "wayland_x11": "1", "x11_backend": "satellite",
+            "gamescope_args": "-W 1920 -H 1080 -f"}})
+        self.assertFalse(state.uses_gamescope)
+        self.assertEqual(state.result()["x11_backend"], "satellite")
+        self.assertNotIn("gamescope_resolution", state.result())
+        state.values["x11_backend"] = "gamescope"
+        self.assertTrue(state.uses_gamescope)
+        self.assertEqual(state.result()["gamescope_resolution"], "1920x1080")
+        state.display = "wayland"
+        self.assertNotIn("x11_backend", state.result())
+
     def test_split_display_round_trip_and_runtime_switch(self):
         state = Preferences({"engine": "proton", "values": {
             "wayland": "1", "wayland_x11": "1", "gamescope": "1", "x11_exe": "Launcher.exe"}})
@@ -276,6 +289,12 @@ class GtkDialogTests(unittest.TestCase):
         dialog.widgets["display"].set_selected(index)
         self.assertTrue(dialog.rows["x11_exe"].get_visible())
         self.assertTrue(dialog.split_note.get_visible())
+        self.assertTrue(dialog.rows["x11_backend"].get_visible())
+        dialog.widgets["x11_backend"].set_selected(1)
+        self.assertFalse(dialog.rows["resolution"].get_visible())
+        self.assertFalse(dialog.rows["fullscreen"].get_visible())
+        self.assertEqual(dialog.state.result()["x11_backend"], "satellite")
+        dialog.widgets["x11_backend"].set_selected(0)
         # gamescope stays windowed in split display; its resolution still applies.
         self.assertTrue(dialog.rows["resolution"].get_visible())
         self.assertFalse(dialog.rows["fullscreen"].get_visible())
