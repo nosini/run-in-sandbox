@@ -110,6 +110,11 @@ when its build tools are there. Missing tools are skipped and named
 settings and games are not used. Logs and `summary.txt` stay in
 `.gpu-check/DATE` in the checkout.
 
+Results on an RX 9070 XT desktop (Mesa 26.2.5, gamescope 3.16.31): under
+the systemd backend the game had the helper's render node copy, and Vulkan,
+`vkcube` in a window and in nested gamescope, and Xwayland's OpenGL all ran
+on the GPU, the same as under the default backend.
+
 ## Boot ordering
 
 Use a dedicated VM or agree a reboot window with everyone using a shared VM.

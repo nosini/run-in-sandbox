@@ -296,6 +296,17 @@ per-game SELinux policy or relabeling step.
      fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
      Xwayland, a native game and a Proton game. Check whether card-node metadata
      access needed by gamescope requires additional handling.
+   - On the user's desktop (2026-11-07; RX 9070 XT, Mesa 26.2.5, gamescope
+     3.16.31, systemd 261.4; `desktop-gpu-check.sh`): under `systemd` the game
+     had the helper's copy of renderD128 (yours, 0600) and the capture was
+     marked; `vulkaninfo` lists the RX 9070 XT (RADV) first; `vkcube` drew 300
+     frames on it in a desktop window and inside nested gamescope, which
+     selected it too; glxinfo in gamescope's Xwayland reports radeonsi.
+     Identical to `0`, gamescope's PipeWire/"Compositor released us" errors
+     included. So nested gamescope needs no extra card-node handling.
+     Window presentation to the compositor and to gamescope went through
+     DMA-BUF implicitly; not checked on its own. Still open: EGL directly
+     (no mesa-demos there), and a real native and Proton game.
    - gamescope on the VM (2026-11-07, 3.16.31 nested in GNOME): under `0` and
      `systemd` alike it selects llvmpipe, then aborts on `vkAllocateMemory`
      (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) before any window; unsandboxed
