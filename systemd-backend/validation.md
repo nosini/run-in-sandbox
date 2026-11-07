@@ -90,6 +90,26 @@ on real GPUs is not exercised there. Those require their own workloads and rende
 evidence. Physical hotplug tests need disposable hardware without disrupting
 another user.
 
+## On a desktop with a GPU
+
+[`desktop-gpu-check.sh`](desktop-gpu-check.sh) runs the graphics checks on
+an ordinary openSUSE Tumbleweed desktop, in its Wayland session, with no
+games running:
+
+```sh
+systemd-backend/desktop-gpu-check.sh
+```
+
+It installs the administrator setup with sudo and removes it again at the
+end (keeping one that was there before, or with `--keep-setup`). Then it
+runs `vulkaninfo`, `eglinfo`, `vkcube` in a window and inside gamescope, and
+`glxinfo` in gamescope's Xwayland, as throwaway games under
+`SANDBOX_SEPARATE_UID=0` and `systemd`, and the hardware-only media probe
+when its build tools are there. Missing tools are skipped and named
+(`vulkan-tools`, `mesa-demos`, `gamescope`). Your per-user installation,
+settings and games are not used. Logs and `summary.txt` stay in
+`.gpu-check/DATE` in the checkout.
+
 ## Boot ordering
 
 Use a dedicated VM or agree a reboot window with everyone using a shared VM.

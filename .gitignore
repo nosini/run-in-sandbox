@@ -11,3 +11,6 @@ __pycache__/
 
 # DWProton runner fix for NIKKE's store, kept in its own repository.
 dwproton-nikke-split/
+
+# Results of systemd-backend/desktop-gpu-check.sh.
+.gpu-check/
