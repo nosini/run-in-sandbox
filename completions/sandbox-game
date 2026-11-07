@@ -98,7 +98,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;

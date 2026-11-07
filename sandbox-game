@@ -682,8 +682,9 @@ Examples
   sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 
 Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBOX_TOOLS_DIR,
-SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, SANDBOX_SEPARATE_UID=1, MANGOHUD=1. Sound is playback only once
-`install.sh --restrict-audio` has set that up. More in the README.
+SANDBOX_SECCOMP=log, SANDBOX_GPU_CARD=1, SANDBOX_SEPARATE_UID=1, SANDBOX_X11_TIMEOUT=SECONDS,
+MANGOHUD=1. Sound is playback only once `install.sh --restrict-audio` has set that up.
+More in the README.
 EOF
 }
 
@@ -698,7 +699,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
 WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; HIDE_TRAY=0; MAC_VENDOR=0
-WAYLAND_X11=0; X11_EXE=""; HDR=0; X11_BACKEND=gamescope; X11_BACKEND_SET=0
+WAYLAND_X11=0; X11_EXE=""; HDR=0; X11_BACKEND=gamescope; X11_BACKEND_SET=0; GS_SET=0
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
@@ -719,8 +720,8 @@ while [ "$#" -gt 0 ]; do
         --net)       NET=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
         --hdr)       HDR=1; shift ;;
-        --gamescope) GS=1; shift ;;
-        --gamescope=*) GS=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
+        --gamescope) GS=1; GS_SET=1; shift ;;
+        --gamescope=*) GS=1; GS_SET=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
         --list-proton) list_protons; exit 0 ;;
         -h|--help)   usage; exit 0 ;;
@@ -768,8 +769,8 @@ case "$X11_BACKEND" in gamescope|satellite) ;; *)
     echo "--x11-backend must be gamescope or satellite" >&2; exit 1 ;; esac
 [ "$X11_BACKEND_SET" = 0 ] || [ "$WAYLAND_X11" = 1 ] || {
     echo "--x11-backend needs --wayland-x11" >&2; exit 1; }
-[ "$X11_BACKEND" != satellite ] || [ "${#GS_ARGS[@]}" = 0 ] || {
-    echo "--gamescope arguments cannot be used with --x11-backend=satellite" >&2; exit 1; }
+[ "$X11_BACKEND" != satellite ] || [ "$GS_SET" = 0 ] || {
+    echo "--gamescope cannot be used with --x11-backend=satellite" >&2; exit 1; }
 [ "$WAYLAND_X11" = 0 ] || [ -n "$PROTON_SPEC" ] || {
     echo "--wayland-x11 needs --proton and a runner with per-process graphics selection" >&2; exit 1; }
 # Split display is private X11 with the desktop's Wayland for the game, set
@@ -887,6 +888,11 @@ elif [ "$WAYLAND" = 0 ] && [ "$HOST_X11" = 0 ]; then
 fi
 [ "$HOST_X11" = 0 ] || { [ "$GS" = 0 ] && [ "$WAYLAND" = 0 ]; } || {
     echo "--host-x11 cannot be combined with --gamescope or --wayland" >&2; exit 1; }
+# OUTER_DISPLAY=1: a private display server runs in the outer Landlock domain,
+# the game in one of its own inside it (see "landlock"). From here on GS=1
+# means that server is gamescope; split display's satellite takes its place.
+OUTER_DISPLAY="$GS"
+[ "$X11_BACKEND" != satellite ] || GS=0
 if [ "$HDR" = 1 ] && [ "$HOST_X11" = 1 ]; then
     echo "sandbox-game: note: X11 has no HDR; --hdr does nothing with --host-x11" >&2
     HDR=0
@@ -1673,7 +1679,7 @@ if [ "$MHUD" = 1 ]; then
     if [ -d "$CFG" ]; then
         MANGOHUD_ARGS=( --ro-bind "$CFG" "$HOME/.config/MangoHud" )
     fi
-    if [ "$WAYLAND_X11" = 1 ] && [ "$X11_BACKEND" = gamescope ]; then
+    if [ "$WAYLAND_X11" = 1 ] && [ "$GS" = 1 ]; then
         # MangoHud checks X11 shortcuts even for a Wayland surface, keeping
         # DISPLAY open inside the game. Closing gamescope then makes Xlib
         # terminate that game. Empty bindings skip those checks; read_cfg
@@ -1832,7 +1838,7 @@ print(max(m["x"] + m["w"] for m in monitors) - min(m["x"] for m in monitors),
       max(m["y"] + m["h"] for m in monitors) - min(m["y"] for m in monitors))
 EOF
 
-if [ "$GS" = 1 ] && [ "$X11_BACKEND" = gamescope ]; then
+if [ "$GS" = 1 ]; then
     command -v gamescope >/dev/null || {
         echo "gamescope not found (openSUSE: zypper in gamescope)" >&2; exit 1; }
     # The desktop's Wayland socket is gamescope's alone: it is mounted where
@@ -1911,18 +1917,25 @@ if [ "$X11_BACKEND" = satellite ]; then
     SATELLITE_BIN="$(helper sandbox-xwayland-satellite)"
     if [ -n "$SATELLITE_BIN" ]; then
         [ -x "$SATELLITE_BIN" ] || { echo "satellite helper is not executable: $SATELLITE_BIN" >&2; exit 1; }
-        SATELLITE_ARGS=( --ro-bind "$SATELLITE_BIN" /run/sandbox-xwayland-satellite )
-        SATELLITE_BIN=/run/sandbox-xwayland-satellite
         echo "sandbox-game: using the private satellite build with popup lifetime fixes" >&2
     else
-        command -v xwayland-satellite >/dev/null || {
+        SATELLITE_BIN="$(command -v xwayland-satellite)" || {
             echo "satellite backend needs xwayland-satellite (or ./build-satellite.sh)" >&2; exit 1; }
-        SATELLITE_BIN=xwayland-satellite
     fi
-    command -v Xwayland >/dev/null || {
+    XWAYLAND_BIN="$(command -v Xwayland)" || {
         echo "satellite backend needs xwayland-satellite and Xwayland" >&2; exit 1; }
+    # Found on the host's PATH, which the sandbox does not share -- ~/.cargo/bin
+    # or /usr/local/bin may not even be mounted -- so both go in by absolute
+    # path, in a folder of their own. Satellite runs Xwayland by name.
+    SATELLITE_ARGS=( --ro-bind "$SATELLITE_BIN" /run/sandbox-x11-bin/xwayland-satellite
+                     --ro-bind "$XWAYLAND_BIN" /run/sandbox-x11-bin/Xwayland )
+    # How long Xwayland may take to answer before the launch is given up.
+    X11_TIMEOUT="${SANDBOX_X11_TIMEOUT:-30}"
+    [[ "$X11_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || {
+        echo "SANDBOX_X11_TIMEOUT must be a whole number of seconds" >&2; exit 1; }
     GS_CMD=( env WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR=/run/sandbox-x11
-             "$SATELLITE_BIN" :0 -nolisten tcp )
+             PATH="/run/sandbox-x11-bin:$SANDBOX_PATH"
+             /run/sandbox-x11-bin/xwayland-satellite :0 -nolisten tcp )
 fi
 
 # ---- environment, display and devices --------------------------------------
@@ -1961,7 +1974,7 @@ if [ "$HEADLESS" = 0 ]; then
         for device in /dev/dri/renderD*; do
             [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
         done
-        if [ "$GS" = 1 ] && [ "$X11_BACKEND" = gamescope ]; then
+        if [ "$GS" = 1 ]; then
             for device in /dev/dri/card*; do
                 [ ! -c "$device" ] || DEVICE_ARGS+=( --dev-bind "$device" "$device" )
             done
@@ -1989,8 +2002,9 @@ if [ "$HEADLESS" = 0 ]; then
             echo "Wayland socket not found: $WL_HOST; use --headless or explicitly opt into --host-x11" >&2
             exit 1
         }
-        if [ "$GS" = 1 ]; then
-            # Nested: the desktop's compositor is gamescope's business alone.
+        if [ "$OUTER_DISPLAY" = 1 ]; then
+            # Nested: the desktop's compositor is the private server's
+            # business alone -- gamescope's, or satellite's in split display.
             # Its socket goes in away from the runtime dir, where the game's
             # Landlock layer, which grants connecting to sockets only where
             # the game may write, grants nothing; and only gamescope's
@@ -2550,7 +2564,7 @@ elif [ "$SEPARATE_UID" = systemd ]; then
                                 NO_GPU=1
                             fi
                         done
-                        if [ "$GS" = 1 ] && [ "$X11_BACKEND" = gamescope ]; then
+                        if [ "$GS" = 1 ]; then
                             for device in /dev/dri/card*; do
                                 [ ! -c "$device" ] || GPU_ARGS+=( --dev-bind "$device" "$device" )
                             done
@@ -2696,7 +2710,7 @@ done
 # remove that socket nor put one of its own in its place.
 BWRAP+=( --ro-bind "$LANDLOCK" /run/sandbox-landlock --perms 0700 --dir /run/sandbox-attach )
 [ "$X11_BACKEND" != satellite ] || BWRAP+=( --perms 0700 --dir /run/sandbox-x11 )
-if [ "$GS" = 1 ]; then
+if [ "$OUTER_DISPLAY" = 1 ]; then
     # The private display server in the outer domain, the game inside it:
     # Landlock then keeps the game from connecting to the desktop's socket,
     # and from reaching into gamescope -- ptrace, /proc/PID/fd, pidfd_getfd --
@@ -2705,15 +2719,17 @@ if [ "$GS" = 1 ]; then
     # sandbox-landlock to make the socket there before restricting itself.
     INNER_DISPLAY_RULES=(); INNER_DISPLAY_ENV=(); GS_START=( -- "${GS_CMD[@]}" -- )
     if [ "$WAYLAND_X11" = 1 ]; then
-        # The game draws on the desktop, so gamescope goes beside it, not
-        # above: closing gamescope's window would end the game with it. The
-        # outer sandbox-landlock starts gamescope whenever an X11 program
-        # connects and none is running, again after that window was closed.
-        GS_START=( --gamescope-on-demand -- "${GS_CMD[@]}" -- )
+        # The game draws on the desktop, so the X11 server goes beside it,
+        # not above: closing gamescope's window would end the game with it.
         if [ "$X11_BACKEND" = satellite ]; then
             # Only the outer domain may create or connect to satellite's
             # internal Wayland socket. X11 clients get its private X socket.
-            GS_START=( --rw /run/sandbox-x11 --x11-server -- "${GS_CMD[@]}" -- )
+            GS_START=( --rw /run/sandbox-x11 "--x11-server=$X11_TIMEOUT" -- "${GS_CMD[@]}" -- )
+        else
+            # The outer sandbox-landlock starts gamescope whenever an X11
+            # program connects and none is running, again after that window
+            # was closed.
+            GS_START=( --gamescope-on-demand -- "${GS_CMD[@]}" -- )
         fi
         # This explicit mode grants the same desktop compositor access as
         # --wayland. Only X11 windows go through the private server. The sandbox's

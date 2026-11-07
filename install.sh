@@ -173,8 +173,17 @@ if [ -n "$SYSTEMD_MODE" ]; then
     python3 -I "$SRC/systemd-backend/install-systemd.py" "$SYSTEMD_MODE" "$@"
     exit
 fi
-each install_one
+# The private satellite build travels with its licence; checked before
+# anything is installed, so a missing one stops nothing halfway.
+SATELLITE=0
 if [ -x "$SRC/sandbox-xwayland-satellite" ]; then
+    [ -f "$SRC/satellite-LICENSE" ] || {
+        echo "sandbox-xwayland-satellite needs satellite-LICENSE beside it; rerun ./build-satellite.sh" >&2
+        exit 1; }
+    SATELLITE=1
+fi
+each install_one
+if [ "$SATELLITE" = 1 ]; then
     install_one 755 sandbox-xwayland-satellite "$HELPERS"
     install -Dm644 "$SRC/satellite-LICENSE" "$HELPERS/satellite-LICENSE"
 fi

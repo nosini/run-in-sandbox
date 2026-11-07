@@ -2434,11 +2434,20 @@ sys.exit(int(sys.argv[2]))
                                   "--proton=" + str(proton))
         self.assertNotIn("gamescope", args)
         self.assertNotIn("--gamescope-on-demand", args)
-        self.assertIn("--x11-server", args)
+        self.assertIn("--x11-server=30", args)
         self.assertIn("XDG_RUNTIME_DIR=/run/sandbox-x11", args)
         server = next(i for i in range(len(args) - 3)
                       if args[i + 1:i + 4] == [":0", "-nolisten", "tcp"])
-        self.assertIn(args[server], ("xwayland-satellite", "/run/sandbox-xwayland-satellite"))
+        self.assertEqual(args[server], "/run/sandbox-x11-bin/xwayland-satellite")
+        # Found on the host's PATH, outside the sandbox's own: mounted by
+        # absolute path, with satellite looking up Xwayland beside itself.
+        self.assertIn("PATH=/run/sandbox-x11-bin:/usr/bin:/bin", args)
+        mounts = list(zip(args, args[1:], args[2:]))
+        if not (ROOT / "sandbox-xwayland-satellite").exists():
+            self.assertIn(("--ro-bind", str(self.base / "bin" / "xwayland-satellite"),
+                           "/run/sandbox-x11-bin/xwayland-satellite"), mounts)
+        self.assertIn(("--ro-bind", str(self.base / "bin" / "Xwayland"),
+                       "/run/sandbox-x11-bin/Xwayland"), mounts)
         starts = [i for i, a in enumerate(args)
                   if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"]]
         outer, inner = [args[i + 1:args.index("--", i)] for i in starts]
@@ -2470,9 +2479,18 @@ sys.exit(int(sys.argv[2]))
         args = self.recorded_args("--wayland-x11", "--x11-backend=satellite", "--proton=" + str(proton))
         mounted = args.index(str(expected))
         self.assertEqual(args[mounted - 1:mounted + 2],
-                         ["--ro-bind", str(expected), "/run/sandbox-xwayland-satellite"])
-        server = args.index("--x11-server")
-        self.assertIn("/run/sandbox-xwayland-satellite", args[server:])
+                         ["--ro-bind", str(expected), "/run/sandbox-x11-bin/xwayland-satellite"])
+        server = args.index("--x11-server=30")
+        self.assertIn("/run/sandbox-x11-bin/xwayland-satellite", args[server:])
+
+        self.env["SANDBOX_X11_TIMEOUT"] = "90"
+        args = self.recorded_args("--wayland-x11", "--x11-backend=satellite", "--proton=" + str(proton))
+        self.assertIn("--x11-server=90", args)
+        self.env["SANDBOX_X11_TIMEOUT"] = "soon"
+        result = self.cli("--wayland-x11", "--x11-backend=satellite", "--proton=" + str(proton),
+                          self.game, "play.exe", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SANDBOX_X11_TIMEOUT must be", result.stderr)
 
     @unittest.skipUnless(os.environ.get("TEST_SATELLITE") == "1", "set TEST_SATELLITE=1 for real satellite/Weston")
     def test_live_satellite_windows_and_internal_socket_isolation(self):
@@ -2553,7 +2571,9 @@ print('X11 windows closed independently; desktop Wayland works; satellite socket
                                  (["--x11-backend=unknown"], "must be gamescope or satellite"),
                                  (["--x11-backend", "--proton"], "needs gamescope or satellite"),
                                  (["--wayland-x11", "--proton", "--x11-backend=satellite", "--gamescope=-f"],
-                                  "arguments cannot be used"),
+                                  "--gamescope cannot be used"),
+                                 (["--wayland-x11", "--proton", "--x11-backend=satellite", "--gamescope"],
+                                  "--gamescope cannot be used"),
                                  (["--x11-exe=Launcher.exe"], "needs --wayland-x11"),
                                  (["--proton", "--wayland-x11", "--headless"], "--headless cannot"),
                                  (["--proton", "--wayland-x11", "--host-x11"], "--host-x11 cannot")):

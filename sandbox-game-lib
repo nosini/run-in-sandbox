@@ -397,14 +397,13 @@ pref_flags() {
     fi
     # The X11 choice is stored as gamescope=0, wayland=0: X11 always runs in
     # gamescope, so its resolution and fullscreen apply there too. Split
-    # display selects its backend independently of the gamescope key.
+    # display runs gamescope when it is the X11 backend, whatever the
+    # gamescope key says.
     if [ "$host_x11" != 1 ]; then
         if [ "$WL" = 0 ]; then gs=1
-        elif [ "$split" = 1 ]; then gs="$PROTON"
+        elif [ "$split" = 1 ]; then
+            if [ "$PROTON" = 1 ] && [ "$x11_backend" = gamescope ]; then gs=1; fi
         else gs="$(cfg_get gamescope 0)"; fi
-    fi
-    if [ "$split" = 1 ] && [ "$PROTON" = 1 ] && [ "$x11_backend" = satellite ]; then
-        gs=0
     fi
     if [ "$gs" = 1 ]; then
         # Empty means gamescope's own defaults.

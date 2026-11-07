@@ -15,8 +15,9 @@ Building needs Git, Cargo and Rust, Clang, pkg-config, and the development
 packages for XCB and xcb-util-cursor. Xwayland is required at runtime.
 Build on the machine where it will run, or with compatible libraries.
 
-The script clones the fork's default branch from GitHub, builds its locked
-release dependencies, and writes `sandbox-xwayland-satellite` and
+The script fetches the reviewed fork commit pinned in `build-satellite.sh`
+from GitHub, checks that it got that commit, builds its locked release
+dependencies, and writes `sandbox-xwayland-satellite` and
 `satellite-LICENSE` beside the launcher. Build output stays in
 `.satellite-build/`; `SATELLITE_BUILD_DIR` selects another build directory.
 These generated files are not tracked by Git.

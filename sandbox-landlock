@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """sandbox-landlock [--rw PATH | --ro PATH | --ls PATH | --unix-connect PATH]...
                  [--unix-connect-where-writable] [--no-abstract-scope]
-                 [--attach DIR | --gamescope-on-demand | --x11-server] -- CMD...
+                 [--attach DIR | --gamescope-on-demand | --x11-server[=SECONDS]] -- CMD...
    sandbox-landlock --abi     print the kernel's Landlock ABI version, 0 for none
    sandbox-landlock --has-unix-connect   exit 0 if the kernel can restrict
                                          connecting to Unix sockets by path
@@ -69,9 +69,10 @@ On a kernel without Landlock the command runs anyway, with a warning, the way
 sandbox-game carries on without a systemd scope: it is defence in depth, and
 everything else still stands. Any other failure stops the launch.
 
---x11-server: CMD is satellite's command, then --, then the inner game
-command. Start a private X server beside the game, waiting for X11 setup
-before the game starts, and keep it until the game ends. The caller gives
+--x11-server[=SECONDS]: CMD is satellite's command, then --, then the inner
+game command. Start a private X server beside the game, waiting up to SECONDS
+(30 unless given) for X11 setup before the game starts, and keep it until the
+game ends. The caller gives
 only this outer domain write access to its internal Wayland runtime directory.
 Closing application windows leaves the server running; server failure ends
 the launch. Unlike --gamescope-on-demand, no X11 connections are proxied.
@@ -112,7 +113,6 @@ import signal
 import socket
 import stat
 import struct
-import subprocess
 import sys
 import termios
 import time
@@ -276,6 +276,50 @@ def finish(status):
     os._exit(os.waitstatus_to_exitcode(status))
 
 
+def terminate(pids, groups=False, grace=3):
+    """SIGTERM to PIDS, this process's children -- with GROUPS, to the process
+    groups they lead, whatever is left of one once its leader has ended -- and
+    SIGKILL to what is still there after GRACE seconds. Reaps PIDS."""
+    send = os.killpg if groups else os.kill
+
+    def left(pids):
+        alive = []
+        for pid in pids:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == 0:
+                    alive.append(pid)
+                    continue
+            except ChildProcessError:
+                pass                    # reaped already: never signalled again
+            if groups:
+                try:
+                    os.killpg(pid, 0)
+                    alive.append(pid)
+                except ProcessLookupError:
+                    pass
+        return alive
+
+    def deliver(sig, pids):
+        for pid in pids:
+            try:
+                send(pid, sig)
+            except ProcessLookupError:
+                pass
+
+    pids = left(pids)
+    deliver(signal.SIGTERM, pids)
+    deadline = time.monotonic() + grace
+    while pids and time.monotonic() < deadline:
+        time.sleep(0.05)
+        pids = left(pids)
+    deliver(signal.SIGKILL, pids)
+    for pid in pids:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
 def serve(listener, game):
     def forward(sig, _frame):
         try:
@@ -344,7 +388,7 @@ def serve(listener, game):
 
 
 X11_DIR = "/tmp/.X11-unix"
-X11_START_TIMEOUT = 10
+X11_START_TIMEOUT = 30                  # seconds, unless --x11-server=SECONDS
 CHUNK = 1 << 16
 MAX_FDS = 64                            # XCB passes at most 16 with a request
 
@@ -573,15 +617,8 @@ class OnDemand:
             self.served = True
 
     def stop(self):
-        if self.pid is None:
-            return
-        try:
-            os.kill(self.pid, signal.SIGTERM)
-            if not select.select([self.pidfd], [], [], 3)[0]:
-                os.kill(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os.waitpid(self.pid, 0)
+        if self.pid is not None:
+            terminate([self.pid])
 
     def serve(self, game):
         def forward(sig, _frame):
@@ -625,7 +662,56 @@ def beside_gamescope(cmd):
     OnDemand(listener, gamescope).serve(game)
 
 
-def beside_x11_server(cmd):
+def spawn(cmd, env=()):
+    """Start CMD, with ENV added, in a session and process group of its own."""
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            os.environ.update(env)
+            execute(cmd)
+        except OSError as e:
+            print(f"sandbox-landlock: {cmd[0]}: {e.strerror}", file=sys.stderr)
+        os._exit(127)
+    return pid
+
+
+def x11_ready(path):
+    """Whether the X server at PATH has answered X11 setup; False while it
+    is not up yet. Exits with the server's reason when it refuses."""
+    def receive(sock, size):
+        data = b""
+        while len(data) < size:
+            part = sock.recv(size - len(data))
+            if not part:
+                break
+            data += part
+        return data
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC) as probe:
+            probe.settimeout(0.5)
+            probe.connect(path)
+            # Little endian X11 setup, version 11, no authorization:
+            # only this sandbox can reach the server's namespace.
+            probe.sendall(struct.pack("<BBHHHHH", ord("l"), 0, 11, 0, 0, 0, 0))
+            header = receive(probe, 8)
+            if len(header) < 8:
+                return False
+            if header[0] == 1:          # Success
+                return True
+            # Failed (0) or Authenticate (2): a reason follows, the rest of
+            # the reply in 4-byte units; Failed gives its length in byte 1.
+            reason = receive(probe, struct.unpack_from("<H", header, 6)[0] * 4)
+    except OSError:
+        return False
+    if header[0] == 0:
+        reason = reason[:header[1]]
+    reason = reason.rstrip(b"\0").decode(errors="replace").strip() or "no reason given"
+    sys.exit(f"sandbox-landlock: private X11 server refused the connection: {reason}")
+
+
+def beside_x11_server(cmd, timeout):
     """Keep a private satellite/Xwayland beside the game until it exits.
 
     CMD is the server, --, then the inner Landlock/game command. The server
@@ -633,86 +719,60 @@ def beside_x11_server(cmd):
     Its runtime directory is writable only in this outer Landlock domain.
     Wait for an X11 setup reply before giving the game access to the display.
     A server failure ends the sandbox rather than restarting Wine's display.
+    Does not return.
     """
     if "--" not in cmd or cmd.index("--") in (0, len(cmd) - 1):
         sys.exit(__doc__.split("\n\n")[0])
     split = cmd.index("--")
-    server = game = None
+    game = game_fd = None
+    caught = []                         # signals that came before the game
 
-    def stop(process):
-        if process is None:
-            return
-        # Include Xwayland, even when satellite has already exited.
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-
+    # To the game alone, which is its own inner starter: that one passes
+    # signals on in turn, so its process group would get each twice. By its
+    # pidfd, which stays the game's even once it has been reaped. Never
+    # raises, so no signal can leave a process started or unstopped.
     def forward(sig, _frame):
-        if game is None:
-            raise SystemExit(128 + sig)
+        if game_fd is None:
+            caught.append(sig)
+            return
         try:
-            os.killpg(game.pid, sig)
+            signal.pidfd_send_signal(game_fd, sig)
         except ProcessLookupError:
             pass
 
     for sig in FORWARDED:
         signal.signal(sig, forward)
+    # Each in a process group of its own, so that stopping one takes in what
+    # it started too: satellite's Xwayland, the game's wineserver.
+    server = spawn(cmd[:split])
     try:
-        server = subprocess.Popen(cmd[:split], start_new_session=True)
-        deadline = time.monotonic() + X11_START_TIMEOUT
-        while True:
-            if server.poll() is not None:
-                sys.exit(f"sandbox-landlock: private X11 server ended with status {server.returncode}")
+        deadline = time.monotonic() + timeout
+        while not x11_ready(f"{X11_DIR}/X0"):
+            if caught:
+                sys.exit(128 + caught[0])
+            pid, status = os.waitpid(server, os.WNOHANG)
+            if pid:
+                sys.exit("sandbox-landlock: private X11 server ended with status"
+                         f" {os.waitstatus_to_exitcode(status)}")
             if time.monotonic() >= deadline:
-                sys.exit(f"sandbox-landlock: private X11 server did not become ready within {X11_START_TIMEOUT:g} seconds")
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                    probe.settimeout(0.1)
-                    probe.connect(f"{X11_DIR}/X0")
-                    # Little endian X11 setup, version 11, no authorization:
-                    # only this sandbox can reach the server's namespace.
-                    probe.sendall(struct.pack("<BBHHHHH", ord("l"), 0, 11, 0, 0, 0, 0))
-                    header = b""
-                    while len(header) < 8:
-                        part = probe.recv(8 - len(header))
-                        if not part:
-                            break
-                        header += part
-                    if len(header) == 8 and header[0] == 1:
-                        break
-            except OSError:
-                pass
+                sys.exit("sandbox-landlock: private X11 server did not become ready within"
+                         f" {timeout:g} seconds")
             time.sleep(0.05)
-        game = subprocess.Popen(cmd[split + 1:], env={**os.environ, "DISPLAY": ":0"},
-                                start_new_session=True)
-        with selectors.DefaultSelector() as sel:
-            for process in (server, game):
-                sel.register(os.pidfd_open(process.pid), selectors.EVENT_READ, process)
-            try:
-                while True:
-                    for key, _ in sel.select():
-                        if key.data is game:
-                            rc = game.wait()
-                            sys.exit(rc if rc >= 0 else 128 - rc)
-                        sys.exit(f"sandbox-landlock: private X11 server ended with status {server.wait()}")
-            finally:
-                for key in list(sel.get_map().values()):
-                    os.close(key.fd)
+        game = spawn(cmd[split + 1:], {"DISPLAY": ":0"})
+        game_fd = os.pidfd_open(game)
+        for sig in caught:              # came while it was being started
+            forward(sig, None)
+        server_fd = os.pidfd_open(server)
+        if game_fd in select.select([game_fd, server_fd], [], [])[0]:
+            status = os.waitpid(game, 0)[1]
+            terminate([game, server], groups=True)
+            finish(status)
+        status = os.waitstatus_to_exitcode(os.waitpid(server, 0)[1])
+        sys.exit(f"sandbox-landlock: private X11 server ended with status {status}")
     except OSError as e:
         sys.exit(f"sandbox-landlock: private X11 server: {e}")
     finally:
-        stop(game)
-        stop(server)
+        terminate([pid for pid in (game, server) if pid is not None], groups=True)
 
 
 def main():
@@ -734,10 +794,13 @@ def main():
         os.close(fd)
     if args == ["--has-unix-connect"]:  # for sandbox-game --check
         sys.exit(0 if has_unix else 1)
-    rules, unix, abstract, attach_dir, on_demand, x11_server = [], False, True, None, False, False
+    rules, unix, abstract, attach_dir, on_demand, x11_server = [], False, True, None, False, None
     while args and args[0] != "--":
-        if args[0] == "--x11-server":
-            x11_server = True
+        if args[0] == "--x11-server" or args[0].startswith("--x11-server="):
+            seconds = args[0].partition("=")[2] or str(X11_START_TIMEOUT)
+            if not re.fullmatch(r"[1-9][0-9]{0,3}", seconds):
+                sys.exit(__doc__.split("\n\n")[0])
+            x11_server = int(seconds)
             args = args[1:]
             continue
         if args[0] == "--gamescope-on-demand":
@@ -758,9 +821,13 @@ def main():
         rules.append((args[0], args[1]))
         args = args[2:]
     cmd = args[1:]
-    if not cmd or sum((on_demand, x11_server, attach_dir is not None)) > 1:
+    if not cmd or sum((on_demand, x11_server is not None, attach_dir is not None)) > 1:
         sys.exit(__doc__.split("\n\n")[0])
-    run = beside_x11_server if x11_server else beside_gamescope if on_demand else execute
+    if x11_server is not None:
+        def run(cmd):
+            beside_x11_server(cmd, x11_server)
+    else:
+        run = beside_gamescope if on_demand else execute
 
     # Made while this process can still create it there.
     listener = listen(attach_dir) if attach_dir else None

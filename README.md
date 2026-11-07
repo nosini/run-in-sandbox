@@ -435,13 +435,18 @@ sandbox-game --proton=DWProton --wayland-x11 --x11-exe=Launcher.exe ~/Games/Exam
 For separate launcher windows on the desktop, choose **Satellite** in
 **Private X11 backend**, or add `--x11-backend=satellite` to that command.
 This optional backend requires `xwayland-satellite` and `Xwayland` on the host.
+They are taken from your `PATH`, `~/.cargo/bin` included, and mounted into
+the sandbox read-only.
 It starts a private X server for this sandbox and keeps it running until the
 game exits. Closing a launcher window leaves that server and the game running;
-if the server fails, the launch ends. Gamescope remains the default.
+if the server fails, the launch ends. The game starts once Xwayland answers,
+within 30 seconds; set `SANDBOX_X11_TIMEOUT` to a number of seconds on a
+slower machine. Gamescope remains the default.
 
 Satellite uses the desktop's window management and scaling. Gamescope's
 resolution and fullscreen settings do not apply; saved arguments are kept for
-switching back. Explicit `--gamescope=ARGS` is rejected with satellite.
+switching back. Explicit `--gamescope` or `--gamescope=ARGS` is rejected
+with satellite.
 Satellite's window positioning and Wine scaling can differ from gamescope;
 test launcher popups and mixed Wayland/X11 coordinates with your runner.
 If launcher popups crash satellite with `destroyed popup not top most popup`,
@@ -985,8 +990,8 @@ settings and the selected display variables. Tokens, session-bus addresses and
 loader overrides are not inherited; pass necessary game-specific settings with
 `--env KEY=VALUE`. Variables read on the host still work: the runtime
 discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
-`SANDBOX_SECCOMP` and `SANDBOX_GPU_CARD`, and `MANGOHUD=1` still selects the
-overlay.
+`SANDBOX_SECCOMP`, `SANDBOX_GPU_CARD` and `SANDBOX_X11_TIMEOUT`, and
+`MANGOHUD=1` still selects the overlay.
 
 Under ordinary gamescope mode (the default display, and `--gamescope`) the game never
 reaches the desktop's compositor. gamescope supplies a private Xwayland
