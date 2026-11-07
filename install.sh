@@ -126,6 +126,8 @@ case "${1:-}" in
     --uninstall)
         each remove_one
         each_old remove_one
+        remove_one - sandbox-xwayland-satellite "$HELPERS"
+        remove_one - satellite-LICENSE "$HELPERS"
         rmdir "$HELPERS" 2>/dev/null || true
         each_completion remove_one
         if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
@@ -171,7 +173,20 @@ if [ -n "$SYSTEMD_MODE" ]; then
     python3 -I "$SRC/systemd-backend/install-systemd.py" "$SYSTEMD_MODE" "$@"
     exit
 fi
+# The private satellite build travels with its licence; checked before
+# anything is installed, so a missing one stops nothing halfway.
+SATELLITE=0
+if [ -x "$SRC/sandbox-xwayland-satellite" ]; then
+    [ -f "$SRC/satellite-LICENSE" ] || {
+        echo "sandbox-xwayland-satellite needs satellite-LICENSE beside it; rerun ./build-satellite.sh" >&2
+        exit 1; }
+    SATELLITE=1
+fi
 each install_one
+if [ "$SATELLITE" = 1 ]; then
+    install_one 755 sandbox-xwayland-satellite "$HELPERS"
+    install -Dm644 "$SRC/satellite-LICENSE" "$HELPERS/satellite-LICENSE"
+fi
 each_old remove_one
 each_completion install_completion
 mkdir -p "$TOOLS"

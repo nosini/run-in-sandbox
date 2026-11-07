@@ -98,7 +98,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -118,6 +118,9 @@ _sandbox_game()
     local split_here=""
     [[ ${words[cword]} == "$prev="* ]] && split_here=1
     case $prev in
+        --x11-backend)
+            COMPREPLY=($(compgen -W 'gamescope satellite' -- "$cur"))
+            return ;;
         --stop)
             COMPREPLY=($(compgen -W "$(_sandbox_game_running)" -- "$cur"))
             return ;;
@@ -154,7 +157,7 @@ _sandbox_game()
     # optional =VALUE; they are listed plain, and typing the = gets the values
     # completed.
     if [[ $cur == -* ]]; then
-        COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-exe --gamescope --host-x11 --headless
+        COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-backend --x11-exe --gamescope --host-x11 --headless
             --proton --mod-loaders --steam --hide-tray --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
             --lan --mac-vendor --hosts --add-host --hosts-writable --ro --name --env --mangohud --hdr --list --stop
             --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))

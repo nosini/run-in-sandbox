@@ -39,6 +39,25 @@ and its administrator setup; [systemd-backend/validation.md](../systemd-backend/
 describes them: the storage matrix over several filesystems, the render-copy
 lifecycle tests, the desktop GPU check and the reboot check.
 
+The optional satellite backend has an integration test using real Xwayland
+windows on a private headless Weston. It needs `weston`, `xwayland-satellite`,
+`Xwayland`, libX11 and a kernel with Landlock Unix-socket restrictions:
+
+```sh
+TEST_SATELLITE=1 python3 tests/test_security.py -v \
+  SecurityTests.test_live_satellite_windows_and_internal_socket_isolation
+```
+
+It checks window creation and closure, direct desktop Wayland access, and
+refusal of connections to satellite's internal Wayland socket through the
+actual sandbox. It does not exercise Wine, GPU rendering or desktop input.
+The supervisor's startup, failure and cleanup tests in `test_x11_server.py`
+also run without a display or bubblewrap.
+
+The satellite fork's popup lifetime regression tests and live Mutter check
+are maintained in [nosini/xwayland-satellite](https://github.com/nosini/xwayland-satellite),
+alongside the fix. The local fork checkout is `../xwayland-satellite`.
+
 ## Probes for the systemd backend
 
 [`systemd-backend/probes/`](../systemd-backend/probes/) holds standalone

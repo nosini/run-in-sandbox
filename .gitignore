@@ -11,3 +11,8 @@ __pycache__/
 
 # Results of systemd-backend/desktop-gpu-check.sh.
 .gpu-check/
+
+# Optional private satellite build and its Cargo output.
+.satellite-build/
+sandbox-xwayland-satellite
+satellite-LICENSE

@@ -145,6 +145,7 @@ class Preferences:
     def __init__(self, request):
         self.request = request
         self.values = dict(request.get("values", {}))
+        self.values["x11_backend"] = "satellite" if self.values.get("x11_backend") == "satellite" else "gamescope"
         for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
@@ -236,7 +237,8 @@ class Preferences:
 
     @property
     def uses_gamescope(self):
-        return self.display in ("x11", "wayland-gamescope", "wayland-x11")
+        return self.display in ("x11", "wayland-gamescope") or (
+            self.display == "wayland-x11" and self.values["x11_backend"] == "gamescope")
 
     def set_runtime(self, runtime):
         self.runtime = runtime
@@ -261,6 +263,7 @@ class Preferences:
         if self.proton_controls:
             if self.split_controls:
                 result["x11_exe"] = self.values.get("x11_exe", "").strip()
+                result["x11_backend"] = self.values["x11_backend"]
             for key, fallback in (("proton", "auto"), ("mod_loaders", "0"), ("steam", "0"),
                                   ("hide_tray", "0")):
                 result[key] = self.values.get(key, fallback)
@@ -444,12 +447,15 @@ class Dialog:
                           self.state.runtime, self.runtime_changed)
         self.dropdown("display", "Display", [(v, DISPLAY_CHOICES[v]) for v in self.state.displays],
                       self.state.display, self.display_changed)
+        self.dropdown("x11_backend", "Private X11 backend",
+                      [("gamescope", "Gamescope — one launcher window"),
+                       ("satellite", "Satellite — separate desktop windows")],
+                      self.state.values["x11_backend"],
+                      self.x11_backend_changed)
         self.entry("x11_exe", "X11 executable (optional)", self.state.values.get("x11_exe", ""),
                    "Launcher.exe or a Windows path fragment")
         self.split_note = Gtk.Label(xalign=0, wrap=True,
-            label="Uses the desktop's Wayland compositor for the game and gamescope's private X11 for launcher windows. "
-                  "Requires a runner with per-process graphics selection. Leave the executable blank for its built-in selection. "
-                  "Gamescope's window stays open beside the game, windowed; its resolution applies to the X11 windows.")
+            label="")
         self.split_note.add_css_class("dim-label")
         self.body.append(self.split_note)
         self.switch("mangohud", "MangoHud overlay", self.state.values.get("mangohud") == "1",
@@ -531,6 +537,11 @@ class Dialog:
             self.state.display = self.selected("display")
             self.refresh_visibility()
 
+    def x11_backend_changed(self, *_):
+        if not self.updating:
+            self.state.values["x11_backend"] = self.selected("x11_backend")
+            self.refresh_visibility()
+
     def resolution_changed(self, *_):
         self.state.resolution = self.selected("resolution")
 
@@ -554,6 +565,13 @@ class Dialog:
         self.refresh_visibility()
 
     def refresh_visibility(self):
+        self.rows["x11_backend"].set_visible(self.state.split_controls)
+        self.split_note.set_label(
+            "Uses desktop Wayland for the game and private X11 for launchers. "
+            "Requires a runner with per-process graphics selection; leave the executable blank for its built-in selection. "
+            + ("Satellite gives launchers separate desktop windows and keeps their X server alive until the game exits."
+               if self.state.values["x11_backend"] == "satellite" else
+               "Gamescope stays windowed beside the game; its resolution applies to the X11 windows."))
         self.rows["x11_exe"].set_visible(self.state.split_controls)
         self.split_note.set_visible(self.state.split_controls)
         self.rows["hdr"].set_visible(self.state.hdr_controls)
