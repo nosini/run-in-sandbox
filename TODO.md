@@ -208,8 +208,8 @@ per-game SELinux policy or relabeling step.
    - `sudo ./install.sh --systemd-backend UID...` installs the render helper,
      dedicated tmpfs mount, service, complete UID allowlist and udev rule.
      Explicit updates revoke old aliases before changing helper/configuration.
-     Ordinary per-user installs remain separate. Currently supports openSUSE
-     Tumbleweed only; other distributions need their own packaging validation.
+     Ordinary per-user installs remain separate. openSUSE Tumbleweed only;
+     other distributions are not planned (decided 2026-11-07).
    - The installer verifies managers, workers, linked shared library and vendor
      units against one unmodified source RPM build, stable 261.4 or later.
      It installs the service-wide SELinux module before socket activation,
@@ -249,10 +249,23 @@ per-game SELinux policy or relabeling step.
      closed directories remain refused. Existing permissions remain enforced;
      replacement of lower inodes with unmapped ownership can fail EOVERFLOW.
      Games needing those writes should use a caller-owned source copy.
+     Accepted as a documented limitation (2026-11-07).
    - A caller with primary GID != UID produced a read-only overlay. Setup
      and launch now reject this unsupported identity explicitly, with unit
      checks and a real mismatched-GID process verifying new/existing captures
-     stay untouched. Supporting that group layout remains open.
+     stay untouched.
+   - Why, probed 2026-11-07 with a real uid 1500/gid 100 (`users`) account:
+     mountfsd's `root` mapping maps the uid number only, for both owner and
+     group, and the kernel refuses any write to an inode with an unmapped
+     owner or group (`HAS_UNMAPPED_ID`), even for its owner: `EACCES` on the
+     capture (overlay `work/work`, so read-only), `EACCES` connecting to the
+     desktop's Wayland/Pulse sockets, and copy-up `EACCES`/rename `EOVERFLOW`
+     on game files. Inside, the owner may chgrp to the namespace's gid 0
+     (your uid number on disk), which fixes the capture, but the game folder,
+     Proton and the desktop's sockets would need the same on every launch.
+     Proposed instead: keep uid = gid, document moving the account to a
+     private group (Tumbleweed's default now: `USERGROUPS_ENAB yes`), and
+     check the actual paths' groups with a clearer message. Awaiting a decision.
    - The EGL probe now reports the actual EGL device/render node, and
      `--require-hardware` rejects software or missing device evidence. It uses
      a GL compositor by default. This VM reports llvmpipe/no render node and
@@ -264,8 +277,9 @@ per-game SELinux policy or relabeling step.
      (1.6.9 and master) answers SET_CLIENT_NAME at its first sync, before
      WirePlumber has let the client see its own object, and sends index
      4294967295, which libpulse rejects. It affects `--restrict-audio` under
-     every backend. The fix belongs upstream: wait for that object before
-     replying. Commands and limitations are in the [validation runbook](systemd-backend/validation.md).
+     every backend. The fix would be in PipeWire (wait for that object
+     before replying); not patched here, accepted as a known limitation
+     (2026-11-07). Commands and limitations are in the [validation runbook](systemd-backend/validation.md).
    - Full regression suite with the identity guards: 289 tests, 4 skipped;
      with the `--host-x11` fix, 293 tests, 4 skipped (2026-11-07).
      One earlier overlapping stress run saw an ordinary overlay mount EPERM;
@@ -277,6 +291,12 @@ per-game SELinux policy or relabeling step.
      fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
      Xwayland, a native game and a Proton game. Check whether card-node metadata
      access needed by gamescope requires additional handling.
+   - gamescope on the VM (2026-11-07, 3.16.31 nested in GNOME): under `0` and
+     `systemd` alike it selects llvmpipe, then aborts on `vkAllocateMemory`
+     (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) before any window; unsandboxed
+     headless gamescope runs. llvmpipe lacks `VK_EXT_physical_device_drm`, so
+     gamescope's card/render node matching is never reached there: the
+     card-node question needs a real GPU.
    - The VM's llvmpipe result neither proves nor rules out acceleration through
      this backend. Opening the alias and a DRM version ioctl are already proven;
      accelerated rendering is not. Suitable hardware access must be provided

@@ -82,7 +82,11 @@ explicitly; this does not bypass the hardware requirement.
 Both modes check pixel readback and a compositor frame callback. The probe
 currently binds `renderD128`; other GPU selections need separate coverage.
 Passing EGL does not establish DMA-BUF transport, Vulkan, gamescope, Xwayland
-or Proton behavior. Those require their own workloads and renderer/device
+or Proton behavior. On the VM, `--gamescope` aborts identically under
+`SANDBOX_SEPARATE_UID=0` and `systemd`: gamescope selects llvmpipe and fails
+`vkAllocateMemory` before showing anything. llvmpipe has no
+`VK_EXT_physical_device_drm`, so the card/render node matching gamescope does
+on real GPUs is not exercised there. Those require their own workloads and renderer/device
 evidence. Physical hotplug tests need disposable hardware without disrupting
 another user.
 
@@ -148,7 +152,8 @@ and none of the unrestricted server's. pipewire-pulse 1.6.9 (and master)
 replies to SET_CLIENT_NAME after its first sync even when WirePlumber has
 not yet let the client see its own client object; the reply then carries
 index 4294967295 and libpulse rejects it. This affects the restricted sound
-server under every backend and needs an upstream PipeWire change.
+server under every backend. Fixing it would mean patching PipeWire, which
+this project does not carry; it is a known limitation.
 
 Boot checks, accelerated OpenGL/Vulkan, DMA-BUF, gamescope/Xwayland, actual
 games, multiple physical GPUs and physical hotplug remain unvalidated.

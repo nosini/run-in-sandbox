@@ -6,7 +6,7 @@ The backend remains experimental; accelerated rendering and physical GPU
 hotplug still need validation. It is never selected automatically.
 The [validation runbook](validation.md) records coverage and the remaining checks.
 
-The administrator installer currently supports **openSUSE Tumbleweed** with
+The administrator installer supports **openSUSE Tumbleweed** only, with
 matching systemd and systemd-container packages, stable **261.4 or later**.
 261.3 lets a nested namespace get round nsresourced's write restrictions.
 On SELinux systems, checkmodule, semodule_package, semodule and restorecon
