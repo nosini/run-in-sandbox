@@ -546,10 +546,10 @@ the [Linux port of PGMMV](https://github.com/nosini/PGMMV) with the decoder
 built in, so encrypted exports and plain editor projects use the same launcher.
 `PGMMV_DIR=/path/to/bundle` or `--pgmmv=/path/to/bundle` overrides the search.
 
-If you keep a self-built bundle in this checkout as `pgmmv-player-decrypt/`,
-`./install.sh` copies it into `~/.local/share/pgmmv-player-decrypt/`. That local
-folder is ignored by git, and uninstalling the sandbox scripts keeps the
-installed player. Running `sandbox-game` from the checkout also finds it there.
+Like the other runtimes, the bundle is yours to install and update;
+`./install.sh` never copies one. A self-built bundle kept in this checkout as
+`pgmmv-player-decrypt/` (ignored by git) is found only when `sandbox-game` runs
+from the checkout.
 
 Right-click the game folder or its `player.exe` and choose **Sandbox game**.
 The launcher recognises `data/project.json` (also under `Resources/`) and uses
