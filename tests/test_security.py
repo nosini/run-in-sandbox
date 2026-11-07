@@ -231,6 +231,31 @@ class SecurityTests(unittest.TestCase):
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
 
+    def test_unavailable_systemd_backend_keeps_existing_capture(self):
+        scripts = self.base / 'unavailable-backend'
+        scripts.mkdir()
+        for name in ('sandbox-game', 'sandbox-game-lib'):
+            shutil.copy2(ROOT / name, scripts / name)
+        helper = scripts / 'sandbox-uid'
+        helper.write_text('#!/bin/sh\necho "unsupported systemd version 261.3" >&2\nexit 1\n')
+        helper.chmod(0o755)
+        capture = self.home / 'game-sandboxes' / 'keep-capture'
+        capture.mkdir(parents=True)
+        for name, value in (('uid', '7\n'), ('save', 'keep'), ('managed-uid', '1\n')):
+            (capture / name).write_text(value)
+        before = {p.name: p.read_bytes() for p in capture.iterdir()}
+        for marked in (True, False):
+            if not marked:
+                (capture / 'managed-uid').unlink()
+                del before['managed-uid']
+            env = {**self.env, 'SANDBOX_SEPARATE_UID': 'systemd'}
+            result = subprocess.run([str(scripts / 'sandbox-game'), '--headless', '--name',
+                                     'keep-capture', str(self.game), '/bin/true'],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('unsupported systemd version', result.stderr)
+            self.assertEqual({p.name: p.read_bytes() for p in capture.iterdir()}, before)
+
     def test_manager_install_then_launch_keeps_one_prefix(self):
         import runpy
         Library = runpy.run_path(str(ROOT / "sandbox-manager-lib.py"))["Library"]

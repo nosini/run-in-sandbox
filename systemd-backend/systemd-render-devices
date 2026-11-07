@@ -3,7 +3,7 @@
 
 Reconcile only root-configured users and live DRM render nodes. No arbitrary
 device, owner, destination or command can be requested on the command line.
-Not installed by install.sh; see render-devices.md beside it before using it.
+Installed by install.sh --systemd-backend; see render-devices.md.
 """
 import argparse
 import ctypes

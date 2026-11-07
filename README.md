@@ -1470,8 +1470,10 @@ before that uid is released.
 
 It is not ready for general use yet. It needs systemd 261.4 or later, on
 SELinux systems a policy module for the two services, and for the GPU copies
-of the render nodes that an administrator's helper keeps for you. All of that
-is set up once, as root: see [`systemd-backend/`](systemd-backend/README.md).
+of the render nodes that an administrator's helper keeps for you. On openSUSE
+Tumbleweed, `sudo ./install.sh --systemd-backend "$(id -u)"` installs that
+setup. Its explicit administrator install/removal modes are separate from the
+ordinary per-user install: see [`systemd-backend/`](systemd-backend/README.md).
 
 `--net` works as with the other backends, with the same rules. The game's
 network belongs to the sandbox's namespace rather than to bwrap's, and pasta
@@ -1479,8 +1481,9 @@ runs as the sandbox's transient uid too. `sandbox-attach`, including `--put`,
 works as with the other backends. Use `--put` to change a live overlay;
 editing `rw/` directly is not guaranteed to reach the running game.
 `sandbox-uid run CAP -- CMD...` runs the command as you, since the capture
-already belongs to you. A check that refuses unsuitable systemd versions is
-still to come. With a single user id mapped on files,
+already belongs to you. Both delegation workers must report the same stable
+version, 261.4 or later; an unavailable or unsupported backend stops the
+launch before changing the capture. With a single user id mapped on files,
 what the game creates gets your uid as its group id too.
 
 ## Preferences file format

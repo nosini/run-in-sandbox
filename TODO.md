@@ -92,8 +92,8 @@ coverage and setup/cleanup commands.
 ### Implementation handoff: next steps
 
 `SANDBOX_SEPARATE_UID=systemd` is now a selectable launch path (step 1
-below). The installer is unchanged; the administrator pieces (service SELinux
-policy, render-copy helper) are in `systemd-backend/`, set up by hand.
+below). The administrator pieces (service SELinux policy, render-copy helper)
+are packaged by the explicit installer modes in step 4.
 One-time administrator setup is accepted (including service SELinux policy and
 GPU provisioning); ordinary launches must remain unprivileged. There is no
 per-game SELinux policy or relabeling step.
@@ -198,21 +198,33 @@ per-game SELinux policy or relabeling step.
    - VM verification with SELinux enforcing: full suite 267 tests, 3 skipped.
      New cleanup regressions also fail when their fixes are removed.
 
-4. **Package administrator setup and backend availability checks.**
-   - Integrate the render helper, dedicated tmpfs mount, service, UID allowlist
-     and udev rules from `systemd-backend/` into install.sh; include removal and
-     revocation behavior.
-   - Package and review the service-wide SELinux module for supported systems.
-     Install policy before first daemon activation and load overlayfs before
-     initializing nsresourced's BPF restrictions. Cover both manually created
-     `var_run_t` and PID1-created `init_var_run_t` runtime parents.
-   - Use matching delegation managers, workers, shared library and service units.
-     Merely finding MountDirectory is insufficient: the proposed child namespace
-     bypasses the transient-write restriction in tested 261.3; tested 261.4
-     passes. Gate unsupported versions/setups and explain setup failures.
-   - Keep the subordinate-UID backend available. Reject an explicitly requested
-     unavailable backend clearly; never silently reinterpret existing captures
-     using another backend. Document selection, installation and rollback.
+4. **Administrator setup and availability checks: done (2026-11-07).**
+   - `sudo ./install.sh --systemd-backend UID...` installs the render helper,
+     dedicated tmpfs mount, service, complete UID allowlist and udev rule.
+     Explicit updates revoke old aliases before changing helper/configuration.
+     Ordinary per-user installs remain separate. Currently supports openSUSE
+     Tumbleweed only; other distributions need their own packaging validation.
+   - The installer verifies managers, workers, linked shared library and vendor
+     units against one unmodified source RPM build, stable 261.4 or later.
+     It installs the service-wide SELinux module before socket activation,
+     preloads overlayfs, and installs a required overlay boot-ordering drop-in.
+     Existing policy covers runtime parents created manually and by PID 1.
+   - Each launch queries both live workers' GetInfo versions and the directory
+     API. Old, unknown or mismatched versions are refused before a capture is
+     changed. The subordinate-UID backend remains available; an unavailable
+     explicit/sticky systemd selection never silently falls back.
+   - `sudo ./install.sh --uninstall-systemd-backend` disables the event hook,
+     revokes aliases, stops the service/mount, removes packaged files/policy,
+     and restores prior socket enablement. Captures, per-user tools and the
+     root allowlist stay. Interrupted installations can also be removed.
+     Both modes refuse active delegation resources, checking the namespace
+     registry as well as PID 1's descriptor store.
+   - Verified with SELinux enforcing: install, repeat install, interrupted
+     install cleanup, unit/udev validation, removal and original socket-state
+     preservation. Full suite: 276 tests, 3 skipped; 14 focused setup tests;
+     21 render lifecycle tests; live allowlist and mount-cycle revocation.
+     A running game blocks install/removal and keeps working. Physical GPU
+     hotplug, boot testing and acceleration remain in step 5.
 
 5. **Complete graphics and lifecycle validation before normal use.**
    - Run accelerated OpenGL and Vulkan rendering through the mapped alias on
@@ -243,7 +255,7 @@ per-game SELinux policy or relabeling step.
   2026-11-06; PID 1 included). On it, the setup for this backend is: build and
   `systemd-backend/README.md` (module, `modprobe overlay`, sockets) and, for
   the GPU, `systemd-backend/render-devices.md`.
-- After the step 1, step 2 and step 3 tests, the module, render helper and test
+- After the step 1 through step 4 tests, the module, render helper and test
   captures were removed and the sockets stopped. The services' BPF pins from that run were
   left in place: they were created with the policy loaded.
 - Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` and
@@ -251,5 +263,6 @@ per-game SELinux policy or relabeling step.
   `systemd-{2614,access,render-lifecycle,media}-20261106/`.
   Attachment/maintenance logs are in `systemd-attach-20261106/`;
   `final-suite.log` covers the finished step 3 changes.
+  Packaging/setup logs are in `systemd-package-20261106/`.
   Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
   cross-project findings, including policy/overlay startup ordering and labels.

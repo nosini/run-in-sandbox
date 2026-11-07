@@ -925,11 +925,28 @@ def varlink(path, method, parameters, fds=()):
         raise
 
 
+def managed_version(value):
+    """Stable upstream release at the start of a Varlink version string."""
+    match = re.match(r"^(\d+)(?:\.(\d+))?(?=$|[ (+-])", value)
+    if not match:
+        return None
+    return tuple(int(x or 0) for x in match.groups())
+
+
 def managed_available():
-    """Both services answer (their sockets start them)."""
+    """Matching, supported workers answer (their sockets start them)."""
+    versions = []
     for path, interface in ((NSRESOURCE, "io.systemd.NamespaceResource"),
                             (MOUNTFS, "io.systemd.MountFileSystem")):
         try:
+            info, fds = varlink(path, "org.varlink.service.GetInfo", {})
+            for fd in fds:
+                os.close(fd)
+            value = info.get("version", "")
+            version = managed_version(value)
+            if version is None or version < (261, 4):
+                return f"{path}: unsupported systemd version {value!r}; need stable 261.4 or later"
+            versions.append(value)
             reply, fds = varlink(path, "org.varlink.service.GetInterfaceDescription",
                                  {"interface": interface})
         except (OSError, VarlinkError) as e:
@@ -938,7 +955,9 @@ def managed_available():
             os.close(fd)
         if interface == "io.systemd.MountFileSystem" \
            and "MountDirectory" not in reply.get("description", ""):
-            return "systemd-mountfsd cannot mount directories (systemd 258 or later can)"
+            return "systemd-mountfsd lacks MountDirectory; install matching systemd packages"
+    if versions[0] != versions[1]:
+        return "systemd delegation workers have different versions; install matching systemd packages"
     return None
 
 
