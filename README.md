@@ -1485,6 +1485,9 @@ already belongs to you. Both delegation workers must report the same stable
 version, 261.4 or later; an unavailable or unsupported backend stops the
 launch before changing the capture. With a single user id mapped on files,
 what the game creates gets your uid as its group id too.
+The current backend requires matching primary UID and GID. Different groups
+are refused before changing a capture; use the subordinate-UID backend until
+that mapping is supported.
 
 ## Preferences file format
 

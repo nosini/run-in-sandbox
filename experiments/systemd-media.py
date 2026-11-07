@@ -28,7 +28,7 @@ spec.loader.exec_module(access)
 probe = access.probe
 
 PAYLOAD = r'''
-import fcntl, json, os, subprocess
+import fcntl, json, os, subprocess, sys
 from pathlib import Path
 assert os.getgroups() == []
 status = Path('/proc/self/status').read_text()
@@ -46,7 +46,7 @@ def run(*args, success=True):
     else:
         assert result.returncode != 0, (args, 'unexpectedly permitted')
     return result
-print(run('/probe/media-client').stdout, flush=True)
+print(run('/probe/media-client', *sys.argv[1:]).stdout, flush=True)
 sinks = run('/usr/bin/pactl', 'list', 'short', 'sinks').stdout
 assert 'probe_sink' in sinks, sinks
 sources = run('/usr/bin/pactl', 'list', 'short', 'sources').stdout
@@ -57,7 +57,7 @@ for source in ('@DEFAULT_SOURCE@', 'probe_sink.monitor', 'probe_source'):
     result = run('/usr/bin/parecord', '--raw', '--device=' + source,
                  '--format=s16le', '--rate=48000', '--channels=1', '/tmp/record.raw',
                  success=False)
-    assert 'No such entity' in result.stderr, result.stderr
+    assert 'No such entity' in result.stderr, (source, result.stderr)
     assert not Path('/tmp/record.raw').exists() or Path('/tmp/record.raw').stat().st_size == 0
 run('/usr/bin/paplay', '--device=probe_sink', '/probe/tone.wav')
 print(json.dumps({'playback_drained': True, 'test_source_hidden': True,
@@ -77,7 +77,7 @@ def wait_for(path, processes):
 
 
 @contextmanager
-def fixtures(checkout, root, runtime):
+def fixtures(checkout, root, runtime, renderer):
     processes, logs = [], []
     # Do not let shell overrides redirect a fixture to the desktop graph or
     # replace the private configuration/data lookup paths.
@@ -129,7 +129,7 @@ context.objects = [
         processes.append(process)
         return process
     try:
-        start('weston', ['weston', '--backend=headless', '--renderer=pixman',
+        start('weston', ['weston', '--backend=headless', '--renderer=' + renderer,
                          '--shell=kiosk-shell.so', '--no-config', '--idle-time=0',
                          '--socket=wayland-probe'])
         wait_for(runtime / 'wayland-probe', processes)
@@ -172,7 +172,7 @@ context.objects = [
             log.close()
 
 
-def worker(namespace, mounts, uid, gid, helper, seccomp):
+def worker(namespace, mounts, uid, gid, helper, seccomp, require_hardware):
     probe.checked(probe.libc.setns(namespace, probe.CLONE_NEWUSER), 'setns')
     os.setresgid(0, 0, 0)
     os.setresuid(0, 0, 0)
@@ -213,6 +213,8 @@ def worker(namespace, mounts, uid, gid, helper, seccomp):
         '--rw', '/dev', '--rw', '/tmp', '--rw', '/run/probe',
         '--', '/usr/bin/python3', '-I', '-c', PAYLOAD,
     ]
+    if require_hardware:
+        command.append('--require-hardware')
     result = subprocess.run(command, pass_fds=(helper, seccomp), capture_output=True,
                             text=True, timeout=80, env={'PATH': '/usr/bin:/bin'})
     print(result.stdout, end='', flush=True)
@@ -225,6 +227,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--device-dir', type=Path, required=True)
+    parser.add_argument('--require-hardware', action='store_true',
+                        help='fail unless EGL renders on the mapped DRM node without software fallback')
+    parser.add_argument('--weston-renderer', choices=('pixman', 'gl'),
+                        help='private compositor renderer (default: gl for hardware checks, otherwise pixman)')
     args = parser.parse_args()
     probe.require(os.getuid() != 0, 'run as an ordinary user')
     checkout = Path(__file__).resolve().parents[1]
@@ -258,7 +264,8 @@ def main():
             runtime = Path(short)
             probe.require(len(str(runtime / 'restricted/native').encode()) < 104,
                           'use a shorter --work-dir for Unix socket paths')
-            with fixtures(checkout, root, runtime) as admin:
+            renderer = args.weston_renderer or ('gl' if args.require_hardware else 'pixman')
+            with fixtures(checkout, root, runtime, renderer) as admin:
                 recording = (root / 'monitor.raw').open('wb')
                 recorder = subprocess.Popen(['parecord', '--raw', '--device=probe_sink.monitor',
                                              '--format=s16le', '--rate=48000', '--channels=1'],
@@ -274,7 +281,8 @@ def main():
                     pid = os.fork()
                     if pid == 0:
                         try:
-                            worker(namespace, mounts, os.getuid(), os.getgid(), helper, seccomp)
+                            worker(namespace, mounts, os.getuid(), os.getgid(), helper, seccomp,
+                                   args.require_hardware)
                         except BaseException as error:
                             print(f'media worker: {error}', file=sys.stderr, flush=True)
                             os._exit(1)

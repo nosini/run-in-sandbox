@@ -933,8 +933,17 @@ def managed_version(value):
     return tuple(int(x or 0) for x in match.groups())
 
 
+def managed_identity_error():
+    if os.getgid() != os.getuid():
+        return ("the systemd backend currently requires matching primary UID and GID; "
+                "MountDirectory cannot map this caller's group for a writable overlay")
+    return None
+
+
 def managed_available():
     """Matching, supported workers answer (their sockets start them)."""
+    if why := managed_identity_error():
+        return why
     versions = []
     for path, interface in ((NSRESOURCE, "io.systemd.NamespaceResource"),
                             (MOUNTFS, "io.systemd.MountFileSystem")):
@@ -1254,6 +1263,8 @@ def managed_network(net):
 
 
 def managed_launch(cap, argv, net=None):
+    if why := managed_identity_error():
+        fail(why)
     me, my_gid = os.getuid(), os.getgid()
     argv = canonical(argv)
     mounts = os.path.join(os.path.realpath(cap), ".mounts")
@@ -1268,7 +1279,10 @@ def managed_launch(cap, argv, net=None):
         argv[at:at] = ["--share-net"]
     # pasta runs from its folder too: sandbox-game names a copy after the game.
     wanted = delegations(argv, specs, [(os.path.realpath(net["pasta"]), False)] if net else ())
-    ns = managed_namespace(f"sandbox-game-{os.getpid()}")
+    # nsresourced prefixes our uid and truncates names to 22 characters.
+    # Keep the complete pid even with a ten-digit caller uid; a long prefix
+    # discarded its last digits and made concurrent launches collide.
+    ns = managed_namespace(f"sg-{os.getpid():x}")
     # How sandbox-game --stop and sandbox-attach tell this sandbox's processes
     # from any others (see sandbox_user in sandbox-game-lib): the outer bwrap
     # runs in a namespace whose parent is this one. Where the game cannot

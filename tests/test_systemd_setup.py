@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -28,6 +29,42 @@ setup = load('setup_test_installer', ROOT / 'systemd-backend/install-systemd.py'
 
 
 class AvailabilityTests(unittest.TestCase):
+    def test_direct_launch_rejects_different_gid_before_any_setup(self):
+        with mock.patch.object(uid.os, 'getuid', return_value=1000), \
+             mock.patch.object(uid.os, 'getgid', return_value=12345), \
+             mock.patch.object(uid, 'managed_namespace') as allocate, \
+             mock.patch.object(uid.os, 'makedirs') as mkdir, \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                uid.managed_launch('/unused', ['bwrap'])
+            allocate.assert_not_called()
+            mkdir.assert_not_called()
+
+    def test_different_primary_gid_is_refused_before_contacting_services(self):
+        with mock.patch.object(uid.os, 'getuid', return_value=1000), \
+             mock.patch.object(uid.os, 'getgid', return_value=12345), \
+             mock.patch.object(uid, 'varlink') as varlink:
+            self.assertIn('requires matching primary UID and GID', uid.managed_available())
+            varlink.assert_not_called()
+
+    def test_concurrent_launch_names_survive_uid_prefixing_and_truncation(self):
+        names = []
+        class Allocating(Exception):
+            pass
+        def allocated(name):
+            names.append(name)
+            raise Allocating()
+        with mock.patch.object(uid, 'canonical', return_value=['bwrap']), \
+             mock.patch.object(uid, 'overlays', return_value=(['bwrap'], [])), \
+             mock.patch.object(uid, 'delegations', return_value=[]), \
+             mock.patch.object(uid, 'managed_namespace', side_effect=allocated):
+            for pid in (123400, 123499):
+                with mock.patch.object(uid.os, 'getpid', return_value=pid), self.assertRaises(Allocating):
+                    uid.managed_launch('/unused', ['bwrap'])
+        for caller in (1000, 4294967294):
+            mangled = [f'{caller}-{name}'[:22] for name in names]
+            self.assertNotEqual(*mangled)
+
     def availability(self, first='261.4 (261.4)', second='261.4 (261.4)', mount=True):
         def reply(path, method, params):
             if method.endswith('.GetInfo'):
@@ -57,6 +94,11 @@ class AvailabilityTests(unittest.TestCase):
 
 
 class AdministratorPreflightTests(unittest.TestCase):
+    def test_user_with_different_primary_gid_is_refused(self):
+        with mock.patch.object(setup.pwd, 'getpwuid', return_value=SimpleNamespace(pw_gid=12345)):
+            with self.assertRaisesRegex(RuntimeError, 'requires matching primary UID and GID'):
+                setup.users(['1000'])
+
     def components(self, mixed=False, modified=False, stale=False):
         def output(*args):
             if args[0] == 'ldd':

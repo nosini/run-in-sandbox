@@ -189,11 +189,17 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
 
 class SecurityTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-",
+                                              dir=os.environ.get("SANDBOX_TEST_TMPDIR"))
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.home = self.base / "home"
         self.game = self.base / "games" / "Game"
+        game_root = os.environ.get("SANDBOX_TEST_GAME_TMPDIR")
+        if game_root:
+            game_tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-source-", dir=game_root)
+            self.addCleanup(game_tmp.cleanup)
+            self.game = Path(game_tmp.name) / "Game"
         self.runtime = self.base / "run"
         for path in (self.home, self.game, self.runtime):
             path.mkdir(parents=True)
@@ -942,7 +948,16 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                 proc.terminate()
             proc.communicate(timeout=10)
         self.addCleanup(stop)
-        self.assertEqual(proc.stdout.readline().strip(), "ready", proc.stderr.read()
+        # communicate() reads the pipe directly. TextIOWrapper.readline()
+        # could read ahead past "ready" and strand following output in its
+        # buffer, making a fast game look as if its output had disappeared.
+        ready = bytearray()
+        while len(ready) < 1024:
+            byte = os.read(proc.stdout.fileno(), 1)
+            if byte in (b'', b'\n'):
+                break
+            ready += byte
+        self.assertEqual(ready.decode(errors='replace').strip(), "ready", proc.stderr.read()
                          if proc.poll() is not None else "")
         return proc
 
@@ -2716,25 +2731,12 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
 
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.
-        import time
         def launch(name):
-            proc = subprocess.Popen(
-                [str(ROOT / "sandbox-game"), "--headless", "--name", name,
-                 self.game, "/bin/sh", "-c", "touch /tmp/up; exec sleep 60"],
-                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            self.addCleanup(proc.stderr.close)
-            self.addCleanup(proc.kill)
-            # Up once its bwrap is: that is what --stop goes looking for.
-            home = self.home / "game-sandboxes" / name / "home"
-            for _ in range(100):
-                if subprocess.run(["pgrep", "-f", f"bwrap .*--bind {home} "],
-                                  capture_output=True).stdout:
-                    return proc
-                time.sleep(0.1)
-            self.fail(f"{name} did not start: {proc.stderr.read()}")
+            # A command-line search also matched sandbox-uid while it was
+            # still setting up the namespace. Wait for the payload itself.
+            return self.launch_named(name, '/bin/sh', '-c', 'echo ready; exec sleep 60')
         first = launch("game")
         second = launch("game-2")
-        time.sleep(0.3)
 
         missing = self.cli("--stop", "no-such-game", check=False)
         self.assertNotEqual(missing.returncode, 0)
@@ -4081,6 +4083,103 @@ class SystemdBackendTests(unittest.TestCase):
         result = subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--", "id", "-u"],
                                 env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.stdout.strip(), str(os.getuid()), result.stderr)
+
+    def test_repeated_launches_and_stops_release_the_managed_namespace(self):
+        registry = Path('/run/systemd/nsresource/registry')
+        if not registry.is_dir():
+            self.skipTest('nsresourced registry is unavailable')
+        name = 'cycles-' + self.base.name
+        capture = self.home / 'game-sandboxes' / name
+        for cycle in range(6):
+            with self.subTest(cycle=cycle):
+                if cycle % 2:
+                    proc = self.launch_named(name, '/bin/sh', '-ec',
+                                             'printf x >> "$HOME/save"; echo ready; exec sleep 30')
+                    self.cli('--stop', name)
+                    proc.communicate(timeout=15)
+                else:
+                    self.cli('--headless', '--name', name, self.game,
+                             '/bin/sh', '-ec', 'printf x >> "$HOME/save"')
+                inode = (capture / '.managed-userns').read_text().split()[1]
+                deadline = time.monotonic() + 3
+                while (registry / f'i{inode}.userns').exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertFalse((registry / f'i{inode}.userns').exists(),
+                                 'namespace allocation survived game exit')
+                self.assertEqual((capture / 'home/save').read_text(), 'x' * (cycle + 1))
+                self.assertFalse((capture / 'work/work').exists())
+
+    def test_public_game_owned_by_another_user(self):
+        source = os.environ.get('SANDBOX_TEST_FOREIGN_GAME')
+        if not source:
+            self.skipTest('needs the root-created foreign-owned game fixture')
+        source = Path(source)
+        self.assertNotEqual(source.stat().st_uid, os.getuid())
+        original = source / 'original'
+        self.assertNotEqual(original.stat().st_uid, os.getuid())
+        result = self.cli('--headless', '--name', 'foreign-game', source, 'python3', '-c', '''
+import errno, json, os
+from pathlib import Path
+original = Path('/game/original')
+before = original.read_text()
+try:
+    original.write_text('bad')
+except PermissionError:
+    pass
+else:
+    raise RuntimeError('foreign read-only file unexpectedly writable')
+Path('/game/replacement').write_text('changed')
+replacement_errno = None
+try:
+    os.replace('/game/replacement', original)
+except OSError as error:
+    # Unmapped lower ownership may prevent copy-up/whiteout. Other errors
+    # must fail the check rather than being hidden as unsupported ownership.
+    assert error.errno == errno.EOVERFLOW, error
+    replacement_errno = error.errno
+Path('/game/created').write_text('fresh')
+(Path.home() / 'save').write_text('save')
+print(json.dumps([before, original.read_text(), replacement_errno,
+                  Path('/game/created').read_text(), (Path.home() / 'save').read_text()]))
+''')
+        before, after, error, fresh, save = json.loads(result.stdout)
+        self.assertEqual(before, 'foreign original')
+        self.assertEqual(after, 'changed' if error is None else 'foreign original')
+        self.assertEqual([fresh, save], ['fresh', 'save'])
+        self.assertEqual(original.read_text(), 'foreign original')
+        result = self.cli('--headless', '--ro', source / 'closed', '/denied',
+                          self.game, '/bin/true', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot reach', result.stderr)
+
+    def test_concurrent_captures_keep_their_overlays_and_saves_separate(self):
+        (self.game / 'original').write_text('host')
+        names = ['capture-a-' + self.base.name, 'capture-b-' + self.base.name]
+        procs = []
+        for name, value in zip(names, ('alpha', 'beta')):
+            procs.append(self.launch_named(name, '/bin/sh', '-ec',
+                         f'printf {value} > /game/original; printf {value} > "$HOME/save"; '
+                         'echo ready; exec sleep 30'))
+        try:
+            for name, value in zip(names, ('alpha', 'beta')):
+                result = self.attach(name, '--exec', '--', '/bin/sh', '-ec',
+                                     'cat /game/original; echo; cat "$HOME/save"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.split(), [value, value])
+            self.cli('--stop', names[0])
+            procs[0].communicate(timeout=15)
+            self.assertRegex(self.cli('--list').stdout, names[1] + r'.*running')
+            result = self.attach(names[1], '--exec', '--', 'cat', '/game/original')
+            self.assertEqual(result.stdout, 'beta', result.stderr)
+            self.assertEqual((self.game / 'original').read_text(), 'host')
+        finally:
+            for name, proc in zip(names, procs):
+                self.cli('--stop', name, check=False)
+                proc.communicate(timeout=15)
+        for name, value in zip(names, ('alpha', 'beta')):
+            result = self.cli('--headless', '--name', name, self.game,
+                              '/bin/sh', '-ec', 'cat /game/original; echo; cat "$HOME/save"')
+            self.assertEqual(result.stdout.split(), [value, value])
 
     def running_uid(self, *cmdline):
         """The host uid of the one process whose command line is CMDLINE."""

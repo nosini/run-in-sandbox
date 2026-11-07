@@ -4,12 +4,17 @@
 [README](../README.md)) runs unprivileged, but needs administrator setup once.
 The backend remains experimental; accelerated rendering and physical GPU
 hotplug still need validation. It is never selected automatically.
+The [validation runbook](validation.md) records coverage and the remaining checks.
 
 The administrator installer currently supports **openSUSE Tumbleweed** with
 matching systemd and systemd-container packages, stable **261.4 or later**.
 261.3 lets a nested namespace get round nsresourced's write restrictions.
 On SELinux systems, checkmodule, semodule_package, semodule and restorecon
 must be installed (the policy development tools).
+The current mapping also requires each launching user's primary GID to equal
+their UID. The installer checks the account's primary group and the launcher
+checks its actual credentials; a different group is refused before changing
+the capture because the tested mapping otherwise produced an unwritable overlay.
 
 From a complete checkout, install the ordinary per-user tools first. Stop
 games and other users of managed namespaces before installing or updating

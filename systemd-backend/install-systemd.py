@@ -94,7 +94,9 @@ def users(values):
     for value in values:
         require(re.fullmatch(r'[1-9][0-9]*', value) and int(value) < 2**32 - 1,
                 f'invalid non-root host UID: {value}')
-        pwd.getpwuid(int(value))
+        account = pwd.getpwuid(int(value))
+        require(account.pw_gid == int(value),
+                f'UID {value}: the systemd backend currently requires matching primary UID and GID')
         result.add(int(value))
     return sorted(result)
 

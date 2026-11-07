@@ -82,3 +82,27 @@ DMA-BUF interoperability, Vulkan rendering, nested gamescope/Xwayland, and an
 actual native or Proton game still need separate validation. Physical GPU
 unplug/replug and boot ordering are also outside this test. The production
 launcher and installer remain unchanged.
+
+## Hardware-required mode (2026-11-07)
+
+`--require-hardware` defaults the private Weston compositor to its GL renderer
+and makes the client fail on software rendering or missing evidence that EGL
+uses the mapped render node. `--weston-renderer pixman|gl` can select the fixture
+renderer explicitly. Ordinary runs retain the pixman default and allow software.
+
+The client reports the renderer and queries the EGL display's associated device
+using [EGL_EXT_device_query](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_device_query.txt).
+It checks the device's software extension and known software renderer names,
+and requires [EGL_EXT_device_drm_render_node](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_device_drm_render_node.txt)
+to identify the mapped `/dev/dri/renderD128`. Missing query support fails
+conservatively. Pixel readback and a frame callback are checked in either mode.
+The VM reports llvmpipe, software=yes and no render node; hardware-required
+mode correctly fails, including with a GL compositor. No accelerated result
+is claimed. Vulkan, DMA-BUF and other GPU selections still need separate tests.
+
+The complete ordinary media check passed again, including playback verified
+by the control recording and denied source/monitor capture. Other attempts
+intermittently failed Pulse connection setup with `Protocol error`; the probe
+keeps those as failures and does not reinterpret them as recording denial.
+Media startup stability remains open. See the [validation runbook](../systemd-backend/validation.md)
+for storage, graphics and the pending boot/hardware checks.

@@ -138,9 +138,11 @@ per-game SELinux policy or relabeling step.
      (no leftover processes, allocations or mounts). `SystemdBackendTests` in
      `tests/test_security.py` cover this and skip without the services. The
      full suite passed: 245 tests, 3 skipped.
-   - Not yet tested: a caller whose gid differs from their uid. mountfsd maps
-     the caller's uid number for gids too, so new files get gid = uid.
-     `--host-x11` delegates `$HOME` itself for the X authority file
+   - Tested later in step 5: a caller whose primary GID differs from UID gets
+     an unwritable overlay with this mapping. Setup/launch now refuse that
+     unsupported identity before changing the capture. mountfsd maps the
+     caller's uid number for gids too, so new files get gid = uid.
+     Still untested: `--host-x11` delegates `$HOME` for the X authority file
      (`user_home_dir_t`, perhaps not in `user_home_type`).
 
 2. **Namespace lifetime and the full network policy: done (2026-11-06).**
@@ -226,7 +228,40 @@ per-game SELinux policy or relabeling step.
      A running game blocks install/removal and keeps working. Physical GPU
      hotplug, boot testing and acceleration remain in step 5.
 
-5. **Complete graphics and lifecycle validation before normal use.**
+5. **Graphics and lifecycle validation: in progress (2026-11-07).**
+   - Added `systemd-backend/test_storage_live.py`: Btrfs baseline plus tmpfs,
+     ext4 and XFS, with source/capture together and split across filesystems.
+     Eight checks per layout cover ownership/persistence, switching backends,
+     attachment, maintenance, dropped groups/caps/descriptors, repeated
+     allocation release and concurrent captures. All ten layouts pass (80
+     checks, none skipped) after correcting buffered readiness reads that lost
+     test output. The controller rejects unavailable services, skipped checks
+     and empty runs so missing coverage cannot report success.
+   - Concurrent launches exposed nsresourced shortening the UID-prefixed
+     `sandbox-game-PID` names and dropping PID digits. Short hex-PID names
+     retain uniqueness even with ten-digit caller UIDs. The deterministic
+     regression fails with the previous name; live concurrent tests pass.
+   - Public foreign-owned game data can be read, new files/saves captured, and
+     closed directories remain refused. Existing permissions remain enforced;
+     replacement of lower inodes with unmapped ownership can fail EOVERFLOW.
+     Games needing those writes should use a caller-owned source copy.
+   - A caller with primary GID != UID produced a read-only overlay. Setup
+     and launch now reject this unsupported identity explicitly, with unit
+     checks and a real mismatched-GID process verifying new/existing captures
+     stay untouched. Supporting that group layout remains open.
+   - The EGL probe now reports the actual EGL device/render node, and
+     `--require-hardware` rejects software or missing device evidence. It uses
+     a GL compositor by default. This VM reports llvmpipe/no render node and
+     correctly fails that requirement; no acceleration is claimed.
+   - Complete private media playback/recording-denial checks passed again.
+     Intermittent Pulse `Protocol error` connection failures also occurred;
+     media startup stability remains open. These are not counted as capture
+     denial. Commands and limitations are in the [validation runbook](systemd-backend/validation.md).
+   - Full regression suite: 286 tests, 4 skipped. After the final identity
+     guards, 18 focused preflight checks and two normal-identity lifecycle
+     checks passed; the full suite has not been rerun with those guards.
+     One earlier overlapping stress run saw an ordinary overlay mount EPERM;
+     12 targeted repetitions and the later full suite passed. Cause unconfirmed.
    - Run accelerated OpenGL and Vulkan rendering through the mapped alias on
      suitable hardware; report the selected renderer/device and reject software
      fallback when claiming acceleration. Exercise DMA-BUF transport, gamescope,
@@ -240,29 +275,37 @@ per-game SELinux policy or relabeling step.
      GPUs, reboot ordering, allowlist changes and orderly service/mount stops.
      Existing tests cover synthetic lifecycle cases, a real udev change event
      and live alias revocation/regrant, not physical hotplug or reboot.
-   - Test other source filesystems and sources owned by another user, repeated
-     starts/stops, concurrent games, capture operations and existing-backend
-     regressions. Do not enable the new backend by default based on probes alone.
+     Suitable GPU access and agreement on a shared-VM reboot window are still
+     pending; no reboot has been performed.
+   - Storage/lifetime checks above cover these four filesystems and public
+     foreign ownership, repeated starts/stops, concurrent games and capture
+     operations. Keep testing other filesystem/ownership combinations and
+     existing backends. Do not enable the backend by default based on probes.
 
 ### Resume information
 
 - Start with [experiment coverage/setup](experiments/README.md),
   [administrator setup](systemd-backend/README.md),
   [GPU provisioning](systemd-backend/render-devices.md), and
-  [real display/audio results](experiments/media.md). The probe scripts contain
+  [validation commands and remaining checks](systemd-backend/validation.md).
+  [Real display/audio results](experiments/media.md) and the probe scripts contain
   working setup details; they are not production launcher code.
 - The VM now runs systemd 261.4 from the Tumbleweed repository (upgraded
   2026-11-06; PID 1 included). On it, the setup for this backend is: build and
   `systemd-backend/README.md` (module, `modprobe overlay`, sockets) and, for
   the GPU, `systemd-backend/render-devices.md`.
-- After the step 1 through step 4 tests, the module, render helper and test
-  captures were removed and the sockets stopped. The services' BPF pins from that run were
-  left in place: they were created with the policy loaded.
+- After the latest step 5 tests, administrator setup was uninstalled, render
+  aliases revoked, the policy removed and the original disabled/inactive socket
+  state restored. VM source copies, captures and storage fixtures were removed;
+  results were collected locally and this task's VM hold was released. Shared
+  BPF pins and other tasks' work/holds remain. Reinstall administrator setup
+  before a future boot check and acquire a new task hold for detached work.
 - Logs: `~/run-in-sandbox/reviews/systemd-launch-20261106/` and
   `systemd-net-20261106/` (suite logs and state), and the earlier
   `systemd-{2614,access,render-lifecycle,media}-20261106/`.
   Attachment/maintenance logs are in `systemd-attach-20261106/`;
   `final-suite.log` covers the finished step 3 changes.
   Packaging/setup logs are in `systemd-package-20261106/`.
+  Step 5 storage/graphics logs are in `systemd-validation-20261107/`.
   Shared memory note `~/memory/systemd-idmapped-directory-delegation.md` has
   cross-project findings, including policy/overlay startup ordering and labels.
