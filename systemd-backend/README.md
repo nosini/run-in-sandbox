@@ -11,10 +11,8 @@ matching systemd and systemd-container packages, stable **261.4 or later**.
 261.3 lets a nested namespace get round nsresourced's write restrictions.
 On SELinux systems, checkmodule, semodule_package, semodule and restorecon
 must be installed (the policy development tools).
-The current mapping also requires each launching user's primary GID to equal
-their UID. The installer checks the account's primary group and the launcher
-checks its actual credentials; a different group is refused before changing
-the capture because the tested mapping otherwise produced an unwritable overlay.
+Each launching user's primary group must have their uid's number; see
+[Your account's group](#your-accounts-group).
 
 From a complete checkout, install the ordinary per-user tools first. Stop
 games and other users of managed namespaces before installing or updating
@@ -57,6 +55,48 @@ requires matching supported version strings and the directory API before
 changing the capture. Missing/unsupported services stop the launch; they
 never cause a capture to fall back to another backend. For a checkout,
 `./sandbox-uid managed-available` runs the same availability check.
+
+## Your account's group
+
+systemd-mountfsd maps one number into the sandbox: your uid's, for owners and
+groups alike. The kernel lets no one, not even the owner, write to a file
+whose group the mapping lacks, or connect to such a socket. So the backend
+needs your primary group to have your uid's number, and everything the game
+writes to, connects to or copies up from to belong to it.
+
+Current openSUSE Tumbleweed gives each new account a group of its own with
+that number. Older accounts often have `users` (100) instead. The installer
+refuses such an account, and the launcher checks before changing anything:
+first your primary group, then the game's folder, Proton, the capture and
+the desktop's sockets. It names what to change.
+
+To move an account (here `alice`, uid 1000) to a group of its own:
+
+```sh
+getent group 1000                     # must print nothing, or alice's group
+sudo groupadd -g 1000 alice
+sudo usermod -g alice -aG users alice # keep `users` as a supplementary group
+```
+
+If a group with that number already belongs to someone else, this account
+cannot use the backend. `usermod -g` also gives the new group to the files
+in your home folder that had the old one, captures and Steam's Proton
+included. Then log out completely and back in (reboot if the user manager
+lingers), so that the desktop makes its sockets with the new group.
+
+Game folders elsewhere, on another drive say, keep the old group. Give them
+the new one as the launcher's message lists them; you own them, so no root
+is needed:
+
+```sh
+chgrp -R alice /mnt/games/NAME
+```
+
+Files you make from then on belong to `alice` rather than `users`: other
+members of `users` lose group access to them. The launcher checks the
+folders themselves on every launch, and the whole capture once when a game
+first switches to this backend; files deeper in a game folder that kept the
+old group fail when the game changes them, so regroup folders whole.
 
 ## Setup failures and removal
 

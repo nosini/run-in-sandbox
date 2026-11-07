@@ -2,7 +2,9 @@
 import importlib.machinery
 import importlib.util
 import hashlib
+import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -91,6 +93,119 @@ class AvailabilityTests(unittest.TestCase):
     def test_service_error_is_reported(self):
         with mock.patch.object(uid, 'varlink', side_effect=uid.VarlinkError('permission denied')):
             self.assertIn('permission denied', uid.managed_available())
+
+
+def regrouped(paths, gid):
+    """os.stat and os.lstat, with PATHS reported as belonging to GID: no
+    chgrp to a group of no one's needed."""
+    real = {"stat": os.stat, "lstat": os.lstat}
+    paths = {str(p) for p in paths}
+    def wrap(name):
+        def inner(path, *args, **kwargs):
+            st = real[name](path, *args, **kwargs)
+            if os.fspath(path) in paths:
+                fields = list(st)
+                fields[5] = gid
+                return os.stat_result(fields)
+            return st
+        return mock.patch.object(uid.os, name, inner)
+    return wrap("stat"), wrap("lstat")
+
+
+class GroupTests(unittest.TestCase):
+    """mountfsd maps your uid's number alone, groups included: what the game
+    writes to must be grouped so (see managed_identity_error)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.me = os.getuid()
+        self.other = self.me + 1
+
+    def layout(self):
+        b = self.base
+        for d in ("game", "cap/rw/sub", "cap/work", "cap/home"):
+            (b / d).mkdir(parents=True)
+        (b / "readonly").write_text("x")
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(b / "sock"))
+        self.addCleanup(sock.close)
+        argv = ["bwrap", "--bind", str(b / "cap/home"), "/home",
+                "--ro-bind", str(b / "readonly"), "/r", "--ro-bind", str(b / "sock"), "/s",
+                "--bind", "/dev/null", "/dev/null"]
+        specs = [(str(b / "m"), [str(b / "game")], str(b / "cap/rw"), str(b / "cap/work"))]
+        return argv, specs
+
+    def mismatches(self, paths):
+        argv, specs = self.layout()
+        stat_patch, lstat_patch = regrouped(paths, self.other)
+        with stat_patch, lstat_patch, mock.patch.object(uid.os, "getuid", return_value=self.me):
+            return [path for path, _ in uid.group_mismatches(argv, specs)]
+
+    def test_paths_grouped_as_the_uid_pass(self):
+        if os.getgid() != self.me:
+            self.skipTest("this account's own files are not grouped as its uid")
+        self.assertEqual(self.mismatches([]), [])
+
+    def test_what_is_written_connected_to_or_copied_up_from_is_checked(self):
+        b = self.base
+        found = self.mismatches([b / "game", b / "cap/home", b / "cap/work", b / "sock",
+                                 b / "readonly", "/dev/null"])
+        # Not a read-only file, and not /dev/null: no folder of ours shares it.
+        self.assertEqual(sorted(found), sorted(str(b / p) for p in
+                                               ("game", "cap/home", "cap/work", "sock")))
+
+    def test_message_names_the_fix(self):
+        b = self.base
+        self.layout()
+        st_dir, st_sock = os.stat(b / "game"), os.stat(b / "sock")
+        with mock.patch.object(uid.os, "getuid", return_value=1500):
+            text = uid.group_error([(str(b / "my game"), st_dir), (str(b / "sock"), st_sock)])
+        self.assertIn("chgrp -R 1500 '" + str(b / "my game") + "'", text)
+        self.assertIn(str(b / "sock") + ": a socket from before your group changed", text)
+        self.assertIn("Your account's group", text)
+        self.assertIsNone(uid.group_error([]))
+
+    def test_launch_refuses_before_anything_changes(self):
+        with mock.patch.object(uid, "managed_identity_error", return_value=None), \
+             mock.patch.object(uid, "group_mismatches",
+                               return_value=[("/x", os.stat(self.base))]), \
+             mock.patch.object(uid, "managed_namespace") as allocate, \
+             mock.patch.object(uid.os, "makedirs") as mkdir, \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                uid.managed_launch(str(self.base), ["bwrap"])
+        allocate.assert_not_called()
+        mkdir.assert_not_called()
+
+    def test_adopting_a_capture_with_other_groups_changes_nothing(self):
+        cap = self.base / "cap"
+        (cap / "rw/sub").mkdir(parents=True)
+        (cap / "home").mkdir()
+        (cap / "home/save").write_text("s")
+        (cap / "rw/sub/.wh..wh..opq").write_text("")
+        (cap / "rw/.wh.gone").write_text("")
+        (cap / "link").symlink_to("home/save")
+        stat_patch, lstat_patch = regrouped([cap / "home/save"], self.other)
+        with stat_patch, lstat_patch, mock.patch.object(uid.os, "getuid", return_value=self.me), \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.managed_adopt(str(cap))
+        self.assertIn("1 of the files", fail.call_args.args[0])
+        self.assertIn(f"chgrp -R {self.me} ", fail.call_args.args[0])
+        self.assertTrue((cap / "rw/sub/.wh..wh..opq").exists())
+        self.assertTrue((cap / "rw/.wh.gone").is_file())
+
+    def test_links_do_not_count(self):
+        if os.getgid() != self.me:
+            self.skipTest("this account's own files are not grouped as its uid")
+        cap = self.base / "cap"
+        cap.mkdir()
+        (cap / "link").symlink_to("nowhere")
+        stat_patch, lstat_patch = regrouped([cap / "link"], self.other)
+        with stat_patch, lstat_patch, mock.patch.object(uid, "fail", side_effect=RuntimeError):
+            uid.managed_adopt(str(cap))
 
 
 class AdministratorPreflightTests(unittest.TestCase):

@@ -96,7 +96,9 @@ def users(values):
                 f'invalid non-root host UID: {value}')
         account = pwd.getpwuid(int(value))
         require(account.pw_gid == int(value),
-                f'UID {value}: the systemd backend currently requires matching primary UID and GID')
+                f'UID {value}: the systemd backend requires matching primary UID and GID '
+                f'(primary group {account.pw_gid}); see "Your account\'s group" in '
+                'systemd-backend/README.md')
         result.add(int(value))
     return sorted(result)
 

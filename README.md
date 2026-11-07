@@ -1484,9 +1484,11 @@ already belongs to you. Both delegation workers must report the same stable
 version, 261.4 or later; an unavailable or unsupported backend stops the
 launch before changing the capture. With a single user id mapped on files,
 what the game creates gets your uid as its group id too.
-The current backend requires matching primary UID and GID. Different groups
-are refused before changing a capture; use the subordinate-UID backend until
-that mapping is supported.
+Your primary group must have your uid's number, and the files the game
+writes to, connects to or copies up must belong to it: the kernel lets no one
+write to a file whose group the mapping lacks. Other layouts are refused
+before changing a capture, naming the folders to regroup; see
+[Your account's group](systemd-backend/README.md#your-accounts-group).
 
 ## Preferences file format
 

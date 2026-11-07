@@ -78,6 +78,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -933,11 +934,63 @@ def managed_version(value):
     return tuple(int(x or 0) for x in match.groups())
 
 
+GROUP_HELP = 'see "Your account\'s group" in systemd-backend/README.md'
+
+
 def managed_identity_error():
+    # systemd-mountfsd maps your uid's number alone, for owners and groups
+    # both, and the kernel lets nobody -- not even the owner -- write to a
+    # file whose group it cannot map. So your files need a group of that
+    # number, which they get when it is your primary group.
     if os.getgid() != os.getuid():
-        return ("the systemd backend currently requires matching primary UID and GID; "
-                "MountDirectory cannot map this caller's group for a writable overlay")
+        return (f"the systemd backend requires matching primary UID and GID: your primary "
+                f"group is {os.getgid()}, not {os.getuid()}; {GROUP_HELP}")
     return None
+
+
+def group_mismatches(argv, specs):
+    """What the game writes to, connects to or copies up from, through a
+    folder of yours that is delegated (see delegations()), grouped otherwise
+    than with your uid's number: it could not be written to in there. Only
+    the paths themselves: their contents are for `chgrp -R`, and the
+    capture's for managed_adopt()."""
+    me = os.getuid()
+    need = []
+    for path, writable in sources(argv):
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            continue
+        if writable or stat.S_ISSOCK(st.st_mode):
+            need.append(path)
+    for _, lowers, upper, work in specs:
+        need += [*lowers, *(p for p in (upper, work) if p is not None)]
+    out = []
+    for path in dict.fromkeys(need):
+        try:
+            st = os.stat(path)
+            mine = (stat.S_ISDIR(st.st_mode) and st.st_uid == me) \
+                or os.stat(os.path.dirname(path)).st_uid == me
+        except FileNotFoundError:
+            continue
+        if mine and st.st_gid != me:
+            out.append((path, st))
+    return out
+
+
+def group_error(found):
+    """The message for group_mismatches()'s FOUND, or None."""
+    if not found:
+        return None
+    me, lines = os.getuid(), []
+    for path, st in found:
+        if stat.S_ISSOCK(st.st_mode):
+            lines.append(f"  {path}: a socket from before your group changed; log out and in again")
+        else:
+            lines.append(f"  chgrp -R {me} {shlex.quote(path)}")
+    return ("the sandbox could not write to these: they belong to another group than "
+            f"your uid's number ({me}), the only one the systemd backend can map; "
+            f"{GROUP_HELP}\n" + "\n".join(lines))
 
 
 def managed_available():
@@ -1269,6 +1322,8 @@ def managed_launch(cap, argv, net=None):
     argv = canonical(argv)
     mounts = os.path.join(os.path.realpath(cap), ".mounts")
     argv, specs = overlays(argv, mounts)
+    if why := group_error(group_mismatches(argv, specs)):
+        fail(why)
     if specs:
         os.makedirs(mounts, exist_ok=True)
     if net:
@@ -1336,7 +1391,28 @@ def managed_adopt(cap):
     the game replaced as opaque in a way of its own, which overlayfs ignores,
     and the folder's old files would show through again. Its whiteouts are
     overlayfs's own. Both kinds of marks are kept: fuse-overlayfs reads
-    overlayfs's too, so the capture can go back."""
+    overlayfs's too, so the capture can go back.
+    First, once: none of the capture may belong to another group than your
+    uid's number (see managed_identity_error()) -- what was saved before
+    your group changed, say. Links are never written to; they may."""
+    me, others, todo = os.getuid(), 0, [os.path.realpath(cap)]
+    dev = os.lstat(todo[0]).st_dev if os.path.isdir(todo[0]) else None
+    while dev is not None and todo:
+        d = todo.pop()
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            st = os.lstat(path)
+            if st.st_dev != dev or stat.S_ISLNK(st.st_mode):
+                continue
+            others += st.st_gid != me
+            if stat.S_ISDIR(st.st_mode):
+                todo.append(path)
+    if dev is not None and os.lstat(os.path.realpath(cap)).st_gid != me:
+        others += 1
+    if others:
+        fail(f"{others} of the files in {cap} belong to another group than your uid's number "
+             f"({me}), the only one the systemd backend can map, and the game could not write "
+             f"to them; {GROUP_HELP}\n  chgrp -R {me} {shlex.quote(os.path.realpath(cap))}")
     rw = os.path.join(os.path.realpath(cap), "rw")
     if not os.path.isdir(rw) or os.path.islink(rw):
         return

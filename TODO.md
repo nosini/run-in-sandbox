@@ -263,9 +263,14 @@ per-game SELinux policy or relabeling step.
      on game files. Inside, the owner may chgrp to the namespace's gid 0
      (your uid number on disk), which fixes the capture, but the game folder,
      Proton and the desktop's sockets would need the same on every launch.
-     Proposed instead: keep uid = gid, document moving the account to a
-     private group (Tumbleweed's default now: `USERGROUPS_ENAB yes`), and
-     check the actual paths' groups with a clearer message. Awaiting a decision.
+     Done instead (2026-11-07): uid = gid stays required, and
+     systemd-backend/README.md ("Your account's group") explains moving the
+     account to a group of its own (Tumbleweed's default now). Launch checks
+     the group of what the game writes to, connects to or copies up from,
+     and adopting a capture checks all of it once, naming the `chgrp -R`.
+     Verified with a real migrated account: `usermod -g` regroups the home
+     folder itself; files put back in `users` are refused with the right
+     commands, and the launch works after running them. Full suite 299, 4 skipped.
    - The EGL probe now reports the actual EGL device/render node, and
      `--require-hardware` rejects software or missing device evidence. It uses
      a GL compositor by default. This VM reports llvmpipe/no render node and
