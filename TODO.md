@@ -342,6 +342,41 @@ per-game SELinux policy or relabeling step.
 
 ### Resume information
 
+**Handoff (2026-11-07, end of session).** Step 5 is done except the reboot
+check, which is ready but not yet run:
+
+- Next: on the user's desktop (openSUSE TW, RX 9070 XT), from the checkout:
+  `systemd-backend/desktop-boot-check.sh before`, reboot, log in, then
+  `systemd-backend/desktop-boot-check.sh after`. Results go to
+  `.gpu-check/boot-DATE/` (summary.txt with PASS/FAIL, journal.txt,
+  units.txt, denials.txt, launch.log). Expect all PASS; the
+  `/proc/pressure` (proc_psi_t) denial for systemd-mountfsd is known and
+  counted apart. If it passes, record it here and in validation.md
+  ("Boot ordering": drop "These reboot checks have not yet run").
+- The desktop may still have the administrator setup installed from an
+  interrupted GPU check (sockets enabled); `before` updates it and
+  `after` offers removal. Otherwise: `sudo ./install.sh
+  --uninstall-systemd-backend`, then remove
+  `/etc/sandbox-game/systemd-render-users` and rmdir `/etc/sandbox-game`
+  `/usr/local/libexec/sandbox-game`.
+- The script was rehearsed on the VM without a reboot (shared VM): all
+  non-reboot checks pass. Not exercised there: the journal-based
+  "overlayfs before nsresourced" check on a fresh boot.
+- Optional: the user may want a `dontaudit systemd_mountfsd_t
+  proc_psi_t:dir search;` in sandbox_game_systemd.te to quiet that denial;
+  not asked for yet.
+- Decided this session: openSUSE only; uid = gid required (account
+  migration documented); no PipeWire patching (Pulse race is a known
+  limitation); foreign-owned game files use the copy workaround; GPU
+  hotplug and multiple GPUs are not tested and not mentioned.
+- Desktop results so far: `desktop-gpu-check.sh` (Vulkan, EGL, vkcube,
+  gamescope, Xwayland GL, DMA-BUF) and `--game` (Proton, NW.js, Ren'Py,
+  mkxp-z, PGMMV) all pass under the backend; see step 5 above. The user
+  may still have `*-systemd-test` captures to delete.
+- VM: clean (setup removed, sockets disabled, no holds of this task). The
+  shared note `~/memory/ssh-interrupt-leaves-remote-running.md` explains
+  the leftover found this session.
+
 - Start with [experiment coverage/setup](experiments/README.md),
   [administrator setup](systemd-backend/README.md),
   [GPU provisioning](systemd-backend/render-devices.md), and
