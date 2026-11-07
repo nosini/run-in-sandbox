@@ -91,9 +91,18 @@ note "system: $(grep PRETTY_NAME "$results/system.txt" | cut -d= -f2), $(grep -m
 # The administrator setup, and its removal however this ends.
 installed_before=0 tidy=1
 [ -e /etc/sandbox-game/systemd-backend.json ] && installed_before=1
+# What this script installed and could not remove -- its terminal closed,
+# say -- is its own to remove the next time, not a setup of yours.
+marker="${XDG_STATE_HOME:-$HOME/.local/state}/sandbox-gpu-check-installed"
+if [ "$installed_before" = 1 ] && [ -e "$marker" ]; then
+    installed_before=0
+    note "setup: left installed by an earlier run of this check; removed again at the end"
+fi
 # The uninstaller keeps the user list and leaves the helper's folder; what
 # this made, it takes away too.
-[ -e /etc/sandbox-game ] || [ -e /usr/local/libexec/sandbox-game ] && tidy=0
+if [ ! -e "$marker" ] && { [ -e /etc/sandbox-game ] || [ -e /usr/local/libexec/sandbox-game ]; }; then
+    tidy=0
+fi
 pending=()
 remove_setup() {
     # A game cut short is redacted all the same.
@@ -110,6 +119,7 @@ remove_setup() {
         done
         if (cd "$checkout" && sudo ./install.sh --uninstall-systemd-backend) >> "$results/setup.txt" 2>&1; then
             note "setup: removed again"
+            rm -f "$marker"
             if [ "$tidy" = 1 ]; then
                 sudo rm -f /etc/sandbox-game/systemd-render-users
                 sudo rmdir /etc/sandbox-game /usr/local/libexec/sandbox-game 2>/dev/null
@@ -124,9 +134,12 @@ remove_setup() {
     rm -rf "$scratch"
 }
 trap remove_setup EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 if (cd "$checkout" && sudo ./install.sh --systemd-backend "$(id -u)") > "$results/setup.txt" 2>&1; then
     note "setup: installed"
+    [ "$installed_before" = 1 ] || { mkdir -p "$(dirname "$marker")" && : > "$marker"; }
 else
     note "setup: FAILED, see setup.txt"
     exit 1

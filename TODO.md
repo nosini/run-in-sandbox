@@ -332,7 +332,9 @@ per-game SELinux policy or relabeling step.
      lifecycle cases, a real udev change event and live alias
      revocation/regrant, not reboot. A shared-VM reboot window is still
      pending; no reboot has been performed. Still open on hardware: DMA-BUF
-     checked on its own.
+     checked on its own -- done on the desktop: vkcube's frames went to the
+     compositor and to gamescope as DMA-BUF buffers (6 and 3, no shared
+     memory) under both backends.
    - Storage/lifetime checks above cover these four filesystems and public
      foreign ownership, repeated starts/stops, concurrent games and capture
      operations. Keep testing other filesystem/ownership combinations and
