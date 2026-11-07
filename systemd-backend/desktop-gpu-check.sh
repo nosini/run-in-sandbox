@@ -1,6 +1,6 @@
 #!/bin/bash
-# desktop-gpu-check.sh [--keep-setup] [RESULTS]: what the systemd backend
-# does with a real GPU, next to the default backend.
+# desktop-gpu-check.sh [--keep-setup] [--game PATH [--name NAME]]... [RESULTS]:
+# what the systemd backend does with a real GPU, next to the default backend.
 #
 # Run it from this checkout in your Wayland desktop session, as yourself,
 # with no games running. It installs the administrator setup with sudo
@@ -13,12 +13,31 @@
 # games are throwaway folders, their captures in a scratch home that goes
 # at the end. The logs stay in RESULTS, by default .gpu-check/DATE in this
 # checkout (git ignores it). Windows open for a few seconds each.
+#
+# With --game, real games instead, one after the other: PATH is what you
+# would right-click for "Sandbox game", and it is launched as that does,
+# with that game's preferences, but under the systemd backend and in a
+# capture of its own, NAME-systemd-test. The game's own capture is not
+# touched, nor is its folder. NAME is its sandbox's name, when that is not
+# the one its folder gives (one the manager renamed, say). Play a little,
+# then quit the game as usual.
 set -u
 here="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 checkout="$(dirname "$here")"
-keep=0
-[ "${1:-}" = --keep-setup ] && { keep=1; shift; }
-results="${1:-$checkout/.gpu-check/$(date +%Y%m%d-%H%M%S)}"
+keep=0 results="" games=() names=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --keep-setup) keep=1; shift ;;
+        --game) [ "$#" -ge 2 ] || { echo "--game needs a path" >&2; exit 1; }
+                games+=( "$2" ); names+=( "" ); shift 2 ;;
+        --name) [ "$#" -ge 2 ] && [ "${#games[@]}" -gt 0 ] \
+                    || { echo "--name goes after the --game it names" >&2; exit 1; }
+                names[${#names[@]}-1]="$2"; shift 2 ;;
+        -*) echo "unknown option: $1" >&2; exit 1 ;;
+        *) results="$1"; shift ;;
+    esac
+done
+results="${results:-$checkout/.gpu-check/$(date +%Y%m%d-%H%M%S)}"
 
 die() { echo "desktop-gpu-check: $*" >&2; exit 1; }
 [ "$(id -u)" != 0 ] || die "run it as yourself, not as root; it asks for sudo itself"
@@ -42,8 +61,13 @@ This will:
   - install the systemd backend's administrator setup with sudo, for uid $(id -u)
     (sockets for systemd-nsresourced/-mountfsd, a SELinux module, the render
     device helper and its udev rule); removed again at the end
-  - run vulkaninfo, eglinfo, vkcube and gamescope as throwaway games under
-    both backends; a few windows open for a few seconds each
+  - $(if [ "${#games[@]}" = 0 ]; then
+        echo "run vulkaninfo, eglinfo, vkcube and gamescope as throwaway games under
+    both backends; a few windows open for a few seconds each"
+      else
+        echo "launch ${#games[@]} game(s) of yours under the systemd backend, each in a
+    capture of its own (NAME-systemd-test); play a little, then quit it"
+      fi)
   - keep its logs in $results
 Stop your games first. Press Enter to go on, Ctrl-C to stop.
 EOF
@@ -99,6 +123,72 @@ fi
 ls -l "/run/sandboxgame/render/$(id -u)" >> "$results/setup.txt" 2>&1
 "$checkout/sandbox-uid" managed-available >> "$results/setup.txt" 2>&1 \
     || { note "backend: not available, see setup.txt"; exit 1; }
+
+# Real games, launched as "Sandbox game" launches them.
+game_check() { # SELECTION NAME
+    local sel gamedir real test cfg capture copied=0 watcher status users
+    sel="$(realpath "$1")" || { note "game: $1 not found"; return; }
+    gamedir="$(. "$checkout/sandbox-game-lib" && resolve_selection "$sel" && printf '%s' "$R_GAMEDIR")"
+    real="${2:-$("$checkout/sandbox-game" --print-name "$gamedir")}"
+    test="$real-systemd-test"
+    capture="$HOME/game-sandboxes/$test"
+    cfg="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game/games"
+    note ""
+    note "== game: $gamedir"
+    note "preferences: $([ -f "$cfg/$real" ] && echo "those of $real" || echo "defaults (none saved for $real)")"
+    if [ -f "$cfg/$real" ] && [ ! -e "$cfg/$test" ]; then
+        cp "$cfg/$real" "$cfg/$test" && copied=1
+    fi
+    echo "Starting $gamedir under the systemd backend. Play a little, then quit it."
+    # Once it is up and drawing: which render node it got, and what of it has
+    # one open -- seen from inside, by a program attached to it.
+    (
+        for _ in $(seq 180); do
+            "$checkout/sandbox-game" --list 2>/dev/null | grep -qF -- "$test" && break
+            sleep 1
+        done
+        sleep 30
+        "$checkout/sandbox-attach" --name "$test" --exec -- /bin/sh -c '
+            ls -ln /dev/dri/renderD* 2>&1 | sed "s/^/render node: /"
+            for p in /proc/[0-9]*; do
+                ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD \
+                    && echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
+            done' > "$results/game-$test-inside.log" 2>&1
+    ) &
+    watcher=$!
+    NAUTILUS_SCRIPT_SELECTED_FILE_PATHS="$sel" SANDBOX_BACKEND="$checkout/sandbox-game" \
+        SANDBOX_GAME_NAME="$test" SANDBOX_SEPARATE_UID=systemd "$checkout/Sandbox game"
+    status=$?
+    kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    [ "$copied" = 0 ] || rm -f "$cfg/$test"
+    cp "$capture/lastrun.log" "$results/game-$test-lastrun.log" 2>/dev/null
+    note "exit: $status"
+    note "$(grep -m1 '^render node: ' "$results/game-$test-inside.log" 2>/dev/null \
+            || echo "render node: not seen (the game ended within 30 seconds, or attaching failed)")"
+    grep '^has the GPU open: ' "$results/game-$test-inside.log" 2>/dev/null | tee -a "$summary"
+    [ -e "$capture/managed-uid" ] && note "capture: marked for the systemd backend" \
+        || note "capture: NOT marked for the systemd backend"
+    # On disk the capture stays yours under this backend, owner and group.
+    users="$(find "$capture" \( ! -user "$(id -u)" -o ! -group "$(id -u)" \) 2>/dev/null | wc -l)"
+    note "capture files not yours, or not your group: $users"
+    note "capture size: $(du -sh "$capture" 2>/dev/null | cut -f1)"
+    grep -E '^sandbox-(game|uid|landlock): ' "$results/game-$test-lastrun.log" 2>/dev/null \
+        | head -8 | sed 's/^/  /' | tee -a "$summary"
+}
+if [ "${#games[@]}" -gt 0 ]; then
+    for i in "${!games[@]}"; do
+        game_check "${games[$i]}" "${names[$i]}"
+    done
+    note ""
+    note "Test captures are kept in ~/game-sandboxes/*-systemd-test for another run;"
+    note "remove each with: sandbox-game --delete NAME-systemd-test"
+    remove_setup
+    trap - EXIT
+    note "Logs: $results"
+    echo
+    echo "Done. Tell the agent the results are in $results"
+    exit 0
+fi
 
 # One throwaway game per backend, so that neither switches the other's capture.
 mkdir -p "$scratch/home" "$scratch/games/backend-0" "$scratch/games/backend-systemd"

@@ -110,6 +110,13 @@ when its build tools are there. Missing tools are skipped and named
 settings and games are not used. Logs and `summary.txt` stay in
 `.gpu-check/DATE` in the checkout.
 
+With `--game PATH` (repeatable; `--name NAME` after one whose sandbox was
+renamed) it launches your own games instead, as "Sandbox game" does and with
+their preferences, but under the systemd backend and in a capture of their
+own, `NAME-systemd-test`; the game's own capture and folder stay as they
+are. It records the render node the game got, which of its processes have
+the GPU open, and whether the capture stays yours on disk.
+
 Results on an RX 9070 XT desktop (Mesa 26.2.5, gamescope 3.16.31): under
 the systemd backend the game had the helper's render node copy, and Vulkan,
 `vkcube` in a window and in nested gamescope, and Xwayland's OpenGL all ran
