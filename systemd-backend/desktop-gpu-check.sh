@@ -159,9 +159,10 @@ game_check() { # SELECTION NAME
             "$checkout/sandbox-attach" --name "$test" --exec -- /bin/sh -c '
                 ls -ln /dev/dri/renderD* 2>&1 | sed "s/^/render node: /"
                 for p in /proc/[0-9]*; do
-                    ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD \
-                        && echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
-                done' > "$inside.new" 2>/dev/null || continue
+                    if ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD; then
+                        echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
+                    fi
+                done' > "$inside.new" 2>> "$results/game-$test-attach-errors.log" || continue
             if grep -q '^has the GPU open' "$inside.new" || ! grep -q '^has the GPU open' "$inside" 2>/dev/null; then
                 mv -f "$inside.new" "$inside"
             fi
