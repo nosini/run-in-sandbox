@@ -564,7 +564,8 @@ check_host() {
     else
         _check_line -- gamescope "installed, but this kernel's Landlock cannot keep games under it off the desktop's compositor"
     fi
-    if command -v xwayland-satellite >/dev/null && command -v Xwayland >/dev/null; then
+    if { [ -n "$(helper sandbox-xwayland-satellite)" ] || command -v xwayland-satellite >/dev/null; } \
+            && command -v Xwayland >/dev/null; then
         _check_line ok satellite "optional private X11 backend for --wayland-x11 installed"
     else
         _check_line -- satellite "optional --x11-backend=satellite needs xwayland-satellite and Xwayland"
@@ -1905,11 +1906,23 @@ if [ "$GS" = 1 ] && [ "$X11_BACKEND" = gamescope ]; then
     # Put in front of the game in "landlock", below, with a layer of its own
     # between the two.
 fi
+SATELLITE_ARGS=()
 if [ "$X11_BACKEND" = satellite ]; then
-    command -v xwayland-satellite >/dev/null && command -v Xwayland >/dev/null || {
+    SATELLITE_BIN="$(helper sandbox-xwayland-satellite)"
+    if [ -n "$SATELLITE_BIN" ]; then
+        [ -x "$SATELLITE_BIN" ] || { echo "satellite helper is not executable: $SATELLITE_BIN" >&2; exit 1; }
+        SATELLITE_ARGS=( --ro-bind "$SATELLITE_BIN" /run/sandbox-xwayland-satellite )
+        SATELLITE_BIN=/run/sandbox-xwayland-satellite
+        echo "sandbox-game: using the private satellite build with popup lifetime fixes" >&2
+    else
+        command -v xwayland-satellite >/dev/null || {
+            echo "satellite backend needs xwayland-satellite (or ./build-satellite.sh)" >&2; exit 1; }
+        SATELLITE_BIN=xwayland-satellite
+    fi
+    command -v Xwayland >/dev/null || {
         echo "satellite backend needs xwayland-satellite and Xwayland" >&2; exit 1; }
     GS_CMD=( env WAYLAND_DISPLAY="$HOST_WL" XDG_RUNTIME_DIR=/run/sandbox-x11
-             xwayland-satellite :0 -nolisten tcp )
+             "$SATELLITE_BIN" :0 -nolisten tcp )
 fi
 
 # ---- environment, display and devices --------------------------------------
@@ -2608,6 +2621,7 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
     "${XSOCK_ARGS[@]}"
     --perms 0700 --tmpfs "$RT"
     "${DISPLAY_ARGS[@]}"
+    "${SATELLITE_ARGS[@]}"
     "${AUDIO_ARGS[@]}"
     "${TOOLS_ARGS[@]}"
     "${EXTRA_RO[@]}"

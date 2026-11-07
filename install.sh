@@ -126,6 +126,8 @@ case "${1:-}" in
     --uninstall)
         each remove_one
         each_old remove_one
+        remove_one - sandbox-xwayland-satellite "$HELPERS"
+        remove_one - satellite-LICENSE "$HELPERS"
         rmdir "$HELPERS" 2>/dev/null || true
         each_completion remove_one
         if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
@@ -172,6 +174,10 @@ if [ -n "$SYSTEMD_MODE" ]; then
     exit
 fi
 each install_one
+if [ -x "$SRC/sandbox-xwayland-satellite" ]; then
+    install_one 755 sandbox-xwayland-satellite "$HELPERS"
+    install -Dm644 "$SRC/satellite-LICENSE" "$HELPERS/satellite-LICENSE"
+fi
 each_old remove_one
 each_completion install_completion
 mkdir -p "$TOOLS"

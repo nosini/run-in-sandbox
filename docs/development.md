@@ -54,6 +54,10 @@ actual sandbox. It does not exercise Wine, GPU rendering or desktop input.
 The supervisor's startup, failure and cleanup tests in `test_x11_server.py`
 also run without a display or bubblewrap.
 
+The satellite fork's popup lifetime regression tests and live Mutter check
+are maintained in [nosini/xwayland-satellite](https://github.com/nosini/xwayland-satellite),
+alongside the fix. The local fork checkout is `../xwayland-satellite`.
+
 ## Probes for the systemd backend
 
 [`systemd-backend/probes/`](../systemd-backend/probes/) holds standalone

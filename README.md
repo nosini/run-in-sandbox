@@ -444,6 +444,8 @@ resolution and fullscreen settings do not apply; saved arguments are kept for
 switching back. Explicit `--gamescope=ARGS` is rejected with satellite.
 Satellite's window positioning and Wine scaling can differ from gamescope;
 test launcher popups and mixed Wayland/X11 coordinates with your runner.
+If launcher popups crash satellite with `destroyed popup not top most popup`,
+use the project's [private satellite build](docs/satellite.md).
 
 With the default gamescope backend, its window opens beside the game's when
 the first X11 program starts. Closing it ends the X11 programs in it, such as

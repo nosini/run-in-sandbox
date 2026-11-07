@@ -2436,8 +2436,9 @@ sys.exit(int(sys.argv[2]))
         self.assertNotIn("--gamescope-on-demand", args)
         self.assertIn("--x11-server", args)
         self.assertIn("XDG_RUNTIME_DIR=/run/sandbox-x11", args)
-        server = args.index("xwayland-satellite")
-        self.assertEqual(args[server + 1:server + 4], [":0", "-nolisten", "tcp"])
+        server = next(i for i in range(len(args) - 3)
+                      if args[i + 1:i + 4] == [":0", "-nolisten", "tcp"])
+        self.assertIn(args[server], ("xwayland-satellite", "/run/sandbox-xwayland-satellite"))
         starts = [i for i, a in enumerate(args)
                   if a == "/run/sandbox-landlock" and args[i + 1:i + 2] == ["--ls"]]
         outer, inner = [args[i + 1:args.index("--", i)] for i in starts]
@@ -2456,6 +2457,22 @@ sys.exit(int(sys.argv[2]))
         self.assertEqual(values["MANGOHUD_CONFIG"], "read_cfg,toggle_hud=F12")
         self.assertEqual(values["DXVK_HDR"], "1")
         self.assertNotIn("--hdr-enabled", args)
+
+        # A locally built helper is mounted read-only, ahead of the system
+        # package. The checkout's helper takes precedence over an installed one.
+        helper = self.home / ".local/lib/sandbox-game/sandbox-xwayland-satellite"
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("#!/bin/sh\nexit 99\n")
+        helper.chmod(0o755)
+        expected = ROOT / "sandbox-xwayland-satellite"
+        if not expected.exists():
+            expected = helper
+        args = self.recorded_args("--wayland-x11", "--x11-backend=satellite", "--proton=" + str(proton))
+        mounted = args.index(str(expected))
+        self.assertEqual(args[mounted - 1:mounted + 2],
+                         ["--ro-bind", str(expected), "/run/sandbox-xwayland-satellite"])
+        server = args.index("--x11-server")
+        self.assertIn("/run/sandbox-xwayland-satellite", args[server:])
 
     @unittest.skipUnless(os.environ.get("TEST_SATELLITE") == "1", "set TEST_SATELLITE=1 for real satellite/Weston")
     def test_live_satellite_windows_and_internal_socket_isolation(self):
