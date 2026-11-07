@@ -188,8 +188,8 @@ index 4294967295 and libpulse rejects it. This affects the restricted sound
 server under every backend. Fixing it would mean patching PipeWire, which
 this project does not carry; it is a known limitation.
 
-Boot checks, DMA-BUF on its own and multiple GPUs remain unvalidated. On the
-desktop (see above), Vulkan, OpenGL, gamescope/Xwayland and real games --
+Boot checks and DMA-BUF on its own remain unvalidated. On the
+desktop (see above), Vulkan, OpenGL, EGL, gamescope/Xwayland and real games --
 Proton, NW.js, Ren'Py, mkxp-z, Pixel Game Maker MV -- ran on the GPU.
 
 One full-suite run made alongside the loop-mount matrix also saw a single

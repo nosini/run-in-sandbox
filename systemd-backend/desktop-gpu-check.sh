@@ -268,7 +268,7 @@ run() { # NAME BACKEND DISPLAY-OPTION COMMAND...
 # What each log says about the device, in a line.
 vk_device() { grep -m1 -E 'deviceName' "$1" | sed 's/.*= *//'; }
 vk_type() { grep -m1 -E 'deviceType' "$1" | sed 's/.*= *//'; }
-gl_renderer() { grep -m1 -E 'OpenGL renderer string' "$1" | sed 's/.*: *//'; }
+gl_renderer() { grep -m1 -E 'OpenGL (renderer string|core profile renderer)' "$1" | sed 's/.*: *//'; }
 
 for backend in 0 systemd; do
     note ""
@@ -281,6 +281,7 @@ for backend in 0 systemd; do
     fi
     if have eglinfo; then
         run eglinfo "$backend" --wayland eglinfo -B
+        # GBM and X11 fail by design (no card node, no X server), so its exit is 2.
         note "egl: $(gl_renderer "$results/eglinfo-$backend.log"), $(tail -1 "$results/eglinfo-$backend.log")"
     else
         note "egl: skipped, no eglinfo (Mesa-demo-egl)"

@@ -300,8 +300,10 @@ per-game SELinux policy or relabeling step.
      Identical to `0`, gamescope's PipeWire/"Compositor released us" errors
      included. So nested gamescope needs no extra card-node handling.
      Window presentation to the compositor and to gamescope went through
-     DMA-BUF implicitly; not checked on its own. Still open: EGL directly
-     (no Mesa-demo-egl there).
+     DMA-BUF implicitly; not checked on its own. EGL, on a later run: the
+     Wayland, surfaceless and device platforms report radeonsi on the RX
+     9070 XT under both backends; GBM (no card node outside gamescope) and
+     X11 (no X server with --wayland) fail under both, as designed.
    - Real games on the desktop (2026-11-07, `desktop-gpu-check.sh --game`,
      separate `NAME-systemd-test` captures): a Proton game (DW-Proton 11,
      MangoHud, gamescope by its preferences) built its prefix, ran on the RX
@@ -325,12 +327,12 @@ per-game SELinux policy or relabeling step.
      headless gamescope runs. llvmpipe lacks `VK_EXT_physical_device_drm`, so
      gamescope's card/render node matching is never reached there: the
      card-node question needs a real GPU.
-   - Validate reboot ordering, stale device-number reuse, multiple GPUs,
-     allowlist changes and orderly service/mount stops. Existing tests cover
-     synthetic lifecycle cases, a real udev change event and live alias
+   - Validate reboot ordering, stale device-number reuse, allowlist changes
+     and orderly service/mount stops. Existing tests cover synthetic
+     lifecycle cases, a real udev change event and live alias
      revocation/regrant, not reboot. A shared-VM reboot window is still
-     pending; no reboot has been performed. Still open on hardware: EGL on
-     its own (openSUSE's Mesa-demo-egl) and DMA-BUF checked on its own.
+     pending; no reboot has been performed. Still open on hardware: DMA-BUF
+     checked on its own.
    - Storage/lifetime checks above cover these four filesystems and public
      foreign ownership, repeated starts/stops, concurrent games and capture
      operations. Keep testing other filesystem/ownership combinations and
