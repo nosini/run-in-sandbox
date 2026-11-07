@@ -311,10 +311,13 @@ per-game SELinux policy or relabeling step.
      separate `NAME-systemd-test` captures): a Proton game (DW-Proton 11,
      MangoHud, gamescope by its preferences) built its prefix, ran on the RX
      9070 XT and had the render node copy open in its own process; capture
-     all the user's on disk. An NW.js game ran only 9 seconds, too short for
-     the check of that time (now every 5 s); to be repeated. The uninstall
-     right after was refused: nsresourced unregisters a namespace a moment
-     after its processes end; the script now waits for that.
+     all the user's on disk. An NW.js game ran as well: its main process and
+     Chromium's GPU process had the render node copy open; capture all the
+     user's. The first uninstall right after a game was refused:
+     nsresourced unregisters a namespace a moment after its processes end;
+     the script now waits for that, and later runs removed the setup cleanly.
+     Not yet run for real under this backend: a native Linux game (ELF or
+     .sh), mkxp-z and the Pixel Game Maker MV player.
    - gamescope on the VM (2026-11-07, 3.16.31 nested in GNOME): under `0` and
      `systemd` alike it selects llvmpipe, then aborts on `vkAllocateMemory`
      (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) before any window; unsandboxed
