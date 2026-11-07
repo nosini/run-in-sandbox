@@ -306,7 +306,15 @@ per-game SELinux policy or relabeling step.
      included. So nested gamescope needs no extra card-node handling.
      Window presentation to the compositor and to gamescope went through
      DMA-BUF implicitly; not checked on its own. Still open: EGL directly
-     (no mesa-demos there), and a real native and Proton game.
+     (no mesa-demos there).
+   - Real games on the desktop (2026-11-07, `desktop-gpu-check.sh --game`,
+     separate `NAME-systemd-test` captures): a Proton game (DW-Proton 11,
+     MangoHud, gamescope by its preferences) built its prefix, ran on the RX
+     9070 XT and had the render node copy open in its own process; capture
+     all the user's on disk. An NW.js game ran only 9 seconds, too short for
+     the check of that time (now every 5 s); to be repeated. The uninstall
+     right after was refused: nsresourced unregisters a namespace a moment
+     after its processes end; the script now waits for that.
    - gamescope on the VM (2026-11-07, 3.16.31 nested in GNOME): under `0` and
      `systemd` alike it selects llvmpipe, then aborts on `vkAllocateMemory`
      (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) before any window; unsandboxed

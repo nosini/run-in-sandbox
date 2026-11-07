@@ -97,6 +97,14 @@ installed_before=0 tidy=1
 remove_setup() {
     if [ "$keep" = 0 ] && [ "$installed_before" = 0 ] && [ -e /etc/sandbox-game/systemd-backend.json ]; then
         echo "Removing the administrator setup again..."
+        # nsresourced lets go of a game's namespace a moment after the game
+        # is gone, and the uninstaller refuses while one is registered.
+        local try
+        for try in $(seq 12); do
+            sudo sh -c 'ls /run/systemd/nsresource/registry/*.userns' >/dev/null 2>&1 || break
+            [ "$try" = 1 ] && echo "Waiting for the games' namespaces to go..."
+            sleep 5
+        done
         if (cd "$checkout" && sudo ./install.sh --uninstall-systemd-backend) >> "$results/setup.txt" 2>&1; then
             note "setup: removed again"
             if [ "$tidy" = 1 ]; then
@@ -142,29 +150,34 @@ game_check() { # SELECTION NAME
     echo "Starting $gamedir under the systemd backend. Play a little, then quit it."
     # Once it is up and drawing: which render node it got, and what of it has
     # one open -- seen from inside, by a program attached to it.
+    # Every 5 seconds while it runs; the last look that found the GPU open
+    # is kept, else the last one at all.
     (
-        for _ in $(seq 180); do
-            "$checkout/sandbox-game" --list 2>/dev/null | grep -qF -- "$test" && break
-            sleep 1
+        inside="$results/game-$test-inside.log"
+        for _ in $(seq 720); do
+            sleep 5
+            "$checkout/sandbox-attach" --name "$test" --exec -- /bin/sh -c '
+                ls -ln /dev/dri/renderD* 2>&1 | sed "s/^/render node: /"
+                for p in /proc/[0-9]*; do
+                    ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD \
+                        && echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
+                done' > "$inside.new" 2>/dev/null || continue
+            if grep -q '^has the GPU open' "$inside.new" || ! grep -q '^has the GPU open' "$inside" 2>/dev/null; then
+                mv -f "$inside.new" "$inside"
+            fi
         done
-        sleep 30
-        "$checkout/sandbox-attach" --name "$test" --exec -- /bin/sh -c '
-            ls -ln /dev/dri/renderD* 2>&1 | sed "s/^/render node: /"
-            for p in /proc/[0-9]*; do
-                ls -l "$p/fd" 2>/dev/null | grep -q /dev/dri/renderD \
-                    && echo "has the GPU open: $(cat "$p/comm") (pid ${p#/proc/})"
-            done' > "$results/game-$test-inside.log" 2>&1
     ) &
     watcher=$!
     NAUTILUS_SCRIPT_SELECTED_FILE_PATHS="$sel" SANDBOX_BACKEND="$checkout/sandbox-game" \
         SANDBOX_GAME_NAME="$test" SANDBOX_SEPARATE_UID=systemd "$checkout/Sandbox game"
     status=$?
-    kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    rm -f "$results/game-$test-inside.log.new"
     [ "$copied" = 0 ] || rm -f "$cfg/$test"
     cp "$capture/lastrun.log" "$results/game-$test-lastrun.log" 2>/dev/null
     note "exit: $status"
     note "$(grep -m1 '^render node: ' "$results/game-$test-inside.log" 2>/dev/null \
-            || echo "render node: not seen (the game ended within 30 seconds, or attaching failed)")"
+            || echo "render node: not seen (the game ended within 5 seconds, or attaching failed)")"
     grep '^has the GPU open: ' "$results/game-$test-inside.log" 2>/dev/null | tee -a "$summary"
     [ -e "$capture/managed-uid" ] && note "capture: marked for the systemd backend" \
         || note "capture: NOT marked for the systemd backend"
