@@ -35,8 +35,9 @@
 #   replacing DEST whole (into it, when DEST is a folder) -- the way to change
 #   a save in the game's folder while it runs. Its changes land in the
 #   capture's rw/, but one made there directly may not reach the game before
-#   it restarts: under SANDBOX_SEPARATE_UID, fuse-overlayfs serves /game and
-#   keeps what it has read. A host path into rw/ or home/ of the capture is
+#   it restarts: under SANDBOX_SEPARATE_UID=1, fuse-overlayfs serves /game and
+#   keeps what it has read, and the kernel's overlay, otherwise, does not
+#   promise to notice. A host path into rw/ or home/ of the capture is
 #   taken as the same file inside.
 #
 # Host paths into the tools folder or ~/game-sandboxes/NAME/home -- which is
@@ -90,7 +91,7 @@ done
 # Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
 SB_PIDS=(); SB_NAMES=(); SB_PROTON=()
 scan() {
-    local p args i name child ours
+    local p args name child ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
         ours=1
@@ -98,23 +99,22 @@ scan() {
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
-        name=""
-        for ((i = 1; i < ${#args[@]}; i++)); do
-            [ "${args[i-1]}" = --bind ] || continue
-            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
-            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
-        done
-        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        bound_capture "${args[@]}"; name="$BOUND"
+        [ -n "$name" ] || continue
         [ "$ours" = 1 ] || sandbox_user "$p" "$name" || continue
         # No newline after the last PID, so read fails even when it got one.
         # The one in a user namespace of the sandbox's: under a uid of its own,
         # sandbox-uid's fuse-overlayfs daemons are children too, in bwrap's.
-        local kids=() k
+        # Under the systemd backend sandbox-uid's output relay and pasta's
+        # keeper are, in the namespace it was allocated: pid 1 is bwrap still.
+        local kids=() k kargs
         { read -r -a kids < "/proc/$p/task/$p/children"; } 2>/dev/null || true
         child=""
         for k in ${kids[@]+"${kids[@]}"}; do
             # (Not one whose namespace is closed to us: that is not the sandbox.)
             [ -e "/proc/$k/ns/user" ] && ! [[ "/proc/$k/ns/user" -ef "/proc/$p/ns/user" ]] || continue
+            { mapfile -d '' -t kargs < "/proc/$k/cmdline"; } 2>/dev/null || continue
+            [ "${kargs[0]##*/}" = bwrap ] || continue
             child="$k"; break
         done
         [ -n "$child" ] && ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]] || continue
@@ -365,11 +365,18 @@ EOF
 # Under a uid of its own the socket is that user's, and only takes requests
 # from it: ask from its namespace, as it -- still outside the sandbox's PIDs.
 # We own that namespace, so we may enter it; the outer bwrap is pid 1's parent.
+#
+# Under the systemd backend that namespace denies setgroups, and nsenter
+# cannot drop our groups there: sandbox-uid goes in the way it came.
 ENTER=()
 { read -r PSTAT < "/proc/$TARGET/stat"; } 2>/dev/null || PSTAT=""
 OUTER="${PSTAT##*) }"; OUTER="${OUTER#* }"; OUTER="${OUTER%% *}"
 if [[ "$OUTER" =~ ^[0-9]+$ ]] && ! [[ "/proc/$OUTER/ns/user" -ef /proc/self/ns/user ]]; then
-    ENTER=( nsenter "--user=/proc/$OUTER/ns/user" "--setuid=$(id -u)" "--setgid=$(id -g)" -- )
+    if [ -f "$HOME/game-sandboxes/$TNAME/managed-uid" ]; then
+        ENTER=( "$SANDBOX_UID_HELPER" managed-enter "$OUTER" -- )
+    else
+        ENTER=( nsenter "--user=/proc/$OUTER/ns/user" "--setuid=$(id -u)" "--setgid=$(id -g)" -- )
+    fi
 fi
 # On the sandbox's own root, where sandbox-game made it; a sandbox started by
 # an older sandbox-game has none.

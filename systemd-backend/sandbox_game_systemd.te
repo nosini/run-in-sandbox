@@ -1,0 +1,59 @@
+module sandbox_game_systemd 1.0;
+
+# For systemd-mountfsd and systemd-nsresourced, as openSUSE Tumbleweed's
+# policy confines them; see README.md here. Extends their existing domains. The services
+# remain enforcing and retain their Varlink ownership and namespace checks.
+# No game domain, per-game label, or permission for the game is introduced.
+# Each rule below was needed on Tumbleweed; see README.md for how that was tested.
+require {
+    type systemd_mountfsd_t;
+    type systemd_nsresourced_t;
+    attribute user_home_type;
+    attribute user_tmp_type;
+    type init_var_run_t;
+    type mnt_t;
+    type default_t;
+    type unlabeled_t;
+    type dosfs_t;
+    type fusefs_t;
+    type removable_t;
+    type nsfs_t;
+    class dir { getattr ioctl };
+    class file { read open ioctl };
+    class capability { setuid setgid sys_admin };
+    class cap_userns { sys_admin sys_ptrace };
+    class user_namespace create;
+}
+
+# Directories reach both services as O_PATH descriptors. SELinux checks
+# receiving such a descriptor as "ioctl"; neither service may list them or
+# read the files in them. Any type of the user's home: a game, Proton or the
+# launcher's tools may be in ~/.local/share (data_home_t) as much as anywhere
+# else there. user_tmp_type is the runtime directory (/run/user/UID), where
+# the Wayland and playback-only Pulse sockets are; only those are bound into
+# the sandbox. PID 1 gives the render-alias store init_var_run_t.
+# Game folders elsewhere: a drive mounted under /mnt or /run/media (mnt_t,
+# or unlabeled_t where its filesystem was never labeled), a folder made at /
+# (default_t), FAT or exFAT (dosfs_t), NTFS and other FUSE filesystems
+# (fusefs_t), removable media (removable_t).
+allow systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir { getattr ioctl };
+allow systemd_nsresourced_t { user_home_type user_tmp_type mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir { getattr ioctl };
+# Neither service issues ioctl calls on these directories. An allowxperm rule
+# limits ioctl calls to the commands it lists, so keep just one that only
+# reads: FS_IOC_GETFLAGS. Not for init_var_run_t under nsresourced, whose
+# stock policy uses its own runtime directories.
+allowxperm systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir ioctl 0x6601;
+allowxperm systemd_nsresourced_t { user_home_type user_tmp_type mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir ioctl 0x6601;
+
+# mountfsd's worker opens the caller's namespace descriptor, makes a user
+# namespace for the idmapping, and mounts.
+allow systemd_mountfsd_t nsfs_t:file { read open ioctl };
+allow systemd_mountfsd_t self:capability { setuid setgid sys_admin };
+allow systemd_mountfsd_t self:cap_userns { sys_admin sys_ptrace };
+allow systemd_mountfsd_t self:user_namespace create;
+
+# When nsresourced loads its BPF write restriction, libbpf needs this to find
+# the overlay module's types. Without it the restriction refuses every
+# overlay mount until the next boot. Upstream policy grants this from
+# Fedora's v45.22 and openSUSE's 20261030; kept here for older policies.
+allow systemd_nsresourced_t self:capability sys_admin;

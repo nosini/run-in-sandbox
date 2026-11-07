@@ -1,0 +1,8 @@
+# Experimental: install only on an isolated test system, with the matching
+# root-owned helper and service. Events only ask the service to reconcile, so
+# the helper always runs under the unit's sandbox, never directly from udev.
+# Each reconciliation inventories current sysfs state under one lock; event
+# ordering never chooses a device number. A reload requested while one runs
+# is queued again rather than merged into it. --job-mode=fail leaves a pending
+# stop alone; a stopped service has revoked every alias and ignores events.
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", ACTION=="add|change|remove", RUN+="/usr/bin/systemctl --no-block --job-mode=fail reload sandbox-game-render-devices.service"

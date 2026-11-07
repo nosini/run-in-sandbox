@@ -1,0 +1,27 @@
+[Unit]
+Description=Reconcile experimental sandbox render-device aliases
+BindsTo=run-sandboxgame-render.mount
+After=systemd-udevd.service run-sandboxgame-render.mount
+Before=systemd-user-sessions.service
+RequiresMountsFor=/usr/local/libexec/sandbox-game
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/sandbox-game/systemd-render-devices --enable
+# The udev rule reloads on render-node events.
+ExecReload=/usr/local/libexec/sandbox-game/systemd-render-devices
+# Also runs after a failed start. Ordering keeps the mount available until
+# this finishes; systemd ends a running reload first.
+ExecStopPost=/usr/local/libexec/sandbox-game/systemd-render-devices --disable
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ReadWritePaths=/run/sandboxgame/render
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

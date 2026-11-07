@@ -581,8 +581,39 @@ started_by_us() {                     # $1 = PID
     s="${s##*) }"; s="${s#* }"
     [[ "/proc/${s%% *}/ns/user" -ef /proc/self/ns/user ]]
 }
+# Under the systemd backend (SANDBOX_SEPARATE_UID=systemd) the capture stays
+# ours, and the outer bwrap runs as a transient uid of systemd-nsresourced's,
+# in a user namespace whose parent is the one sandbox-uid had allocated for
+# that launch, and recorded in the capture (see managed_owns there).
+SANDBOX_UID_HELPER="${BASH_SOURCE[0]%/*}/sandbox-uid"   # installed beside this
 sandbox_user() {                      # $1 = PID, $2 = NAME
     local u
+    if [ -f "$HOME/game-sandboxes/$2/managed-uid" ]; then
+        "$SANDBOX_UID_HELPER" managed-owns "$HOME/game-sandboxes/$2" "$1" 2>/dev/null
+        return
+    fi
     u="$(stat -c %u -- "/proc/$1" "$HOME/game-sandboxes/$2/home" 2>/dev/null)" || return 1
     [ "${u%$'\n'*}" = "${u#*$'\n'}" ] && [ "${u%$'\n'*}" != "$(id -u)" ]
+}
+
+# The sandbox whose capture's home an outer bwrap binds -- `--bind
+# ~/game-sandboxes/NAME/home $HOME` -- from its arguments, into BOUND (empty
+# for none). Under the systemd backend sandbox-uid hands bwrap that folder's
+# real path (see canonical() there): another one when ~/game-sandboxes, or
+# your home, is reached through a link.
+bound_capture() {                     # "$@" = the bwrap's command line
+    local prev="" a top
+    BOUND=""
+    [ -n "${SANDBOXES_REAL-}" ] || SANDBOXES_REAL="$(realpath -m -- "$HOME/game-sandboxes")"
+    for a in "$@"; do
+        if [ "$prev" = --bind ]; then
+            for top in "$HOME/game-sandboxes" "$SANDBOXES_REAL"; do
+                [[ "$a" == "$top/"*/home ]] || continue
+                BOUND="${a#"$top/"}"; BOUND="${BOUND%/home}"
+                [[ "$BOUND" != */* ]] || BOUND=""
+                return 0
+            done
+        fi
+        prev="$a"
+    done
 }

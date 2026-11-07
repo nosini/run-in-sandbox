@@ -192,7 +192,7 @@ list_protons() {                      # every install found, newest first
 # gamescope and anything sandbox-attach put in there. The capture's home is
 # how a sandbox is recognised: `--bind ~/game-sandboxes/NAME/home $HOME`.
 outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
-    local p args i name ours
+    local p args name ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
         # Same user namespace: -ef compares the namespaces' inodes, without a
@@ -202,13 +202,8 @@ outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
-        name=""
-        for ((i = 1; i < ${#args[@]}; i++)); do
-            [ "${args[i-1]}" = --bind ] || continue
-            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
-            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
-        done
-        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        bound_capture "${args[@]}"; name="$BOUND"
+        [ -n "$name" ] || continue
         [ "$ours" = 1 ] || sandbox_user "$p" "$name" || continue
         [ -z "$1" ] || [ "$name" = "$1" ] || continue
         printf '%s %s\n' "$p" "$name"
@@ -903,15 +898,50 @@ lock_sandbox "$NAME" || { echo "'$NAME' is already running" >&2; exit 1; }
 # must not quietly run the game as you. Turned off, the capture is given back
 # to you for good, and the sandbox's uid goes (it gets the next free one if
 # turned on again).
+# SANDBOX_SEPARATE_UID=systemd does the same through systemd-nsresourced
+# and systemd-mountfsd instead (see "The systemd backend" in sandbox-uid),
+# marked by CAP/managed-uid. Its files are yours on disk, as they are when a
+# game runs as you, so either way round a switch takes no more than giving
+# them back from the subordinate uid, or making the overlay readable to the
+# kernel's overlayfs. A switch to it writes the mark first, as "adopting",
+# and "1" only once the capture is ready: one that fails halfway still runs
+# under the systemd backend next time -- not as you -- and finishes then.
 case "${SANDBOX_SEPARATE_UID:-}" in
     1) SEPARATE_UID=1 ;;
-    "") SEPARATE_UID=0; [ ! -f "$CAP/uid" ] || SEPARATE_UID=1 ;;
+    systemd) SEPARATE_UID=systemd ;;
+    "") SEPARATE_UID=0
+        if [ -f "$CAP/uid" ]; then SEPARATE_UID=1
+        elif [ -f "$CAP/managed-uid" ]; then SEPARATE_UID=systemd; fi ;;
     *) SEPARATE_UID=0 ;;
 esac
-if [ "$SEPARATE_UID" = 0 ] && [ -f "$CAP/uid" ]; then
-    echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
+if [ "$SEPARATE_UID" = systemd ] || { [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; }; then
+    UIDHELPER="$(helper sandbox-uid)"
+    [ -n "$UIDHELPER" ] || { echo "sandbox-uid not found; run install.sh" >&2; exit 1; }
+fi
+# Before anything changes: an unavailable backend leaves the capture as it is.
+[ "$SEPARATE_UID" != systemd ] || "$UIDHELPER" managed-available || exit 1
+if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
+    if [ "$SEPARATE_UID" = 0 ]; then
+        echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
+    else
+        echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME no longer runs as a subordinate uid; giving its files back" >&2
+    fi
     reclaim "$CAP" || exit 1
+    # Another sandbox may get that uid later: its ACL entries go too.
+    "$UIDHELPER" forget "$CAP" || exit 1
+    [ "$SEPARATE_UID" != systemd ] || printf 'adopting\n' > "$CAP/managed-uid"
     rm -f "$CAP/uid" "$CAP/.shared" "$CAP/.handed-over"
+fi
+if [ "$SEPARATE_UID" = systemd ] && [ "$(cat -- "$CAP/managed-uid" 2>/dev/null)" != 1 ]; then
+    mkdir -p "$CAP"
+    printf 'adopting\n' > "$CAP/managed-uid"
+    # Folders overlayfs leaves locked when a run is killed (see unwork).
+    unlock_work "$CAP"
+    "$UIDHELPER" managed-adopt "$CAP" || exit 1
+    printf '1\n' > "$CAP/managed-uid"  # the storage's format, should it change
+elif [ "$SEPARATE_UID" != systemd ] && [ -f "$CAP/managed-uid" ]; then
+    echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME no longer runs under the systemd backend" >&2
+    rm -f "$CAP/managed-uid"
 fi
 # Under it, the capture stays the sandbox's between runs. sandbox-game's own
 # changes to it -- an executable copy in rw/, a registry put back -- are rare,
@@ -1907,10 +1937,14 @@ if [ "$HEADLESS" = 0 ]; then
     if [ "$HOST_X11" = 1 ]; then
         XSOCK_ARGS=( --ro-bind /tmp/.X11-unix /tmp/.X11-unix )
         VIDEO_ENV+=( --setenv DISPLAY "${DISPLAY:?--host-x11 needs DISPLAY}" )
+        # A copy, not the file: yours is 0600, which a uid of the sandbox's
+        # own cannot read, and the systemd backend would have to share its
+        # folder -- your home, for ~/.Xauthority -- to bind it at all.
         XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
-        [ ! -f "$XAUTH_HOST" ] || XSOCK_ARGS+=(
-            --ro-bind "$XAUTH_HOST" /tmp/.Xauthority
-            --setenv XAUTHORITY /tmp/.Xauthority )
+        if [ -f "$XAUTH_HOST" ] && exec 14< "$XAUTH_HOST"; then
+            XSOCK_ARGS+=( --ro-bind-data 14 /tmp/.Xauthority
+                          --setenv XAUTHORITY /tmp/.Xauthority )
+        fi
     else
         # Normalize absolute WAYLAND_DISPLAY values to a private socket path.
         case "$WL" in /*) WL_HOST="$WL" ;; *) WL_HOST="$RT/$WL" ;; esac
@@ -1977,7 +2011,7 @@ if [ -S "$SANDBOX_PULSE" ]; then
     AUDIO_ARGS=( --ro-bind "$SANDBOX_PULSE" "$RT/pulse/native"
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 else
-    [ "$SEPARATE_UID" = 1 ] || {      # it gets none of these then
+    [ "$SEPARATE_UID" != 0 ] || {     # it gets none of these then
     echo "sandbox-game: warning: no playback-only sound server; the game can record and load sound server modules" >&2
     echo "                       (./install.sh --restrict-audio sets one up)" >&2; }
     AUDIO_ARGS=( --ro-bind-try "$RT/pipewire-0" "$RT/pipewire-0"
@@ -2010,10 +2044,11 @@ OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
 # is just an inaccessible directory you own, and it is what makes the whole
 # capture folder refuse to delete in a file manager until you chmod it by hand.
 # It is disposable once unmounted, so take it away.
-# (Under a uid of its own it is fuse-overlayfs's, not closed, and the whole
-# capture the sandbox's anyway: --delete takes care of it.)
+# (Under a subordinate uid it is fuse-overlayfs's, not closed, and the whole
+# capture the sandbox's anyway: --delete takes care of it. The systemd
+# backend's overlayfs leaves one of yours, as here.)
 unwork() {
-    [ "$SEPARATE_UID" = 0 ] && [ -d "$CAP/work/work" ] || return 0
+    [ "$SEPARATE_UID" != 1 ] && [ -d "$CAP/work/work" ] || return 0
     chmod u+rwx "$CAP/work/work" 2>/dev/null || return 0
     rm -rf "$CAP/work/work" 2>/dev/null || true
 }
@@ -2070,7 +2105,7 @@ fuse_overlay() {                     # lower, upper, work, mountpoint
 }
 # Under a uid of its own, sandbox-uid mounts these itself (see there), from
 # the same options, whatever this bwrap supports.
-if [ "$SEPARATE_UID" = 1 ] || [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
+if [ "$SEPARATE_UID" != 0 ] || [[ "$(bwrap --help 2>&1)" == *--overlay* ]]; then     # no grep -q: see probe_limits
     OVERLAY_ARGS=( --overlay-src "$GAMEDIR" --overlay "$CAP/rw" "$CAP/work" /game )
     [ -z "$PROTON" ] || OVERLAY_ARGS+=( --overlay-src "$PROTON" --tmp-overlay /proton )
 else
@@ -2313,6 +2348,40 @@ for ver in (4, 6) if not lan else ():
         if net.prefixlen and "gateway" not in r:
             block[ver].append(str(net))
 
+batches = {}
+for ver, nets in block.items():
+    if ver == 6 and not has_v6:
+        continue
+    # Rules, not routes: they are consulted before any route, so the on-link
+    # route pasta copies from the host cannot outrank them.
+    # Only DNS itself: pasta answers just that at this address, and passes
+    # anything else on to whatever really has it, on this machine or the LAN.
+    rules = [f"rule add priority 90 to {dns} ipproto {p} dport 53 lookup main"
+             for p in ("udp", "tcp")] if ver == 4 else []
+    # Host addresses stay refused even when an allowance includes them. Pasta
+    # copies only its selected interface address, so other host addresses
+    # could otherwise reach host services through its sockets.
+    rules += [f"rule add priority 94 to {a} prohibit"
+              for a in dict.fromkeys(host_addresses[ver])]
+    # --allow-lan, ahead of the network refusals: the address, or network, and
+    # with a port only that port, over TCP and UDP unless one was named.
+    for net, proto, ports in json.loads(allowed):
+        if ipaddress.ip_network(net).version != ver:
+            continue
+        where = f"rule add priority 95 to {net}"
+        for p in [proto] if proto else ["tcp", "udp"] if ports else [""]:
+            rules.append(where + (f" ipproto {p}" if p else "")
+                         + (f" dport {ports}" if ports else "") + " lookup main")
+    rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
+    if rules:
+        batches[ver] = rules
+# No game yet under the systemd backend: sandbox-uid makes the game's network
+# namespace itself, before bwrap, and starts pasta and applies these there.
+if not pid:
+    print(json.dumps({"pasta": pasta, "dns": dns, "mac": mac, "ipv6": has_v6,
+                      "rules": {str(ver): rules for ver, rules in batches.items()}}))
+    sys.exit()
+
 net_fd = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
 user_fd = fcntl.ioctl(net_fd, NS_GET_USERNS)
 # Under a uid of its own (SANDBOX_SEPARATE_UID) that namespace belongs to the
@@ -2347,32 +2416,7 @@ subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
                 "--dns-forward", dns, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
                check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
                pass_fds=(user_fd,))
-for ver, nets in block.items():
-    if ver == 6 and not has_v6:
-        continue
-    # Rules, not routes: they are consulted before any route, so the on-link
-    # route pasta copies from the host cannot outrank them.
-    # Only DNS itself: pasta answers just that at this address, and passes
-    # anything else on to whatever really has it, on this machine or the LAN.
-    rules = [f"rule add priority 90 to {dns} ipproto {p} dport 53 lookup main"
-             for p in ("udp", "tcp")] if ver == 4 else []
-    # Host addresses stay refused even when an allowance includes them. Pasta
-    # copies only its selected interface address, so other host addresses
-    # could otherwise reach host services through its sockets.
-    rules += [f"rule add priority 94 to {a} prohibit"
-              for a in dict.fromkeys(host_addresses[ver])]
-    # --allow-lan, ahead of the network refusals: the address, or network, and
-    # with a port only that port, over TCP and UDP unless one was named.
-    for net, proto, ports in json.loads(allowed):
-        if ipaddress.ip_network(net).version != ver:
-            continue
-        where = f"rule add priority 95 to {net}"
-        for p in [proto] if proto else ["tcp", "udp"] if ports else [""]:
-            rules.append(where + (f" ipproto {p}" if p else "")
-                         + (f" dport {ports}" if ports else "") + " lookup main")
-    rules += [f"rule add priority 100 to {n} prohibit" for n in dict.fromkeys(nets)]
-    if not rules:
-        continue
+for ver, rules in batches.items():
     subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
                    text=True, check=True, pass_fds=(user_fd, net_fd),
                    preexec_fn=enter((user_fd, CLONE_NEWUSER), (net_fd, CLONE_NEWNET)))
@@ -2431,6 +2475,77 @@ if [ "$SEPARATE_UID" = 1 ]; then
     fi
     UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" launch "$CAP" -- )
     RECLAIMED=0                       # handed over again at launch
+# SANDBOX_SEPARATE_UID=systemd: a transient uid of systemd-nsresourced's (see
+# sandbox-uid). The sockets need no ACL: sandbox-uid has their folder mounted
+# for the sandbox, idmapped, and the game connects as their owner. Neither
+# does the game get the render group: the render nodes stay closed to it, and
+# it draws through the copies of them that an administrator's helper keeps
+# for you (see systemd-backend/render-devices.md).
+elif [ "$SEPARATE_UID" = systemd ]; then
+    if [ ! -S "$SANDBOX_PULSE" ]; then
+        AUDIO_ARGS=()
+        echo "sandbox-game: warning: no playback-only sound server, so no sound under SANDBOX_SEPARATE_UID" >&2
+        echo "                       (./install.sh --restrict-audio sets one up)" >&2
+    fi
+    RENDER_COPIES="/run/sandboxgame/render/$(id -u)"
+    GPU_ARGS=(); NO_GPU=0
+    for ((i = 0; i < ${#DEVICE_ARGS[@]}; i++)); do
+        case "${DEVICE_ARGS[i]}" in
+            --dev-bind|--dev-bind-try)
+                src="${DEVICE_ARGS[i+1]}"; dst="${DEVICE_ARGS[i+2]}"; i=$((i + 2))
+                case "$src" in
+                    /dev/dri/renderD*)
+                        if [ -c "$RENDER_COPIES/${src##*/}" ]; then
+                            src="$RENDER_COPIES/${src##*/}"
+                        else
+                            NO_GPU=1; continue
+                        fi ;;
+                    /dev/dri)
+                        # SANDBOX_GPU_CARD=1: not a node in there would open for
+                        # the transient uid. The nodes as without it, then.
+                        echo "sandbox-game: warning: SANDBOX_GPU_CARD=1 does nothing under SANDBOX_SEPARATE_UID=systemd," \
+                            "whose uid cannot open a card node" >&2
+                        for device in /dev/dri/renderD*; do
+                            [ -c "$device" ] || continue
+                            if [ -c "$RENDER_COPIES/${device##*/}" ]; then
+                                GPU_ARGS+=( --dev-bind "$RENDER_COPIES/${device##*/}" "$device" )
+                            else
+                                NO_GPU=1
+                            fi
+                        done
+                        if [ "$GS" = 1 ]; then
+                            for device in /dev/dri/card*; do
+                                [ ! -c "$device" ] || GPU_ARGS+=( --dev-bind "$device" "$device" )
+                            done
+                        fi
+                        continue ;;
+                esac
+                GPU_ARGS+=( "${DEVICE_ARGS[i-2]}" "$src" "$dst" ) ;;
+            *) GPU_ARGS+=( "${DEVICE_ARGS[i]}" ) ;;
+        esac
+    done
+    DEVICE_ARGS=( "${GPU_ARGS[@]}" )
+    [ "$NO_GPU" = 0 ] || echo "sandbox-game: warning: no copy of the GPU's render nodes for you in $RENDER_COPIES," \
+        "so the game draws without the GPU under SANDBOX_SEPARATE_UID=systemd" >&2
+    # The network too is sandbox-uid's to make, in the namespace it makes,
+    # before bwrap starts: the same rules, from here, and pasta beside it as a
+    # child that ends with the sandbox. bwrap then neither waits for it nor
+    # reports its pid.
+    MANAGED_NET=()
+    if [ "$NET" = 1 ]; then
+        NET_SPEC="$(python3 -c "$NET_HELPER" "" "$DNS_ADDR" "" "$PASTA_BIN" "$MAC" \
+                    "$LAN_ALL" "$LAN_RULES" 18>&-)" || {
+            echo "could not work out the sandbox's network rules; not starting the game" >&2; exit 1; }
+        MANAGED_NET=( --net "$NET_SPEC" )
+        for ((i = 0; i < ${#NET_ARGS[@]}; i++)); do
+            case "${NET_ARGS[i]}" in
+                --info-fd|--block-fd) unset 'NET_ARGS[i]' 'NET_ARGS[i+1]'; i=$((i + 1)) ;;
+            esac
+        done
+        NET_ARGS=( "${NET_ARGS[@]}" )
+        rm -f "$PASTA_PID"; PASTA_PID=""
+    fi
+    UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" managed-launch "$CAP" "${MANAGED_NET[@]}" -- )
 fi
 
 # Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find
@@ -2577,7 +2692,7 @@ fi
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
 PLAY_START="$(date +%s)"
-if [ "$NET" = 0 ]; then
+if [ "$NET" = 0 ] || [ "$SEPARATE_UID" = systemd ]; then
     "${BWRAP[@]}" "$@" 18>&- && rc=0 || rc=$?
 else
     # FIFOs, opened in the same order on both ends: bwrap's info pipe first,

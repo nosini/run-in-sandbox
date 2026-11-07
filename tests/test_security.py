@@ -189,11 +189,17 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
 
 class SecurityTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-",
+                                              dir=os.environ.get("SANDBOX_TEST_TMPDIR"))
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.home = self.base / "home"
         self.game = self.base / "games" / "Game"
+        game_root = os.environ.get("SANDBOX_TEST_GAME_TMPDIR")
+        if game_root:
+            game_tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-source-", dir=game_root)
+            self.addCleanup(game_tmp.cleanup)
+            self.game = Path(game_tmp.name) / "Game"
         self.runtime = self.base / "run"
         for path in (self.home, self.game, self.runtime):
             path.mkdir(parents=True)
@@ -230,6 +236,64 @@ class SecurityTests(unittest.TestCase):
 
     def run_guest(self, script, *options):
         return self.cli("--headless", *options, self.game, "/bin/sh", "-ec", script)
+
+    def test_unavailable_systemd_backend_keeps_existing_capture(self):
+        scripts = self.base / 'unavailable-backend'
+        scripts.mkdir()
+        for name in ('sandbox-game', 'sandbox-game-lib'):
+            shutil.copy2(ROOT / name, scripts / name)
+        helper = scripts / 'sandbox-uid'
+        helper.write_text('#!/bin/sh\necho "unsupported systemd version 261.3" >&2\nexit 1\n')
+        helper.chmod(0o755)
+        capture = self.home / 'game-sandboxes' / 'keep-capture'
+        capture.mkdir(parents=True)
+        for name, value in (('uid', '7\n'), ('save', 'keep'), ('managed-uid', '1\n')):
+            (capture / name).write_text(value)
+        before = {p.name: p.read_bytes() for p in capture.iterdir()}
+        for marked in (True, False):
+            if not marked:
+                (capture / 'managed-uid').unlink()
+                del before['managed-uid']
+            env = {**self.env, 'SANDBOX_SEPARATE_UID': 'systemd'}
+            result = subprocess.run([str(scripts / 'sandbox-game'), '--headless', '--name',
+                                     'keep-capture', str(self.game), '/bin/true'],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('unsupported systemd version', result.stderr)
+            self.assertEqual({p.name: p.read_bytes() for p in capture.iterdir()}, before)
+
+    def test_interrupted_switch_to_systemd_stays_with_it(self):
+        # The uid's mark is gone once the files are given back; should the
+        # conversion then fail, the next launch -- without the variable, from
+        # the file manager say -- must not run the game as you.
+        scripts = self.base / 'failing-adopt'
+        scripts.mkdir()
+        for name in ('sandbox-game', 'sandbox-game-lib'):
+            shutil.copy2(ROOT / name, scripts / name)
+        log = self.base / 'helper-log'
+        helper = scripts / 'sandbox-uid'
+        helper.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$HELPER_LOG"\n'
+                          'case "$1" in\n'
+                          '    managed-adopt) exit 1 ;;\n'
+                          '    managed-available) [ -z "$UNAVAILABLE" ] || exit 1 ;;\n'
+                          'esac\n')
+        helper.chmod(0o755)
+        capture = self.home / 'game-sandboxes' / 'interrupted'
+        capture.mkdir(parents=True)
+        (capture / 'uid').write_text('7\n')
+        env = {k: v for k, v in self.env.items() if k != 'SANDBOX_SEPARATE_UID'}
+        env['HELPER_LOG'] = str(log)
+        for value in ('systemd', None):
+            run_env = {**env, 'SANDBOX_SEPARATE_UID': value} if value else {**env, 'UNAVAILABLE': '1'}
+            result = subprocess.run([str(scripts / 'sandbox-game'), '--headless', '--name',
+                                     'interrupted', str(self.game), '/bin/true'],
+                                    env=run_env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((capture / 'uid').exists())
+            self.assertEqual((capture / 'managed-uid').read_text(), 'adopting\n')
+        self.assertEqual(log.read_text().split(),
+                         ['managed-available', 'run', 'forget', 'managed-adopt',
+                          'managed-available'])
 
     def test_manager_install_then_launch_keeps_one_prefix(self):
         import runpy
@@ -846,12 +910,24 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertTrue((self.home / "game-sandboxes" / name / "home" / "attached").is_file())
         # Nor is it in the sandbox's pid 1, bwrap, which keeps its own
         # environment: the outer bwrap's child, read from out here.
+        # (Started from our namespace; under a uid of its own it runs in another.)
+        def bwrap(p):
+            return (p / "cmdline").read_bytes().split(b"\0")[0].endswith(b"bwrap")
         outer = next(p for p in Path("/proc").glob("[0-9]*")
-                     if (p / "cmdline").read_bytes().split(b"\0")[0].endswith(b"bwrap")
+                     if bwrap(p)
                      and f"game-sandboxes/{name}/home".encode() in (p / "cmdline").read_bytes()
-                     and os.path.samestat(os.stat(p / "ns" / "user"), os.stat("/proc/self/ns/user")))
-        pid1 = (outer / "task" / outer.name / "children").read_text().split()[0]
-        self.assertEqual(Path("/proc", pid1, "environ").read_bytes(), b"")
+                     and os.path.samestat(
+                         os.stat(Path("/proc", (p / "stat").read_text().rsplit(")", 1)[1].split()[1],
+                                      "ns", "user")),
+                         os.stat("/proc/self/ns/user")))
+        pid1 = next(k for k in (outer / "task" / outer.name / "children").read_text().split()
+                    if bwrap(Path("/proc", k)))
+        try:
+            self.assertEqual(Path("/proc", pid1, "environ").read_bytes(), b"")
+        except PermissionError:
+            # Under a uid of its own it is that uid's, closed to us: env -i
+            # does the same there, and the run as us shows it.
+            self.assertIn(self.env.get("SANDBOX_SEPARATE_UID"), ("1", "systemd"))
         # A descriptor handed to sandbox-attach stays outside: what is attached
         # runs without Landlock, and namespaces do not revoke an open file.
         secret = os.open(self.home / "host-secret", os.O_RDONLY)
@@ -905,7 +981,16 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                 proc.terminate()
             proc.communicate(timeout=10)
         self.addCleanup(stop)
-        self.assertEqual(proc.stdout.readline().strip(), "ready", proc.stderr.read()
+        # communicate() reads the pipe directly. TextIOWrapper.readline()
+        # could read ahead past "ready" and strand following output in its
+        # buffer, making a fast game look as if its output had disappeared.
+        ready = bytearray()
+        while len(ready) < 1024:
+            byte = os.read(proc.stdout.fileno(), 1)
+            if byte in (b'', b'\n'):
+                break
+            ready += byte
+        self.assertEqual(ready.decode(errors='replace').strip(), "ready", proc.stderr.read()
                          if proc.poll() is not None else "")
         return proc
 
@@ -2638,27 +2723,53 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         time.sleep(0.3)
         self.assertEqual(running(), [], "pasta outlived the game")
 
+    def test_network_lets_nothing_in(self):
+        # No port of this machine leads into the sandbox: pasta forwards none.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import socket
+        import time
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--net", self.game, "python3", "-c",
+             "import socket, sys\n"
+             "for family, host in ((socket.AF_INET, '0.0.0.0'), (socket.AF_INET6, '::')):\n"
+             "    try:\n"
+             "        s = socket.socket(family); s.bind((host, %d)); s.listen()\n"
+             "    except OSError:\n"
+             "        continue\n"
+             "    globals()[host] = s\n"
+             "print('ready', flush=True); sys.stdin.read()" % port],
+            env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "ready",
+                         proc.stderr.read() if proc.poll() is not None else "")
+        own = [a["local"] for link in json.loads(subprocess.run(
+                   [shutil.which("ip") or "/usr/sbin/ip", "-j", "addr", "show"],
+                   capture_output=True, text=True, check=True).stdout)
+               for a in link.get("addr_info", [])]
+        for address in own:
+            with self.subTest(address=address), socket.socket(
+                    socket.AF_INET6 if ":" in address else socket.AF_INET) as client:
+                client.settimeout(2)
+                if address.startswith("fe80:"):
+                    continue
+                self.assertNotEqual(client.connect_ex((address, port)), 0,
+                                    f"reached the game at {address}:{port}")
+        proc.stdin.close()
+        proc.wait(timeout=10)
+
     def test_stop_ends_only_the_named_sandbox_and_counts_as_clean(self):
         # "game" and "game-2": a prefix match would take the wrong one down.
-        import time
         def launch(name):
-            proc = subprocess.Popen(
-                [str(ROOT / "sandbox-game"), "--headless", "--name", name,
-                 self.game, "/bin/sh", "-c", "touch /tmp/up; exec sleep 60"],
-                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            self.addCleanup(proc.stderr.close)
-            self.addCleanup(proc.kill)
-            # Up once its bwrap is: that is what --stop goes looking for.
-            home = self.home / "game-sandboxes" / name / "home"
-            for _ in range(100):
-                if subprocess.run(["pgrep", "-f", f"bwrap .*--bind {home} "],
-                                  capture_output=True).stdout:
-                    return proc
-                time.sleep(0.1)
-            self.fail(f"{name} did not start: {proc.stderr.read()}")
+            # A command-line search also matched sandbox-uid while it was
+            # still setting up the namespace. Wait for the payload itself.
+            return self.launch_named(name, '/bin/sh', '-c', 'echo ready; exec sleep 60')
         first = launch("game")
         second = launch("game-2")
-        time.sleep(0.3)
 
         missing = self.cli("--stop", "no-such-game", check=False)
         self.assertNotEqual(missing.returncode, 0)
@@ -3627,6 +3738,32 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertIn("DISPLAY", args)
         self.assertNotIn("WAYLAND_DISPLAY", args)
 
+    def test_host_x11_authority_is_a_copy(self):
+        # Bound, your 0600 file is unreadable to a uid of the sandbox's own,
+        # and the systemd backend would have to share your home for it.
+        auth = self.home / ".Xauthority"
+        auth.write_bytes(b"cookie")
+        auth.chmod(0o600)
+        self.env.pop("XAUTHORITY", None)
+        args = self.recorded_args("--host-x11")
+        self.assertNotIn(str(auth), args)
+        i = args.index("/tmp/.Xauthority")
+        self.assertEqual(args[i - 2], "--ro-bind-data")
+
+    def test_host_x11_game_reads_the_authority(self):
+        if not Path("/tmp/.X11-unix").is_dir():
+            self.skipTest("no /tmp/.X11-unix to bind")
+        auth = self.home / ".Xauthority"
+        auth.write_bytes(b"\x01\x00cookie")
+        auth.chmod(0o600)
+        self.env.pop("XAUTHORITY", None)
+        self.env["DISPLAY"] = ":123"
+        result = self.cli("--host-x11", self.game, "/bin/sh", "-ec",
+                          'test "$XAUTHORITY" = /tmp/.Xauthority; test ! -e /proc/self/fd/14; '
+                          'od -An -c "$XAUTHORITY"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["001", "\\0", "c", "o", "o", "k", "i", "e"])
+
     def test_native_wayland_does_not_expose_host_x(self):
         args = self.recorded_args("--wayland")
         self.assertNotIn("gamescope", args)
@@ -3691,11 +3828,41 @@ class SeparateUidTests(unittest.TestCase):
         SecurityTests.setUp(self)
         self.env["SANDBOX_SEPARATE_UID"] = "1"
 
+    test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
+
     def sandbox_uid(self, name):
         capture = self.home / "game-sandboxes" / name
         out = subprocess.run([str(ROOT / "sandbox-uid"), "ids", str(capture)], env=self.env,
                              capture_output=True, text=True, check=True).stdout.split()
         return int(out[0])
+
+    def test_forget_does_not_allocate_a_uid(self):
+        capture = self.home / "game-sandboxes" / "no-uid"
+        capture.mkdir(parents=True)
+        result = subprocess.run([str(ROOT / "sandbox-uid"), "forget", str(capture)],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no uid of its own", result.stderr)
+        self.assertFalse((capture / "uid").exists())
+
+    def test_switch_keeps_the_uid_if_acl_cleanup_fails(self):
+        self.run_guest('mkdir -p "$HOME/closed"; printf save > "$HOME/closed/save"')
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        # Give the capture back first, then make one directory unreadable.
+        subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--",
+                        "chown", "-hR", "0:0", str(capture)],
+                       env=self.env, check=True, timeout=15)
+        closed = capture / "home" / "closed"
+        closed.chmod(0)
+        try:
+            self.env["SANDBOX_SEPARATE_UID"] = "0"
+            result = self.cli("--headless", self.game, "/bin/true", check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not remove the sandbox's ACL entries", result.stderr)
+            self.assertTrue((capture / "uid").exists())
+        finally:
+            closed.chmod(0o700)
 
     def test_game_runs_as_a_user_of_its_own(self):
         (self.game / "original").write_text("original")
@@ -3921,6 +4088,391 @@ class SeparateUidTests(unittest.TestCase):
         # pasta's interface, in the game's own network namespace.
         result = self.run_guest("grep -v -e 'lo:' -e '|' /proc/net/dev", "--net")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+def systemd_backend():
+    """Why the systemd backend cannot run here, or None."""
+    result = subprocess.run([str(ROOT / "sandbox-uid"), "managed-available"],
+                            capture_output=True, text=True)
+    return result.stderr.strip() or None if result.returncode else None
+
+
+@unittest.skipIf(systemd_backend(), systemd_backend())
+class SystemdBackendTests(unittest.TestCase):
+    """SANDBOX_SEPARATE_UID=systemd: a transient uid of systemd-nsresourced's,
+    the capture idmapped by systemd-mountfsd and still ours on disk."""
+    reclaim = SecurityTests.reclaim
+    cli = SecurityTests.cli
+    run_guest = SecurityTests.run_guest
+    launch_named = SecurityTests.launch_named
+    attach = SecurityTests.attach
+
+    def setUp(self):
+        SecurityTests.setUp(self)
+        self.env["SANDBOX_SEPARATE_UID"] = "systemd"
+
+    # sandbox-attach and capture upkeep as for the other backends.
+    test_attach_uses_target_root_and_cwd = SecurityTests.test_attach_uses_target_root_and_cwd
+    test_attached_programs_take_nothing_from_the_game = \
+        SecurityTests.test_attached_programs_take_nothing_from_the_game
+    test_attached_programs_live_above_the_game = \
+        SecurityTests.test_attached_programs_live_above_the_game
+    test_game_cannot_use_the_attach_socket = SecurityTests.test_game_cannot_use_the_attach_socket
+    test_attach_runs_a_terminal_and_passes_the_exit_status_on = \
+        SecurityTests.test_attach_runs_a_terminal_and_passes_the_exit_status_on
+    test_attach_puts_a_file_where_the_running_game_sees_it = \
+        SecurityTests.test_attach_puts_a_file_where_the_running_game_sees_it
+    test_attach_cannot_be_steered_into_another_sandbox = \
+        SecurityTests.test_attach_cannot_be_steered_into_another_sandbox
+    test_list_reset_install_and_delete = SecurityTests.test_list_reset_install_and_delete
+    test_host_x11_game_reads_the_authority = SecurityTests.test_host_x11_game_reads_the_authority
+
+    def test_attached_programs_run_as_the_game_without_our_groups(self):
+        name = "attach-ids-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        result = self.attach(name, "--exec", "--", "/bin/sh", "-c",
+                             'id -u; id -G; printf x > "$HOME/attached"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [str(os.getuid()), str(os.getgid())])
+        capture = self.home / "game-sandboxes" / name
+        self.assertEqual((capture / "home" / "attached").stat().st_uid, os.getuid())
+        self.cli("--stop", name)
+
+    def test_sandbox_uid_run_is_just_the_command(self):
+        self.run_guest("true")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        result = subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--", "id", "-u"],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.stdout.strip(), str(os.getuid()), result.stderr)
+
+    def test_repeated_launches_and_stops_release_the_managed_namespace(self):
+        registry = Path('/run/systemd/nsresource/registry')
+        if not registry.is_dir():
+            self.skipTest('nsresourced registry is unavailable')
+        name = 'cycles-' + self.base.name
+        capture = self.home / 'game-sandboxes' / name
+        for cycle in range(6):
+            with self.subTest(cycle=cycle):
+                if cycle % 2:
+                    proc = self.launch_named(name, '/bin/sh', '-ec',
+                                             'printf x >> "$HOME/save"; echo ready; exec sleep 30')
+                    self.cli('--stop', name)
+                    proc.communicate(timeout=15)
+                else:
+                    self.cli('--headless', '--name', name, self.game,
+                             '/bin/sh', '-ec', 'printf x >> "$HOME/save"')
+                inode = (capture / '.managed-userns').read_text().split()[1]
+                deadline = time.monotonic() + 3
+                while (registry / f'i{inode}.userns').exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertFalse((registry / f'i{inode}.userns').exists(),
+                                 'namespace allocation survived game exit')
+                self.assertEqual((capture / 'home/save').read_text(), 'x' * (cycle + 1))
+                self.assertFalse((capture / 'work/work').exists())
+
+    def test_managed_namespace_cannot_write_where_it_was_not_given(self):
+        # nsresourced's BPF restriction, not file permissions, keeps a managed
+        # namespace to the mounts it was given. Nothing else fails without it:
+        # an unattached restriction (from a service policy refusing it, say)
+        # leaves every launch working. Under /var/tmp, since another uid
+        # must reach the folder: file permissions refuse with EACCES, the
+        # restriction with EPERM.
+        shared = Path(tempfile.mkdtemp(prefix='sandbox-restrict-', dir='/var/tmp'))
+        self.addCleanup(shutil.rmtree, shared, ignore_errors=True)
+        shared.chmod(0o1777)
+        result = subprocess.run([sys.executable, '-I', '-c', r'''
+import ctypes, errno, os, sys
+from importlib.machinery import SourceFileLoader
+import importlib.util
+loader = SourceFileLoader("sandbox_uid", sys.argv[1])
+uid = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(uid)
+ns = uid.managed_namespace(f"restrict{os.getpid()}")
+if ctypes.CDLL(None, use_errno=True).setns(ns, 0x10000000) != 0:
+    sys.exit("setns failed")
+os.setresgid(0, 0, 0)
+os.setresuid(0, 0, 0)
+try:
+    os.close(os.open(os.path.join(sys.argv[2], "x"), os.O_CREAT | os.O_WRONLY, 0o644))
+except OSError as error:
+    print(errno.errorcode[error.errno])
+else:
+    print("created")
+''', str(ROOT / 'sandbox-uid'), str(shared)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.stdout.strip(), 'EPERM', result.stderr)
+        self.assertEqual(list(shared.iterdir()), [])
+
+    def test_public_game_owned_by_another_user(self):
+        source = os.environ.get('SANDBOX_TEST_FOREIGN_GAME')
+        if not source:
+            self.skipTest('needs the root-created foreign-owned game fixture')
+        source = Path(source)
+        self.assertNotEqual(source.stat().st_uid, os.getuid())
+        original = source / 'original'
+        self.assertNotEqual(original.stat().st_uid, os.getuid())
+        result = self.cli('--headless', '--name', 'foreign-game', source, 'python3', '-c', '''
+import errno, json, os
+from pathlib import Path
+original = Path('/game/original')
+before = original.read_text()
+try:
+    original.write_text('bad')
+except PermissionError:
+    pass
+else:
+    raise RuntimeError('foreign read-only file unexpectedly writable')
+Path('/game/replacement').write_text('changed')
+replacement_errno = None
+try:
+    os.replace('/game/replacement', original)
+except OSError as error:
+    # Unmapped lower ownership may prevent copy-up/whiteout. Other errors
+    # must fail the check rather than being hidden as unsupported ownership.
+    assert error.errno == errno.EOVERFLOW, error
+    replacement_errno = error.errno
+Path('/game/created').write_text('fresh')
+(Path.home() / 'save').write_text('save')
+print(json.dumps([before, original.read_text(), replacement_errno,
+                  Path('/game/created').read_text(), (Path.home() / 'save').read_text()]))
+''')
+        before, after, error, fresh, save = json.loads(result.stdout)
+        self.assertEqual(before, 'foreign original')
+        self.assertEqual(after, 'changed' if error is None else 'foreign original')
+        self.assertEqual([fresh, save], ['fresh', 'save'])
+        self.assertEqual(original.read_text(), 'foreign original')
+        result = self.cli('--headless', '--ro', source / 'closed', '/denied',
+                          self.game, '/bin/true', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot reach', result.stderr)
+
+    def test_concurrent_captures_keep_their_overlays_and_saves_separate(self):
+        (self.game / 'original').write_text('host')
+        names = ['capture-a-' + self.base.name, 'capture-b-' + self.base.name]
+        procs = []
+        for name, value in zip(names, ('alpha', 'beta')):
+            procs.append(self.launch_named(name, '/bin/sh', '-ec',
+                         f'printf {value} > /game/original; printf {value} > "$HOME/save"; '
+                         'echo ready; exec sleep 30'))
+        try:
+            for name, value in zip(names, ('alpha', 'beta')):
+                result = self.attach(name, '--exec', '--', '/bin/sh', '-ec',
+                                     'cat /game/original; echo; cat "$HOME/save"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.split(), [value, value])
+            self.cli('--stop', names[0])
+            procs[0].communicate(timeout=15)
+            self.assertRegex(self.cli('--list').stdout, names[1] + r'.*running')
+            result = self.attach(names[1], '--exec', '--', 'cat', '/game/original')
+            self.assertEqual(result.stdout, 'beta', result.stderr)
+            self.assertEqual((self.game / 'original').read_text(), 'host')
+        finally:
+            for name, proc in zip(names, procs):
+                self.cli('--stop', name, check=False)
+                proc.communicate(timeout=15)
+        for name, value in zip(names, ('alpha', 'beta')):
+            result = self.cli('--headless', '--name', name, self.game,
+                              '/bin/sh', '-ec', 'cat /game/original; echo; cat "$HOME/save"')
+            self.assertEqual(result.stdout.split(), [value, value])
+
+    def running_uid(self, *cmdline):
+        """The host uid of the one process whose command line is CMDLINE."""
+        want = "\0".join(cmdline) + "\0"
+        for p in Path("/proc").glob("[0-9]*"):
+            try:
+                if (p / "cmdline").read_text() == want:
+                    return p.stat().st_uid
+            except OSError:
+                continue
+        self.fail(f"no process {cmdline}")
+
+    def test_game_runs_as_a_transient_user_and_its_files_stay_ours(self):
+        (self.game / "original").write_text("original")
+        (self.game / "gone").write_text("gone")
+        (self.game / "dir").mkdir()
+        (self.game / "dir" / "old").write_text("old")
+        name = "nsres-" + self.base.name
+        script = ('printf changed > /game/original; rm /game/gone; '
+                  'rm -r /game/dir; mkdir /game/dir; printf new > /game/dir/new; '
+                  'printf save > "$HOME/save"; echo ready; exec sleep 30.25')
+        proc = self.launch_named(name, "/bin/sh", "-ec", script)
+        uids = [self.running_uid("sleep", "30.25")]
+        self.cli("--stop", name)
+        proc.communicate(timeout=15)
+        proc = self.launch_named(name, "/bin/sh", "-ec", 'echo ready; cat /game/original; echo; '
+                                 'ls /game/dir; test ! -e /game/gone; exec sleep 30.5')
+        uids.append(self.running_uid("sleep", "30.5"))
+        self.cli("--stop", name)
+        out, _ = proc.communicate(timeout=15)
+        self.assertEqual(out.split(), ["changed", "new"])
+        # Each launch its own uid, of the service's range, never ours.
+        for uid in uids:
+            self.assertIn(uid, range(0x80000, 0x70000000))
+        self.assertNotEqual(uids[0], uids[1])
+        capture = self.home / "game-sandboxes" / name
+        self.assertEqual({p.lstat().st_uid for p in capture.rglob("*")}, {os.getuid()})
+        self.assertEqual((capture / "home" / "save").read_text(), "save")
+        self.assertEqual((self.game / "original").read_text(), "original")
+        self.assertTrue((capture / "managed-uid").exists())
+        self.assertFalse((capture / "work" / "work").exists())
+        # Nothing of ours was opened up to let it through.
+        for path in (self.base, self.home, self.game, self.game / "original"):
+            acl = subprocess.run(["getfacl", "-cp", str(path)], capture_output=True,
+                                 text=True, check=True).stdout
+            self.assertNotRegex(acl, r"(?m)^(user|group):[^:]+:", path)
+
+    def test_game_sees_only_its_own_ids_and_no_setup_descriptors(self):
+        result = self.run_guest('id -u; id -G; ls /proc/self/fd; '
+                                'grep -E "^(CapEff|Seccomp):" /proc/self/status')
+        lines = result.stdout.split("\n")
+        self.assertEqual(lines[0], str(os.getuid()))
+        self.assertEqual(lines[1], str(os.getgid()))
+        self.assertEqual(lines[2:6], ["0", "1", "2", "3"])
+        self.assertIn("CapEff:\t0000000000000000", result.stdout)
+        self.assertIn("Seccomp:\t2", result.stdout)
+
+    def test_game_can_reopen_its_output(self):
+        out = self.base / "out"
+        with out.open("w") as f:
+            rc = subprocess.run(
+                [str(ROOT / "sandbox-game"), "--headless", str(self.game),
+                 "/bin/sh", "-ec", "echo reopened > /dev/stdout"],
+                env=self.env, stdout=f, stderr=subprocess.DEVNULL, timeout=15).returncode
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.read_text(), "reopened\n")
+
+    def test_switching_backends_keeps_the_capture(self):
+        (self.game / "dir").mkdir()
+        (self.game / "dir" / "old").write_text("old")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        # Each with what the switch to it says. The first to run replaces the
+        # folder: under a subordinate uid through fuse-overlayfs, whose mark
+        # for that the kernel's overlayfs does not read.
+        steps = [("systemd", None)] if separate_uid_missing() else [
+            ("1", None), ("systemd", "no longer runs as a subordinate uid")]
+        steps += [(None, None),
+                  ("0", "no longer runs under the systemd backend"), ("systemd", None)]
+        self.env["SANDBOX_SEPARATE_UID"] = steps[0][0]
+        self.run_guest('rm -r /game/dir; mkdir /game/dir; printf new > /game/dir/new; '
+                       'printf save > "$HOME/save"')
+        for value, said in steps[1:]:
+            with self.subTest(value=value):
+                if value is None:
+                    del self.env["SANDBOX_SEPARATE_UID"]
+                else:
+                    self.env["SANDBOX_SEPARATE_UID"] = value
+                result = self.run_guest('ls /game/dir; cat "$HOME/save"')
+                self.assertEqual(result.stdout.split(), ["new", "save"])
+                if said:
+                    self.assertIn(said, result.stderr)
+                self.assertEqual({p.lstat().st_uid for p in capture.rglob("*")},
+                                 {os.getuid()})
+                self.assertFalse((capture / "uid").exists())
+                self.assertEqual((capture / "managed-uid").exists(), value != "0")
+                # Nor do ACL entries for the subordinate uid stay behind.
+                named = set()
+                for path in [capture, *capture.rglob("*")]:
+                    if path.is_symlink():
+                        continue
+                    for attr in ("system.posix_acl_access", "system.posix_acl_default"):
+                        try:
+                            data = os.getxattr(path, attr)
+                        except OSError:
+                            continue
+                        named |= {i for tag, _, i in struct.iter_unpack("<HHI", data[4:])
+                                  if tag == 2}
+                self.assertLessEqual(named, {os.getuid()})
+
+    def test_a_source_it_cannot_reach_is_refused(self):
+        result = self.cli("--headless", "--ro", "/root", "/mnt", self.game, "/bin/true",
+                          check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot reach /root", result.stderr)
+
+    # The network as for the other backends, made by sandbox-uid instead.
+    test_network_reaches_the_internet_and_nothing_else = \
+        SecurityTests.test_network_reaches_the_internet_and_nothing_else
+    test_lan_allowances_open_only_what_they_name = \
+        SecurityTests.test_lan_allowances_open_only_what_they_name
+    test_network_helper_is_named_after_the_game_and_ends_with_it = \
+        SecurityTests.test_network_helper_is_named_after_the_game_and_ends_with_it
+    test_network_card_keeps_its_address_between_launches = \
+        SecurityTests.test_network_card_keeps_its_address_between_launches
+    test_standard_input_reaches_the_game_with_and_without_network = \
+        SecurityTests.test_standard_input_reaches_the_game_with_and_without_network
+    test_network_lets_nothing_in = SecurityTests.test_network_lets_nothing_in
+    test_stop_ends_only_the_named_sandbox_and_counts_as_clean = \
+        SecurityTests.test_stop_ends_only_the_named_sandbox_and_counts_as_clean
+
+    def test_the_game_cannot_change_its_network(self):
+        # Its network namespace is the managed namespace's, not bwrap's: no
+        # capability there, even before bwrap drops its own.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        result = self.run_guest('ip=$(command -v ip || echo /usr/sbin/ip); '
+                                '"$ip" rule show | grep -c prohibit; '
+                                '"$ip" rule del priority 100 && echo removed; '
+                                '"$ip" link set lo down && echo down; true', "--net")
+        self.assertGreater(int(result.stdout.split()[0]), 0, result.stderr)
+        self.assertNotIn("removed", result.stdout)
+        self.assertNotIn("down", result.stdout)
+
+    def test_two_games_have_networks_of_their_own(self):
+        # Stopping one leaves the other's pasta, and its way out, alone.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        import time
+        dns = ("import socket, struct\n"
+               "q = struct.pack('!6H', 7, 0x100, 1, 0, 0, 0) + b'\\x07example\\x03com\\x00'"
+               " + struct.pack('!HH', 1, 1)\n"
+               "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(10)\n"
+               "s.sendto(q, ('169.254.1.1', 53)); print('dns', s.recv(512)[:2] == q[:2])\n")
+        (self.game / "dns.py").write_text(dns)
+        procs = {}
+        for name in ("net-a", "net-b"):
+            procs[name] = subprocess.Popen(
+                [str(ROOT / "sandbox-game"), "--headless", "--net", "--name", name, str(self.game),
+                 "/bin/sh", "-c", 'echo ready; until [ -e "$HOME/go" ]; do sleep 0.1; done; '
+                 'exec python3 /game/dns.py'],
+                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(procs[name].kill)
+            self.assertEqual(procs[name].stdout.readline().strip(), "ready",
+                             procs[name].stderr.read() if procs[name].poll() is not None else "")
+        def pastas():
+            found = set()
+            for p in Path("/proc").glob("[0-9]*"):
+                try:
+                    found.add(os.path.basename(os.readlink(p / "exe")).split(".")[0])
+                except OSError:
+                    pass
+            return found & {"net-a-pasta", "net-b-pasta"}
+        self.assertEqual(pastas(), {"net-a-pasta", "net-b-pasta"})
+        self.assertIn("stopped net-a", self.cli("--stop", "net-a").stdout)
+        procs["net-a"].communicate(timeout=10)
+        time.sleep(0.3)
+        self.assertEqual(pastas(), {"net-b-pasta"})
+        self.assertRegex(self.cli("--list").stdout, r"net-b.*running")
+        (self.home / "game-sandboxes" / "net-b" / "home" / "go").touch()
+        out, err = procs["net-b"].communicate(timeout=20)
+        self.assertEqual(procs["net-b"].returncode, 0, err)
+        self.assertIn("dns True", out)
+        time.sleep(0.3)
+        self.assertEqual(pastas(), set())
+
+    def test_stop_knows_the_sandbox_by_its_namespace(self):
+        # Not by the uid: another namespace of ours from the same service, with
+        # a bwrap that names the capture, is not the sandbox.
+        name = "own-ns-" + self.base.name
+        proc = self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        record = self.home / "game-sandboxes" / name / ".managed-userns"
+        real = record.read_text()
+        record.write_text("0 0\n")
+        self.assertNotRegex(self.cli("--list").stdout, rf"{name}.*running")
+        record.write_text(real)
+        self.assertRegex(self.cli("--list").stdout, rf"{name}.*running")
+        self.cli("--stop", name)
+        proc.communicate(timeout=10)
 
 
 if __name__ == "__main__":

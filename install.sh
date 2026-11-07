@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# install.sh [--restrict-audio] [--uninstall]
+# install.sh [--restrict-audio | --uninstall]
+# sudo ./install.sh --systemd-backend UID...
+# sudo ./install.sh --uninstall-systemd-backend
 #   Install sandbox-game and sandbox-attach into ~/.local/bin, their helpers
 #   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib, nwjs-casefold.js) into
 #   ~/.local/lib/sandbox-game, and the Nautilus scripts, for the current user.
 #   No root needed; nothing outside ~/.local is touched.
+#   The separate --systemd-backend mode installs administrator services and
+#   GPU grants for the given host UIDs; it does not install per-user files.
 #
 #   --restrict-audio also sets up playback-only sound for the games: a second
 #   Pulse server of their own, and WirePlumber rules and a hook that keep them
@@ -115,7 +119,10 @@ install_audio() {
 }
 
 AUDIO=0
+SYSTEMD_MODE=""
 case "${1:-}" in
+    --systemd-backend) SYSTEMD_MODE=install; shift ;;
+    --uninstall-systemd-backend) SYSTEMD_MODE=uninstall; shift ;;
     --uninstall)
         each remove_one
         each_old remove_one
@@ -131,7 +138,14 @@ case "${1:-}" in
         exit 0 ;;
     --restrict-audio) AUDIO=1; shift ;;
 esac
-[ "$#" -eq 0 ] || { echo "usage: install.sh [--restrict-audio] [--uninstall]" >&2; exit 1; }
+if [ -z "$SYSTEMD_MODE" ] && [ "$#" -ne 0 ]; then
+    echo "usage: install.sh [--restrict-audio | --uninstall | --systemd-backend UID... | --uninstall-systemd-backend]" >&2
+    exit 1
+fi
+if [ -n "$SYSTEMD_MODE" ] && [ "$(id -u)" != 0 ]; then
+    echo "the systemd backend administrator setup needs root; rerun this command with sudo" >&2
+    exit 1
+fi
 # Once set up, every install keeps it current.
 [ ! -e "$CONF/systemd/user/sandbox-pulse.service" ] || AUDIO=1
 
@@ -153,6 +167,10 @@ if [ -z "$SRC" ]; then
 fi
 
 # ---- install ----------------------------------------------------------------
+if [ -n "$SYSTEMD_MODE" ]; then
+    python3 -I "$SRC/systemd-backend/install-systemd.py" "$SYSTEMD_MODE" "$@"
+    exit
+fi
 each install_one
 each_old remove_one
 each_completion install_completion

@@ -1427,7 +1427,6 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 ### Rough edges
 
-- `--host-x11` does not work: the X authority file is yours alone.
 - `/dev/ntsync` is usually open only to the logged-in user. Proton falls back
   to its other synchronisation without it.
 - A `--stop` in the first moment of a launch, before the game is running,
@@ -1444,6 +1443,52 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   removed -- its files are left with an owner nobody can act for but root.
   The launch says so, with the command that gives them back to you:
   `sudo chown -R "$USER": ~/game-sandboxes/NAME`.
+
+### The systemd backend (in development)
+
+`SANDBOX_SEPARATE_UID=systemd` gets the game a uid of its own another way.
+systemd-nsresourced lends each launch a transient range of 64K uids, and
+systemd-mountfsd mounts your folders for it idmapped, showing your files as
+the game's. So the capture stays yours on disk: `ls -l` shows you as the
+owner, with no ACL entries, and you edit a save as you would anywhere else.
+The game's folder and Proton go through the kernel's overlay, not
+`fuse-overlayfs`. There is no `/etc/subuid` range and no `newuidmap`.
+
+The game still runs as a uid that is neither yours nor another sandbox's, a
+different one at every launch. Only what the sandbox binds in is shared with
+it: the capture, the game's folder, Proton, the launcher's helpers, and from
+your runtime folder only the Wayland socket and the playback-only sound
+server. Everything else of yours stays as closed to it as your permissions
+make it.
+
+The setting sticks to a capture, as `1` does. Switching a capture between
+`1`, `systemd` and `0` keeps its files: from `1` they are given back to you
+first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
+kernel's mark as well. The old subordinate uid's ACL entries are removed
+before that uid is released.
+
+It is not ready for general use yet. It needs systemd 261.4 or later, on
+SELinux systems a policy module for the two services, and for the GPU copies
+of the render nodes that an administrator's helper keeps for you. On openSUSE
+Tumbleweed, `sudo ./install.sh --systemd-backend "$(id -u)"` installs that
+setup. Its explicit administrator install/removal modes are separate from the
+ordinary per-user install: see [`systemd-backend/`](systemd-backend/README.md).
+
+`--net` works as with the other backends, with the same rules. The game's
+network belongs to the sandbox's namespace rather than to bwrap's, and pasta
+runs as the sandbox's transient uid too. `sandbox-attach`, including `--put`,
+works as with the other backends. Use `--put` to change a live overlay;
+editing `rw/` directly is not guaranteed to reach the running game.
+`sandbox-uid run CAP -- CMD...` runs the command as you, since the capture
+already belongs to you. Both delegation workers must report the same stable
+version, 261.4 or later; an unavailable or unsupported backend stops the
+launch before changing the capture. With a single user id mapped on files,
+what the game creates gets your uid as its group id too.
+Your primary group must have your uid's number, and the files the game
+writes to, connects to or copies up must belong to it: the kernel lets no one
+write to a file whose group the mapping lacks. Other layouts are refused
+before changing a capture, naming the folders to regroup; see
+[Your account's group](systemd-backend/README.md#your-accounts-group).
 
 ## Preferences file format
 
@@ -1564,20 +1609,7 @@ and gamescope's reaper restarts it forever. In that combination the shim is
 preloaded into the game instead, against gamescope's general advice. Either
 route reads the same config.
 
-## Security regression checks
+## Development
 
-Run on the host with Python 3 and bubblewrap installed:
-
-```sh
-python3 tests/test_security.py -v
-```
-
-The tests use temporary homes and captures. They exercise real filesystem and
-network isolation, the seccomp filter and the user-namespace block, environment
-filtering, the read-only tools folder and namespace attachment; display and
-audio argument checks use recorders so they do not open windows or play sound.
-
-They run without the systemd scope, because their private runtime directory
-hides the user manager. The exception is the check that commands reach the
-game unaltered by `systemd-run`, which uses the real one, and skips when no
-user manager is reachable rather than pass having tested nothing.
+Running the tests, the systemd backend's probes and notes on how the pieces
+behave are in [docs/development.md](docs/development.md).

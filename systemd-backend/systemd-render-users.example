@@ -1,0 +1,4 @@
+# Root-owned /etc/sandbox-game/systemd-render-users; one non-root numeric UID
+# per line. Empty or absent configuration revokes every previously made alias.
+# This grants the configured user GPU render access, independently of seats.
+1000

@@ -8,3 +8,6 @@ pgmmv-player-decrypt/
 
 # Byte-code left behind by running the test suite.
 __pycache__/
+
+# Results of systemd-backend/desktop-gpu-check.sh.
+.gpu-check/
