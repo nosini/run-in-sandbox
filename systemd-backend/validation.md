@@ -126,6 +126,16 @@ on the GPU, the same as under the default backend.
 
 ## Boot ordering
 
+On a desktop, [`desktop-boot-check.sh`](desktop-boot-check.sh) does all of
+the below: `before` installs the setup and notes the boot, and `after`, run
+in the new boot's session, checks each requirement with a PASS or FAIL line,
+launches a throwaway game and offers to remove the setup. It reads unit
+start order from the boot's journal, since systemd forgets the timestamps of
+a socket-activated service once it has gone idle. One SELinux denial is
+known and harmless: stock policy keeps `systemd-mountfsd` from searching
+`/proc/pressure`, where systemd daemons watch for memory pressure, once per
+start; the check counts it apart.
+
 Use a dedicated VM or agree a reboot window with everyone using a shared VM.
 Keep the task's durable VM hold through reboot and preserve its SSH recovery
 path. Record the run directory in the task notes so it can be restored after
