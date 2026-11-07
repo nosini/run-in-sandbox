@@ -91,7 +91,7 @@ done
 # Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
 SB_PIDS=(); SB_NAMES=(); SB_PROTON=()
 scan() {
-    local p args i name child ours
+    local p args name child ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
         ours=1
@@ -99,13 +99,8 @@ scan() {
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
-        name=""
-        for ((i = 1; i < ${#args[@]}; i++)); do
-            [ "${args[i-1]}" = --bind ] || continue
-            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
-            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
-        done
-        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        bound_capture "${args[@]}"; name="$BOUND"
+        [ -n "$name" ] || continue
         [ "$ours" = 1 ] || sandbox_user "$p" "$name" || continue
         # No newline after the last PID, so read fails even when it got one.
         # The one in a user namespace of the sandbox's: under a uid of its own,
@@ -371,37 +366,14 @@ EOF
 # from it: ask from its namespace, as it -- still outside the sandbox's PIDs.
 # We own that namespace, so we may enter it; the outer bwrap is pid 1's parent.
 #
-# Under the systemd backend the outer bwrap's namespace is one sandbox-uid
-# made inside the one systemd-nsresourced allocated, and denies setgroups:
-# nsenter cannot drop our groups there. So the way sandbox-uid went: into the
-# allocated one, as its root and without groups, then into the outer bwrap's
-# as the game's uid. Both are below one of ours, so we may enter them.
-read -r -d '' MANAGED_ENTER <<'PY' || true
-import ctypes, fcntl, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-def setns(fd):
-    if libc.setns(fd, 0x10000000) != 0:                 # CLONE_NEWUSER
-        raise OSError(ctypes.get_errno(), "setns")
-outer = os.open(f"/proc/{sys.argv[1]}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
-managed = fcntl.ioctl(outer, 0xB702)                    # NS_GET_PARENT
-me, group = os.getuid(), os.getgid()
-setns(managed)
-os.setgroups([])
-os.setresgid(0, 0, 0)
-os.setresuid(0, 0, 0)
-setns(outer)
-os.setresgid(group, group, group)
-os.setresuid(me, me, me)
-os.close(outer)
-os.close(managed)
-os.execvp(sys.argv[2], sys.argv[2:])
-PY
+# Under the systemd backend that namespace denies setgroups, and nsenter
+# cannot drop our groups there: sandbox-uid goes in the way it came.
 ENTER=()
 { read -r PSTAT < "/proc/$TARGET/stat"; } 2>/dev/null || PSTAT=""
 OUTER="${PSTAT##*) }"; OUTER="${OUTER#* }"; OUTER="${OUTER%% *}"
 if [[ "$OUTER" =~ ^[0-9]+$ ]] && ! [[ "/proc/$OUTER/ns/user" -ef /proc/self/ns/user ]]; then
     if [ -f "$HOME/game-sandboxes/$TNAME/managed-uid" ]; then
-        ENTER=( python3 -I -c "$MANAGED_ENTER" "$OUTER" )
+        ENTER=( "$SANDBOX_UID_HELPER" managed-enter "$OUTER" -- )
     else
         ENTER=( nsenter "--user=/proc/$OUTER/ns/user" "--setuid=$(id -u)" "--setgid=$(id -g)" -- )
     fi

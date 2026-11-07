@@ -9,8 +9,10 @@ from pathlib import Path
 import socket
 import shutil
 import subprocess
+import stat
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -210,6 +212,146 @@ class GroupTests(unittest.TestCase):
         stat_patch, lstat_patch = regrouped([cap / "link"], self.other)
         with stat_patch, lstat_patch, mock.patch.object(uid, "fail", side_effect=RuntimeError):
             uid.managed_adopt(str(cap))
+
+
+class CaptureTests(unittest.TestCase):
+    """Switching a capture over, and finding and placing its folders."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+
+    def scanned(self):
+        """os.scandir, counting the folders it reads."""
+        seen, real = [], os.scandir
+
+        def inner(path):
+            seen.append(os.fspath(path))
+            return real(path)
+        return seen, mock.patch.object(uid.os, "scandir", inner)
+
+    def test_adoption_converts_the_marks_in_one_walk(self):
+        if os.getgid() != os.getuid():
+            self.skipTest("this account's own files are not grouped as its uid")
+        cap = self.base / "cap"
+        for d in ("rw/sub", "rw/kept", "home/saves"):
+            (cap / d).mkdir(parents=True)
+        (cap / "rw/sub/.wh..wh..opq").write_text("")
+        (cap / "rw/.wh.gone").write_text("")
+        try:
+            os.setxattr(cap / "rw/kept", "user.fuseoverlayfs.opaque", b"y")
+            os.mknod(cap / "probe", stat.S_IFCHR, 0)
+            os.unlink(cap / "probe")
+        except OSError as e:
+            self.skipTest(f"no user xattrs or whiteouts here: {e}")
+        seen, scandir = self.scanned()
+        with scandir:
+            uid.managed_adopt(str(cap))
+        self.assertEqual(sorted(seen), sorted(set(seen)))
+        for d in ("rw/sub", "rw/kept"):
+            self.assertEqual(os.getxattr(cap / d, "user.overlay.opaque"), b"y")
+        self.assertFalse((cap / "rw/sub/.wh..wh..opq").exists())
+        self.assertFalse((cap / "rw/.wh.gone").exists())
+        st = os.lstat(cap / "rw/gone")
+        self.assertTrue(stat.S_ISCHR(st.st_mode))
+        self.assertEqual(st.st_rdev, 0)
+
+    def test_a_folder_it_cannot_read_stops_adoption_with_a_message(self):
+        if os.getuid() == 0:
+            self.skipTest("root reads any folder")
+        cap = self.base / "cap"
+        locked = cap / "rw/locked"
+        locked.mkdir(parents=True)
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        with mock.patch.object(uid, "fail", side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.managed_adopt(str(cap))
+        self.assertIn("chmod -R u+rwX", fail.call_args.args[0])
+
+    def test_forget_reads_each_entry_once(self):
+        cap = self.base / "cap"
+        for d in ("rw/a/b", "home"):
+            (cap / d).mkdir(parents=True)
+        (cap / "home/save").write_text("s")
+        read, real = [], os.getxattr
+
+        def getxattr(path, name, **kwargs):
+            read.append((os.fspath(path), name))
+            return real(path, name, **kwargs)
+        with mock.patch.object(uid.os, "getxattr", getxattr):
+            uid.forget(str(cap), 123456)
+        self.assertEqual(len(read), len(set(read)))
+        self.assertEqual({p for p, _ in read},
+                         {str(cap), *(str(p) for p in cap.rglob("*"))})
+
+    def test_forget_without_the_range_warns_and_goes_on(self):
+        cap = self.base / "cap"
+        cap.mkdir()
+        (cap / "uid").write_text("3\n")
+        with mock.patch.object(uid.sys, "argv", ["sandbox-uid", "forget", str(cap)]), \
+             mock.patch.object(uid, "subordinate", return_value=([], None)), \
+             mock.patch.object(uid, "forget") as forget, \
+             mock.patch.object(uid.sys, "stderr") as stderr:
+            uid.main()
+        forget.assert_not_called()
+        self.assertIn("its ACL entries stay", "".join(c.args[0] for c in stderr.write.call_args_list))
+
+    def test_a_folder_below_a_mount_in_a_delegated_one_is_placed(self):
+        # ~/Games delegated without the drive mounted at ~/Games/ssd, whose
+        # point shows there as an empty folder: the game's folder on that
+        # drive gets a way to it of its own.
+        games = self.base / "Games"
+        (games / "ssd").mkdir(parents=True)
+        game = games / "ssd" / "X"
+        mounted, attached = [], []
+        with mock.patch.object(uid, "mount", lambda src, dst, *a: mounted.append((src, dst))), \
+             mock.patch.object(uid, "attach", lambda fd, path: attached.append(path)), \
+             mock.patch.object(uid.os, "close"):
+            uid.place([(str(games), 10), (str(game), 11)])
+        self.assertEqual(mounted, [("tmpfs", str(games / "ssd"))])
+        self.assertEqual(attached, [str(games), str(game)])
+        self.assertTrue(game.is_dir())
+
+    def bound(self, *argv):
+        return subprocess.run(
+            ["bash", "-c", '. "$1"; shift; bound_capture "$@"; printf %s "$BOUND"', "bound",
+             str(ROOT / "sandbox-game-lib"), *argv],
+            env={**os.environ, "HOME": str(self.base / "home")},
+            capture_output=True, text=True, check=True).stdout
+
+    def test_a_sandbox_is_found_by_the_real_path_of_its_home(self):
+        real = self.base / "big" / "game-sandboxes"
+        (real / "witcher3" / "home").mkdir(parents=True)
+        (self.base / "home").mkdir()
+        (self.base / "home" / "game-sandboxes").symlink_to(real)
+        linked = self.base / "home" / "game-sandboxes" / "witcher3" / "home"
+        for source in (linked, real / "witcher3" / "home"):
+            self.assertEqual(self.bound("bwrap", "--bind", str(source), "/home/me"), "witcher3")
+        self.assertEqual(self.bound("bwrap", "--bind", str(real / "a" / "b" / "home"), "/x"), "")
+        self.assertEqual(self.bound("bwrap", "--ro-bind", str(linked), "/x"), "")
+
+    def test_owner_of_a_namespace_is_told_by_its_parent(self):
+        cap = self.base / "cap"
+        cap.mkdir()
+        child = subprocess.Popen(["unshare", "-U", "sleep", "10"], stderr=subprocess.DEVNULL)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        for _ in range(100):
+            if os.stat(f"/proc/{child.pid}/ns/user").st_ino != os.stat("/proc/self/ns/user").st_ino:
+                break
+            if child.poll() is not None:
+                self.skipTest("cannot make a user namespace here")
+            time.sleep(0.02)
+        else:
+            self.skipTest("cannot make a user namespace here")
+        ours = os.stat("/proc/self/ns/user")
+        (cap / ".managed-userns").write_text(f"{ours.st_dev} {ours.st_ino}\n")
+        self.assertTrue(uid.managed_owns(str(cap), str(child.pid)))
+        (cap / ".managed-userns").write_text(f"{ours.st_dev} {ours.st_ino + 1}\n")
+        self.assertFalse(uid.managed_owns(str(cap), str(child.pid)))
+        self.assertFalse(uid.managed_owns(str(cap), "999999999"))
 
 
 class AdministratorPreflightTests(unittest.TestCase):

@@ -69,6 +69,11 @@ Commands:
   sandbox-uid managed-launch CAP [--net SPEC] -- BWRAP...
                                    SPEC: sandbox-game's network rules (see
                                    NET_HELPER there), as JSON
+  sandbox-uid managed-owns CAP PID  whether PID is the outer bwrap of CAP's
+                                   launch under it
+  sandbox-uid managed-enter PID -- CMD...
+                                   CMD in the outer bwrap PID's namespace,
+                                   as the game's uid
 """
 import array
 import ctypes
@@ -94,6 +99,7 @@ MS_PRIVATE = 1 << 18
 CLONE_NEWNS, CLONE_NEWUSER = 0x20000, 0x10000000
 CLONE_NEWNET, CLONE_NEWIPC = 0x40000000, 0x8000000
 PR_SET_PDEATHSIG, PR_SET_NO_NEW_PRIVS = 1, 38
+NS_GET_PARENT = 0xB702
 # In CAP once own() has handed all of it over and shared it with you; `run`,
 # which may change any of that, removes it, and the next launch does it all
 # again. (".handed-over" was the same before the sharing.)
@@ -520,12 +526,26 @@ def forget(cap, uid):
     uid later. Yours stay; they grant you nothing you do not have."""
     cap = os.path.realpath(cap)
     dev = os.lstat(cap).st_dev
+
+    def drop(path):
+        for name in (ACL_ACCESS, ACL_DEFAULT):
+            try:
+                acl = acl_unpack(os.getxattr(path, name, follow_symlinks=False))
+            except OSError as e:
+                if e.errno in (errno.ENODATA, errno.ENOTSUP):
+                    continue
+                fail(f"could not read {path}'s ACL: {e}")
+            if acl.pop((ACL_USER, uid), None) is not None:
+                os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
+
+    # Each folder once: CAP here, the rest as entries of the one they are in.
+    drop(cap)
     todo = [cap]
     while todo:
         d = todo.pop()
         try:
             with os.scandir(d) as it:
-                entries = [d] + [e.path for e in it]
+                entries = [e.path for e in it]
         except OSError as e:
             fail(f"could not remove the sandbox's ACL entries from {d}: {e}")
         for path in entries:
@@ -535,17 +555,9 @@ def forget(cap, uid):
                 fail(f"could not inspect {path} while removing the sandbox's ACL entries: {e}")
             if st.st_dev != dev or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
                 continue
-            if stat.S_ISDIR(st.st_mode) and path != d:
+            if stat.S_ISDIR(st.st_mode):
                 todo.append(path)
-            for name in (ACL_ACCESS, ACL_DEFAULT):
-                try:
-                    acl = acl_unpack(os.getxattr(path, name, follow_symlinks=False))
-                except OSError as e:
-                    if e.errno in (errno.ENODATA, errno.ENOTSUP):
-                        continue
-                    fail(f"could not read {path}'s ACL: {e}")
-                if acl.pop((ACL_USER, uid), None) is not None:
-                    os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
+            drop(path)
 
 
 def keep_shared(rw, uid, gid):
@@ -798,6 +810,26 @@ def relay_output(uid):
         os.close(w)
 
 
+def overlay_points(mounts, specs, owner=None):
+    """[(mp, lowers, upper, work)] for overlays()'s SPECS: their mount
+    points on a tmpfs at MOUNTS, a folder of the capture's, in this
+    namespace alone, which also holds the throwaway layers of any without an
+    upper one (OWNER's, a (uid, gid), when given)."""
+    if specs:
+        mount("tmpfs", mounts, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755")
+    layers = []
+    for mp, lowers, upper, work in specs:
+        os.mkdir(mp)
+        if upper is None:
+            upper, work = mp + ".upper", mp + ".work"
+            for d in (upper, work):
+                os.mkdir(d, 0o700)
+                if owner:
+                    os.chown(d, *owner)
+        layers.append((mp, lowers, upper, work))
+    return layers
+
+
 def inside_launch(cap, argv):
     lay = json.loads(os.environ.pop("SANDBOX_UID_LAYOUT"))
     g_uid, g_gid = lay["outer_uid"], lay["outer_gid"]
@@ -807,18 +839,9 @@ def inside_launch(cap, argv):
     # folder of the capture's, which also holds the throwaway layers.
     mounts = os.path.join(cap, ".mounts")
     argv, specs = overlays(argv, mounts)
-    layers = []
     if specs:
         os.makedirs(mounts, exist_ok=True)
-        mount("tmpfs", mounts, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755")
-        for mp, lowers, upper, work in specs:
-            os.mkdir(mp)
-            if upper is None:
-                upper, work = mp + ".upper", mp + ".work"
-                for d in (upper, work):
-                    os.mkdir(d, 0o700)
-                    os.chown(d, g_uid, g_gid)
-            layers.append((mp, lowers, upper, work))
+    layers = overlay_points(mounts, specs, (g_uid, g_gid))
     # fuse-overlayfs follows its layers' descriptors back to paths, which it
     # must be able to reach as well; upper and work as one, to rename across.
     paths = [os.path.abspath(p) for p, _ in sources(argv)] + [os.path.abspath(argv[0])]
@@ -1174,6 +1197,15 @@ def attach(fd, path):
                        MOVE_MOUNT_F_EMPTY_PATH), path)
 
 
+def way(path, top):
+    """The folders on the way down to PATH from TOP, an empty tmpfs."""
+    d = top
+    for part in path[len(top):].split("/")[1:]:
+        d += "/" + part
+        if not os.path.isdir(d):
+            os.mkdir(d, 0o755)
+
+
 def place(delegated):
     """Each delegated folder's mount where the folder is. One the managed
     root cannot get to -- in your 0700 home, say -- is first covered, in this
@@ -1195,11 +1227,18 @@ def place(delegated):
             covered.add(top)
     for path, fd in delegated:
         if path in tops:
-            d = ""
-            for part in path.split("/")[1:]:
-                d += "/" + part
-                if len(d) > len(tops[path]) and not os.path.isdir(d):
-                    os.mkdir(d, 0o755)
+            way(path, tops[path])
+        elif not os.path.isdir(path):
+            # In a folder placed before it, below a mount delegated without it
+            # (see delegations()), whose mount point shows as the empty folder
+            # underneath: covered the same way, from there.
+            top = os.path.dirname(path)
+            while not os.path.isdir(top):
+                top = os.path.dirname(top)
+            if top not in covered:
+                mount("tmpfs", top, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755")
+                covered.add(top)
+            way(path, top)
         attach(fd, path)
         os.close(fd)
 
@@ -1341,8 +1380,8 @@ def managed_launch(cap, argv, net=None):
     # discarded its last digits and made concurrent launches collide.
     ns = managed_namespace(f"sg-{os.getpid():x}")
     # How sandbox-game --stop and sandbox-attach tell this sandbox's processes
-    # from any others (see sandbox_user in sandbox-game-lib): the outer bwrap
-    # runs in a namespace whose parent is this one. Where the game cannot
+    # from any others (see managed_owns()): the outer bwrap runs in a
+    # namespace whose parent is this one. Where the game cannot
     # reach it: the capture's own folder is not in the sandbox.
     st = os.fstat(ns)
     record = os.path.join(os.path.realpath(cap), ".managed-userns")
@@ -1360,14 +1399,7 @@ def managed_launch(cap, argv, net=None):
     unshare(CLONE_NEWNS)
     mount(None, "/", None, MS_REC | MS_PRIVATE)
     place(delegated)
-    if specs:
-        mount("tmpfs", mounts, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755")
-    for mp, lowers, upper, work in specs:
-        os.mkdir(mp)
-        if upper is None:
-            upper, work = mp + ".upper", mp + ".work"
-            for d in (upper, work):
-                os.mkdir(d, 0o700)
+    for mp, lowers, upper, work in overlay_points(mounts, specs):
         kernel_overlay(mp, lowers, upper, work)
     if net:
         managed_network(net)
@@ -1397,51 +1429,100 @@ def managed_adopt(cap):
     First, once: none of the capture may belong to another group than your
     uid's number (see managed_identity_error()) -- what was saved before
     your group changed, say. Links are never written to; they may."""
-    me, others, todo = os.getuid(), 0, [os.path.realpath(cap)]
-    dev = os.lstat(todo[0]).st_dev if os.path.isdir(todo[0]) else None
-    while dev is not None and todo:
-        d = todo.pop()
-        for name in os.listdir(d):
-            path = os.path.join(d, name)
-            st = os.lstat(path)
-            if st.st_dev != dev or stat.S_ISLNK(st.st_mode):
-                continue
-            others += st.st_gid != me
-            if stat.S_ISDIR(st.st_mode):
-                todo.append(path)
-    if dev is not None and os.lstat(os.path.realpath(cap)).st_gid != me:
-        others += 1
+    me, top = os.getuid(), os.path.realpath(cap)
+    if not os.path.isdir(top):
+        return
+    rw = os.path.join(top, "rw")
+    # One walk: the groups everywhere, and rw/'s folders with the whiteout
+    # files in each. rw/ is walked even as a mount of its own.
+    others, layer = 0, []
+    try:
+        others += os.lstat(top).st_gid != me
+        todo = [(top, os.lstat(top).st_dev)]
+        while todo:
+            d, dev = todo.pop()
+            in_rw, whiteouts = d == rw or d.startswith(rw + "/"), []
+            with os.scandir(d) as it:
+                for e in it:
+                    st = os.lstat(e.path)
+                    if stat.S_ISLNK(st.st_mode) or (st.st_dev != dev and e.path != rw):
+                        continue
+                    others += st.st_gid != me
+                    if stat.S_ISDIR(st.st_mode):
+                        todo.append((e.path, st.st_dev))
+                    elif in_rw and e.name.startswith(".wh.") and e.name != ".wh..wh..opq" \
+                            and stat.S_ISREG(st.st_mode):
+                        whiteouts.append(e.name)
+            if in_rw:
+                layer.append((d, whiteouts))
+    except OSError as e:
+        fail(f"cannot switch {cap} to the systemd backend: {e}; every folder in it must be "
+             f"yours to read:\n  chmod -R u+rwX {shlex.quote(top)}")
     if others:
         fail(f"{others} of the files in {cap} belong to another group than your uid's number "
              f"({me}), the only one the systemd backend can map, and the game could not write "
-             f"to them; {GROUP_HELP}\n  chgrp -R {me} {shlex.quote(os.path.realpath(cap))}")
-    rw = os.path.join(os.path.realpath(cap), "rw")
-    if not os.path.isdir(rw) or os.path.islink(rw):
-        return
-    dev = os.lstat(rw).st_dev
-    todo = [rw]
-    while todo:
-        d = todo.pop()
+             f"to them; {GROUP_HELP}\n  chgrp -R {me} {shlex.quote(top)}")
+    try:
+        for d, whiteouts in layer:
+            try:
+                opaque = os.getxattr(d, "user.fuseoverlayfs.opaque", follow_symlinks=False) == b"y"
+            except OSError:
+                opaque = False
+            marker = os.path.join(d, ".wh..wh..opq")
+            if opaque or os.path.lexists(marker):
+                os.setxattr(d, "user.overlay.opaque", b"y", follow_symlinks=False)
+                if os.path.lexists(marker):
+                    os.unlink(marker)
+            for name in whiteouts:
+                # A whiteout fuse-overlayfs could not make as a device.
+                os.unlink(os.path.join(d, name))
+                os.mknod(os.path.join(d, name[4:]), stat.S_IFCHR | 0o000, 0)
+    except OSError as e:
+        fail(f"cannot switch {cap} to the systemd backend: {e}")
+
+
+def managed_owns(cap, pid):
+    """Whether PID runs in a user namespace whose parent is the one
+    managed_launch() was given for CAP's launch, which it recorded: how
+    sandbox-game --stop and sandbox-attach tell this sandbox's outer bwrap
+    from anything else (see sandbox_user in sandbox-game-lib). The game
+    cannot write the record, nor make another namespace with that parent."""
+    try:
+        fd = os.open(f"/proc/{pid}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
         try:
-            opaque = os.getxattr(d, "user.fuseoverlayfs.opaque", follow_symlinks=False) == b"y"
-        except OSError:
-            opaque = False
-        marker = os.path.join(d, ".wh..wh..opq")
-        if opaque or os.path.lexists(marker):
-            os.setxattr(d, "user.overlay.opaque", b"y", follow_symlinks=False)
-            if os.path.lexists(marker):
-                os.unlink(marker)
-        with os.scandir(d) as it:
-            for e in it:
-                st = e.stat(follow_symlinks=False)
-                if st.st_dev != dev:
-                    continue
-                if stat.S_ISDIR(st.st_mode):
-                    todo.append(e.path)
-                elif e.name.startswith(".wh.") and stat.S_ISREG(st.st_mode):
-                    # A whiteout fuse-overlayfs could not make as a device.
-                    os.unlink(e.path)
-                    os.mknod(os.path.join(d, e.name[4:]), stat.S_IFCHR | 0o000, 0)
+            parent = fcntl.ioctl(fd, NS_GET_PARENT)
+        finally:
+            os.close(fd)
+        st = os.fstat(parent)
+        os.close(parent)
+        with open(os.path.join(cap, ".managed-userns")) as f:
+            return f.read().split() == [str(st.st_dev), str(st.st_ino)]
+    except OSError:
+        return False
+
+
+def managed_enter(pid, argv):
+    """ARGV in the user namespace of PID, an outer bwrap of this backend's,
+    as the game's uid (for sandbox-attach). That namespace denies setgroups,
+    so nsenter cannot drop our groups there: the way managed_launch() went,
+    into the one nsresourced allocated, as its root and without groups, then
+    on into PID's. Both are below one of ours, so we may enter them."""
+    me, group = os.getuid(), os.getgid()
+    try:
+        outer = os.open(f"/proc/{pid}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
+        managed = fcntl.ioctl(outer, NS_GET_PARENT)
+        check(libc.setns(managed, CLONE_NEWUSER), "setns")
+        os.setgroups([])
+        os.setresgid(0, 0, 0)
+        os.setresuid(0, 0, 0)
+        check(libc.setns(outer, CLONE_NEWUSER), "setns")
+        os.setresgid(group, group, group)
+        os.setresuid(me, me, me)
+        os.close(outer)
+        os.close(managed)
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        fail(f"cannot enter the sandbox of process {pid}: {e}")
 
 
 def main():
@@ -1456,6 +1537,15 @@ def main():
         if why:
             fail(f"the systemd backend is not available: {why}")
         return
+    if len(args) == 3 and args[0] == "managed-owns":
+        sys.exit(0 if managed_owns(args[1], args[2]) else 1)
+    if len(args) >= 3 and args[0] == "managed-enter":
+        rest = args[2:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        if not rest:
+            fail("managed-enter: no command")
+        managed_enter(args[1], rest)
     if len(args) >= 2 and args[0] in ("managed-adopt", "managed-launch"):
         cap, rest, net = args[1], args[2:], None
         if args[0] == "managed-launch" and rest[:1] == ["--net"] and len(rest) > 1:
@@ -1487,14 +1577,23 @@ def main():
     if cmd == "index":
         print(index_of(cap))
         return
+    if cmd == "forget":
+        # Only the uid matters here. With your range gone from /etc/subuid --
+        # the usual reason to switch -- which one it was is unknown: the
+        # entries stay, and the switch goes on (root gave the files back).
+        n = index_of(cap, allocate=False)
+        _, uids = subordinate("/etc/subuid", OFFSET + n + 1)
+        if not uids:
+            sys.stderr.write(f"sandbox-uid: warning: no subordinate range for {cap}'s uid any "
+                             "more; its ACL entries stay\n")
+            return
+        forget(cap, uids[0] + OFFSET + n)
+        return
     # Maintenance gives no capture a uid it did not have: that is
     # SANDBOX_SEPARATE_UID's.
-    lay = layout(cap, allocate=cmd not in ("run", "share", "forget"))
+    lay = layout(cap, allocate=cmd not in ("run", "share"))
     if cmd == "ids":
         print(lay["uid"], lay["clients"])
-        return
-    if cmd == "forget":
-        forget(cap, lay["uid"])
         return
     if cmd == "share":
         # Copied up during the run, those files have the mode of the game's

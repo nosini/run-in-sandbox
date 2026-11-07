@@ -11,6 +11,12 @@ require {
     attribute user_home_type;
     attribute user_tmp_type;
     type init_var_run_t;
+    type mnt_t;
+    type default_t;
+    type unlabeled_t;
+    type dosfs_t;
+    type fusefs_t;
+    type removable_t;
     type nsfs_t;
     class dir { getattr ioctl };
     class file { read open ioctl };
@@ -26,14 +32,18 @@ require {
 # else there. user_tmp_type is the runtime directory (/run/user/UID), where
 # the Wayland and playback-only Pulse sockets are; only those are bound into
 # the sandbox. PID 1 gives the render-alias store init_var_run_t.
-allow systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t }:dir { getattr ioctl };
-allow systemd_nsresourced_t { user_home_type user_tmp_type }:dir { getattr ioctl };
+# Game folders elsewhere: a drive mounted under /mnt or /run/media (mnt_t,
+# or unlabeled_t where its filesystem was never labeled), a folder made at /
+# (default_t), FAT or exFAT (dosfs_t), NTFS and other FUSE filesystems
+# (fusefs_t), removable media (removable_t).
+allow systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir { getattr ioctl };
+allow systemd_nsresourced_t { user_home_type user_tmp_type mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir { getattr ioctl };
 # Neither service issues ioctl calls on these directories. An allowxperm rule
 # limits ioctl calls to the commands it lists, so keep just one that only
 # reads: FS_IOC_GETFLAGS. Not for init_var_run_t under nsresourced, whose
 # stock policy uses its own runtime directories.
-allowxperm systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t }:dir ioctl 0x6601;
-allowxperm systemd_nsresourced_t { user_home_type user_tmp_type }:dir ioctl 0x6601;
+allowxperm systemd_mountfsd_t { user_home_type user_tmp_type init_var_run_t mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir ioctl 0x6601;
+allowxperm systemd_nsresourced_t { user_home_type user_tmp_type mnt_t default_t unlabeled_t dosfs_t fusefs_t removable_t }:dir ioctl 0x6601;
 
 # mountfsd's worker opens the caller's namespace descriptor, makes a user
 # namespace for the idmapping, and mounts.

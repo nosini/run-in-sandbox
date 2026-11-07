@@ -68,9 +68,11 @@ writes to, connects to or copies up from to belong to it.
 
 Current openSUSE Tumbleweed gives each new account a group of its own with
 that number. Older accounts often have `users` (100) instead. The installer
-refuses such an account, and the launcher checks before changing anything:
-first your primary group, then the game's folder, Proton, the capture and
-the desktop's sockets. It names what to change.
+refuses such an account, and the launcher checks your primary group before
+changing anything, the whole capture before it converts it to this backend,
+and the game's folder, Proton and the desktop's sockets on every launch. It
+names what to change. A launch stopped by the last of those leaves the
+capture switched; change what it names and launch again.
 
 To move an account (here `alice`, uid 1000) to a group of its own:
 
@@ -138,9 +140,11 @@ only the per-user installation and its optional sound setup.
 [`sandbox_game_systemd.te`](sandbox_game_systemd.te) extends the existing
 `systemd_mountfsd_t` and `systemd_nsresourced_t` domains of openSUSE
 Tumbleweed's policy. It has no game domain, per-game labels or relabeling.
-The services take folders of your home and your runtime directory by
-descriptor, and handle namespaces; their Varlink checks that the caller owns
-what it hands over stay in place. The launcher passes those folders as
+The services take folders of your home, your runtime directory and game
+folders elsewhere (a drive under `/mnt` or `/run/media`, FAT, exFAT, NTFS
+or another FUSE filesystem, a folder at `/`) by descriptor, and handle
+namespaces; their Varlink checks that the caller owns what it hands over
+stay in place. The launcher passes those folders as
 `O_PATH` descriptors, so neither service may list them or read files in them,
 and neither may issue ioctl calls on them (one read-only command excepted).
 Stock policy lets mountfsd mount nothing at all; the module gives it the
@@ -165,8 +169,11 @@ running the storage tests, the render-alias access probe and the write
 restriction check from [validation.md](validation.md); each removal broke one
 of them. Rules found unnecessary that way were dropped: `sys_chroot`, reading
 the callers' process files, and nsresourced's runtime-directory access,
-which stock policy already grants. A rule refused at run time shows as an AVC
-denial; the one for `/proc/pressure` is expected and harmless.
+which stock policy already grants. Of the types for game folders outside
+your home, only `mnt_t` was checked so (a game folder under `/mnt` is
+refused without it); the others follow from it, untested. A rule refused at
+run time shows as an AVC denial; the one for `/proc/pressure` is expected
+and harmless.
 
 nsresourced's `sys_admin` is the subtle one. It loads its BPF restriction once
 per boot, and keeps it pinned. Without `sys_admin`, libbpf cannot find the

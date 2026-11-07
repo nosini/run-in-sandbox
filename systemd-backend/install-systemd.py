@@ -135,8 +135,13 @@ def components(uid):
                     f'{unit} overrides the vendor executable')
             pid = output('systemctl', 'show', unit, '-p', 'MainPID', '--value')
             if pid not in ('', '0'):
-                require(Path(f'/proc/{int(pid)}/exe').samefile(Path('/usr/lib/systemd') / unit[:-8]),
-                        f'{unit} still runs a replaced binary; stop managed namespaces and restart the service')
+                # A binary replaced since stays readable there, and differs. The
+                # services exit when idle, though: gone meanwhile, it ran nothing.
+                try:
+                    current = Path(f'/proc/{int(pid)}/exe').samefile(Path('/usr/lib/systemd') / unit[:-8])
+                except (FileNotFoundError, ProcessLookupError):
+                    current = True
+                require(current, f'{unit} still runs a replaced binary; stop managed namespaces and restart the service')
         paths.append(expected)
     builds = set()
     for path in set(paths):

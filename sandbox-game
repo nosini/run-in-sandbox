@@ -192,7 +192,7 @@ list_protons() {                      # every install found, newest first
 # gamescope and anything sandbox-attach put in there. The capture's home is
 # how a sandbox is recognised: `--bind ~/game-sandboxes/NAME/home $HOME`.
 outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
-    local p args i name ours
+    local p args name ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
         # Same user namespace: -ef compares the namespaces' inodes, without a
@@ -202,13 +202,8 @@ outer_bwraps() {                      # $1 = NAME, empty for all -> "pid name"
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
-        name=""
-        for ((i = 1; i < ${#args[@]}; i++)); do
-            [ "${args[i-1]}" = --bind ] || continue
-            [[ "${args[i]}" == "$HOME/game-sandboxes/"*/home ]] || continue
-            name="${args[i]#"$HOME/game-sandboxes/"}"; name="${name%/home}"; break
-        done
-        [ -n "$name" ] && [[ "$name" != */* ]] || continue
+        bound_capture "${args[@]}"; name="$BOUND"
+        [ -n "$name" ] || continue
         [ "$ours" = 1 ] || sandbox_user "$p" "$name" || continue
         [ -z "$1" ] || [ "$name" = "$1" ] || continue
         printf '%s %s\n' "$p" "$name"
@@ -908,7 +903,9 @@ lock_sandbox "$NAME" || { echo "'$NAME' is already running" >&2; exit 1; }
 # marked by CAP/managed-uid. Its files are yours on disk, as they are when a
 # game runs as you, so either way round a switch takes no more than giving
 # them back from the subordinate uid, or making the overlay readable to the
-# kernel's overlayfs.
+# kernel's overlayfs. A switch to it writes the mark first, as "adopting",
+# and "1" only once the capture is ready: one that fails halfway still runs
+# under the systemd backend next time -- not as you -- and finishes then.
 case "${SANDBOX_SEPARATE_UID:-}" in
     1) SEPARATE_UID=1 ;;
     systemd) SEPARATE_UID=systemd ;;
@@ -917,12 +914,12 @@ case "${SANDBOX_SEPARATE_UID:-}" in
         elif [ -f "$CAP/managed-uid" ]; then SEPARATE_UID=systemd; fi ;;
     *) SEPARATE_UID=0 ;;
 esac
-if [ "$SEPARATE_UID" = systemd ]; then
+if [ "$SEPARATE_UID" = systemd ] || { [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; }; then
     UIDHELPER="$(helper sandbox-uid)"
     [ -n "$UIDHELPER" ] || { echo "sandbox-uid not found; run install.sh" >&2; exit 1; }
-    # Before anything changes: an unavailable backend leaves the capture as it is.
-    "$UIDHELPER" managed-available || exit 1
 fi
+# Before anything changes: an unavailable backend leaves the capture as it is.
+[ "$SEPARATE_UID" != systemd ] || "$UIDHELPER" managed-available || exit 1
 if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
     if [ "$SEPARATE_UID" = 0 ]; then
         echo "sandbox-game: SANDBOX_SEPARATE_UID=$SANDBOX_SEPARATE_UID: $NAME runs as you from now on; giving its files back" >&2
@@ -931,11 +928,15 @@ if [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; then
     fi
     reclaim "$CAP" || exit 1
     # Another sandbox may get that uid later: its ACL entries go too.
-    "$(helper sandbox-uid)" forget "$CAP" || exit 1
+    "$UIDHELPER" forget "$CAP" || exit 1
+    [ "$SEPARATE_UID" != systemd ] || printf 'adopting\n' > "$CAP/managed-uid"
     rm -f "$CAP/uid" "$CAP/.shared" "$CAP/.handed-over"
 fi
-if [ "$SEPARATE_UID" = systemd ] && [ ! -f "$CAP/managed-uid" ]; then
+if [ "$SEPARATE_UID" = systemd ] && [ "$(cat -- "$CAP/managed-uid" 2>/dev/null)" != 1 ]; then
     mkdir -p "$CAP"
+    printf 'adopting\n' > "$CAP/managed-uid"
+    # Folders overlayfs leaves locked when a run is killed (see unwork).
+    unlock_work "$CAP"
     "$UIDHELPER" managed-adopt "$CAP" || exit 1
     printf '1\n' > "$CAP/managed-uid"  # the storage's format, should it change
 elif [ "$SEPARATE_UID" != systemd ] && [ -f "$CAP/managed-uid" ]; then
@@ -2499,7 +2500,25 @@ elif [ "$SEPARATE_UID" = systemd ]; then
                         else
                             NO_GPU=1; continue
                         fi ;;
-                    /dev/dri) NO_GPU=1 ;;
+                    /dev/dri)
+                        # SANDBOX_GPU_CARD=1: not a node in there would open for
+                        # the transient uid. The nodes as without it, then.
+                        echo "sandbox-game: warning: SANDBOX_GPU_CARD=1 does nothing under SANDBOX_SEPARATE_UID=systemd," \
+                            "whose uid cannot open a card node" >&2
+                        for device in /dev/dri/renderD*; do
+                            [ -c "$device" ] || continue
+                            if [ -c "$RENDER_COPIES/${device##*/}" ]; then
+                                GPU_ARGS+=( --dev-bind "$RENDER_COPIES/${device##*/}" "$device" )
+                            else
+                                NO_GPU=1
+                            fi
+                        done
+                        if [ "$GS" = 1 ]; then
+                            for device in /dev/dri/card*; do
+                                [ ! -c "$device" ] || GPU_ARGS+=( --dev-bind "$device" "$device" )
+                            done
+                        fi
+                        continue ;;
                 esac
                 GPU_ARGS+=( "${DEVICE_ARGS[i-2]}" "$src" "$dst" ) ;;
             *) GPU_ARGS+=( "${DEVICE_ARGS[i]}" ) ;;

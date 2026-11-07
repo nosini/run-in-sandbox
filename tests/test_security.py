@@ -262,6 +262,39 @@ class SecurityTests(unittest.TestCase):
             self.assertIn('unsupported systemd version', result.stderr)
             self.assertEqual({p.name: p.read_bytes() for p in capture.iterdir()}, before)
 
+    def test_interrupted_switch_to_systemd_stays_with_it(self):
+        # The uid's mark is gone once the files are given back; should the
+        # conversion then fail, the next launch -- without the variable, from
+        # the file manager say -- must not run the game as you.
+        scripts = self.base / 'failing-adopt'
+        scripts.mkdir()
+        for name in ('sandbox-game', 'sandbox-game-lib'):
+            shutil.copy2(ROOT / name, scripts / name)
+        log = self.base / 'helper-log'
+        helper = scripts / 'sandbox-uid'
+        helper.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$HELPER_LOG"\n'
+                          'case "$1" in\n'
+                          '    managed-adopt) exit 1 ;;\n'
+                          '    managed-available) [ -z "$UNAVAILABLE" ] || exit 1 ;;\n'
+                          'esac\n')
+        helper.chmod(0o755)
+        capture = self.home / 'game-sandboxes' / 'interrupted'
+        capture.mkdir(parents=True)
+        (capture / 'uid').write_text('7\n')
+        env = {k: v for k, v in self.env.items() if k != 'SANDBOX_SEPARATE_UID'}
+        env['HELPER_LOG'] = str(log)
+        for value in ('systemd', None):
+            run_env = {**env, 'SANDBOX_SEPARATE_UID': value} if value else {**env, 'UNAVAILABLE': '1'}
+            result = subprocess.run([str(scripts / 'sandbox-game'), '--headless', '--name',
+                                     'interrupted', str(self.game), '/bin/true'],
+                                    env=run_env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((capture / 'uid').exists())
+            self.assertEqual((capture / 'managed-uid').read_text(), 'adopting\n')
+        self.assertEqual(log.read_text().split(),
+                         ['managed-available', 'run', 'forget', 'managed-adopt',
+                          'managed-available'])
+
     def test_manager_install_then_launch_keeps_one_prefix(self):
         import runpy
         Library = runpy.run_path(str(ROOT / "sandbox-manager-lib.py"))["Library"]
