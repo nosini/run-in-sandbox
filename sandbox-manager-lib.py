@@ -830,18 +830,45 @@ PY
     def set_shortcut(self, name, where, enabled, icon=None):
         path = self.shortcut_path(name, where)
         if enabled:
-            self.write_shortcut(path, self.shortcut_text(self.entry(name), icon), where, name)
+            text = self.shortcut_text(self.entry(name), icon)
+            self.write_shortcut(path, text, where, name)
         else:
             path.unlink(missing_ok=True)
+            text = self.shortcut_text(self.entry(name), icon)
+        self.refresh_taskbar_entry(name, text)
+
+    def taskbar_path(self, name):
+        self.capture(name)
+        return self.data / "applications/run-in-sandbox/taskbar" / f"sandbox-game-{name}.desktop"
+
+    def refresh_taskbar_entry(self, name, text):
+        """Provide window matching without a visible applications-menu shortcut."""
+        with self.lock:
+            path = self.taskbar_path(name)
+            if self.shortcut_path(name, "menu").is_file() or "\nStartupWMClass=" not in text:
+                path.unlink(missing_ok=True)
+                return
+            if not self.capture(name).is_dir():
+                return  # an icon request may finish after the sandbox was deleted
+            # These entries are entirely generated; visible shortcuts keep their
+            # hand-written fields through write_shortcut's merge instead.
+            text += "NoDisplay=true\n"
+            if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == text:
+                return
+            atomic_write(path, text, mode=0o644)
 
     def refresh_shortcuts(self, entry, icon=None):
-        """Keep existing shortcuts' names and icons as the library shows them."""
+        """Update visible shortcuts and maintain the hidden window-matching entry."""
+        text = self.shortcut_text(entry, icon)
         for where, present in self.shortcuts(entry["name"]).items():
             if present:
                 self.write_shortcut(self.shortcut_path(entry["name"], where),
-                                    self.shortcut_text(entry, icon), where, entry["name"])
+                                    text, where, entry["name"])
+        self.refresh_taskbar_entry(entry["name"], text)
 
     def remove_shortcuts(self, name):
+        with self.lock:
+            self.taskbar_path(name).unlink(missing_ok=True)
         for where, present in self.shortcuts(name).items():
             if present:
                 self.shortcut_path(name, where).unlink(missing_ok=True)
@@ -969,6 +996,10 @@ PY
         if entry["name"] in self.running():
             raise ValueError("This sandbox is running. Stop it before starting another program.")
         command, env = self.command(entry, **kwargs)
+        try:
+            self.refresh_shortcuts(entry, self.icon(entry))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # desktop integration must not prevent a game from starting
         if command == [str(self.launcher)]:
             # The file-manager launcher writes this same log itself.
             return subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

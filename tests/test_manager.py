@@ -841,7 +841,9 @@ class LibraryTests(unittest.TestCase):
         (game / "play.sh").write_text("#!/bin/sh\n")
         entry = self.library.add_existing(game)
         self.library.log_path(entry["name"]).write_text("previous run")
-        with patch.object(self.library, "running", return_value=set()), patch("subprocess.Popen") as popen:
+        with patch.object(self.library, "running", return_value=set()), \
+                patch.object(self.library, "describe", return_value={"engine": "native"}), \
+                patch("subprocess.Popen") as popen:
             self.library.start(entry)
         popen.assert_called_once()
         self.assertEqual(self.library.log_path(entry["name"]).read_text(), "previous run")
@@ -1010,6 +1012,87 @@ class LibraryTests(unittest.TestCase):
                       (self.home / f"data/applications/sandbox-game-{entry['name']}.desktop").read_text())
         self.assertEqual(core.desktop_exec_argument("/opt/a b"), '"/opt/a b"')
         self.assertEqual(core.desktop_exec_argument("/opt/100%"), "/opt/100%%")
+
+    def test_hidden_taskbar_entry_follows_library_without_visible_shortcuts(self):
+        library = self.shortcut_library()
+        game = self.home / "Train"
+        game.mkdir()
+        (game / "Train.exe").write_text("game")
+        core.atomic_write(library.capture("train") / "source.json", json.dumps({"directory": str(game)}))
+        entry = library.entry("train")
+        icon = library.capture("train") / "icons/abc.png"
+        library.refresh_shortcuts(entry, icon)
+        path = self.home / "data/applications/run-in-sandbox/taskbar/sandbox-game-train.desktop"
+        self.assertEqual(path, library.taskbar_path("train"))
+        text = path.read_text()
+        self.assertIn("NoDisplay=true\n", text)
+        self.assertIn("StartupWMClass=steam_app_train\n", text)
+        self.assertIn(f"Icon={icon}\n", text)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(library.shortcuts("train"), {"menu": False, "desktop": False})
+        modified = path.stat().st_mtime_ns
+        library.refresh_shortcuts(entry, icon)
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+        renamed = library.update_entry("train", title="New title", title_custom=True)
+        newer = library.capture("train") / "icons/def.png"
+        library.refresh_shortcuts(renamed, newer)
+        self.assertIn("Name=New title\n", path.read_text())
+        self.assertIn(f"Icon={newer}\n", path.read_text())
+        with patch.object(core.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            library.operate("train", "delete")
+        self.assertFalse(path.exists())
+
+    def test_menu_shortcut_takes_precedence_over_hidden_taskbar_entry(self):
+        library = self.shortcut_library()
+        entry = library.create("Train")
+        name = entry["name"]
+        library.refresh_shortcuts(entry)
+        hidden = library.taskbar_path(name)
+        self.assertTrue(hidden.exists())
+        library.set_shortcut(name, "menu", True)
+        self.assertFalse(hidden.exists())
+        menu = library.shortcut_path(name, "menu")
+        text = menu.read_text().replace(f"StartupWMClass=steam_app_{name}\n", "StartupWMClass=custom.exe\n")
+        menu.write_text(text)
+        library.refresh_shortcuts(entry)
+        self.assertEqual(menu.read_text(), text)
+        self.assertFalse(hidden.exists())
+        self.assertNotIn("NoDisplay=true", text)
+        library.set_shortcut(name, "menu", False)
+        self.assertTrue(hidden.exists())
+        library.set_shortcut(name, "desktop", True)
+        self.assertTrue(hidden.exists())
+        library.set_shortcut(name, "desktop", False)
+        self.assertTrue(hidden.exists())
+
+    def test_hidden_taskbar_entry_is_removed_when_automatic_uses_native(self):
+        library = self.library
+        game = self.native_game(self.home / "Native Game")
+        entry = library.add_existing(game)
+        hidden = library.taskbar_path(entry["name"])
+        library.refresh_shortcuts(entry)
+        self.assertFalse(hidden.exists())
+        library.update_settings(entry["name"], {"launch_with": "proton"})
+        library.refresh_shortcuts(entry)
+        self.assertTrue(hidden.exists())
+        library.update_settings(entry["name"], {"launch_with": "auto"})
+        library.refresh_shortcuts(entry)
+        self.assertFalse(hidden.exists())
+
+    def test_play_creates_hidden_taskbar_entry_before_launch(self):
+        library = self.library
+        entry = library.create("Train")
+        icon = library.capture(entry["name"]) / "icons/abc.png"
+        hidden = library.taskbar_path(entry["name"])
+        def spawn(*args, **kwargs):
+            self.assertIn("NoDisplay=true\n", hidden.read_text())
+            self.assertIn(f"Icon={icon}\n", hidden.read_text())
+        with patch.object(library, "running", return_value=set()), \
+                patch.object(library, "command", return_value=([str(library.launcher)], {})), \
+                patch.object(library, "icon", return_value=icon), \
+                patch.object(core.subprocess, "Popen", side_effect=spawn) as popen:
+            library.start(entry)
+        popen.assert_called_once()
 
     def test_desktop_shortcuts_need_a_desktop_folder_other_than_home(self):
         library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,

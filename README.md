@@ -122,12 +122,18 @@ A shortcut starts the game as **Play** does, with the game's icon and display
 name, and both follow later changes the manager makes. Deleting the sandbox
 in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
-`sandbox-manager --launch NAME`, which also works from a shell. For a
-game run with Proton, the shortcut's `StartupWMClass=steam_app_NAME` matches
+`sandbox-manager --launch NAME`, which also works from a shell. The manager also
+maintains hidden taskbar entries for Proton games without an applications-menu
+shortcut, under `~/.local/share/applications/run-in-sandbox/taskbar/`. They are
+created as the library loads and before Play starts the game, follow name and
+icon changes, and are removed when the sandbox is deleted in the manager.
+They do not appear in the applications menu or on the desktop. Enabling an
+applications-menu shortcut replaces the hidden entry; disabling it restores one.
+For a game run with Proton, `StartupWMClass=steam_app_NAME` matches
 the app ID its windows get (see [Windows games — Proton](#windows-games--proton)),
 so the desktop shows a game window drawn on it directly with the game's icon
-and name. Windows inside gamescope's window always show as gamescope. These files
-can be edited by hand: the manager updates only the name, the `Exec` and
+and name. Windows inside gamescope's window always show as gamescope. Visible
+shortcuts can be edited by hand: the manager updates only the name, the `Exec` and
 `TryExec` lines, and the icon (unless another one was chosen), adds a missing
 `StartupWMClass` without changing one that is there, and leaves every other
 line as written.
