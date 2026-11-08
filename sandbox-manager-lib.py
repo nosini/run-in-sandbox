@@ -742,8 +742,19 @@ PY
         return found
 
     def uses_proton(self, entry):
-        return entry.get("kind") == "windows" or entry.get("engine") == "proton" \
-            or self.settings(entry["name"]).get("launch_with") == "proton"
+        if entry.get("kind") == "windows" or entry.get("engine") == "proton" \
+                or self.settings(entry["name"]).get("launch_with") == "proton":
+            return True
+        # Older captures may have no saved engine. Settings detects it only
+        # in memory; shortcuts also need Automatic's detection after a reload.
+        selection = entry.get("selection", "")
+        try:
+            if selection and Path(selection).exists():
+                return self.describe(selection, entry["name"]).get("engine") == "proton"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # An unavailable game or failed detection must not block shortcuts.
+            pass
+        return False
 
     def shortcut_text(self, entry, icon=None):
         manager = self.backend.with_name("sandbox-manager")

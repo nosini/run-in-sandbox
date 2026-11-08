@@ -947,6 +947,59 @@ class LibraryTests(unittest.TestCase):
         detected = library.add_existing(windows / "Game.exe")
         self.assertIn(f"StartupWMClass=steam_app_{detected['name']}\n", library.shortcut_text(detected))
 
+    def test_automatic_proton_shortcut_uses_detection_with_legacy_metadata(self):
+        library = self.shortcut_library()
+        game = self.home / "Windows Game"
+        game.mkdir()
+        executable = game / "Game.exe"
+        executable.write_text("game")
+        name = "train"
+        capture = library.capture(name)
+        # A capture made outside the manager has a source but no saved engine.
+        core.atomic_write(capture / "source.json", json.dumps({"directory": str(game)}))
+        menu = library.shortcut_path(name, "menu")
+        expected = f"StartupWMClass=steam_app_{name}\n"
+        for selection in (game, executable):
+            for engine in (None, "native"):
+                with self.subTest(selection=selection.name, engine=engine):
+                    metadata = {"kind": "existing", "selection": str(selection)}
+                    if engine is not None:
+                        metadata["engine"] = engine
+                    core.atomic_write(capture / "manager.json", json.dumps(metadata))
+                    self.assertEqual(library.describe(selection, name)["engine"], "proton")
+                    library.update_settings(name, {"launch_with": "auto"})
+                    library.set_shortcut(name, "menu", True)
+                    self.assertIn(expected, menu.read_text())
+                    library.update_settings(name, {"launch_with": "proton"})
+                    library.set_shortcut(name, "menu", True)
+                    self.assertIn(expected, menu.read_text())
+                    library.update_settings(name, {"launch_with": "auto"})
+                    library.refresh_shortcuts(library.entry(name))
+                    self.assertIn(expected, menu.read_text())
+                    library.set_shortcut(name, "menu", False)
+                    library.set_shortcut(name, "menu", True)
+                    self.assertIn(expected, menu.read_text())
+                    menu.write_text(menu.read_text().replace(expected, "StartupWMClass=custom.exe\n"))
+                    library.refresh_shortcuts(library.entry(name))
+                    self.assertIn("StartupWMClass=custom.exe\n", menu.read_text())
+                    self.assertEqual(menu.read_text().count("StartupWMClass="), 1)
+                    library.set_shortcut(name, "menu", False)
+
+    def test_shortcuts_survive_unavailable_automatic_detection(self):
+        library = self.library
+        game = self.native_game(self.home / "Native Game")
+        entry = library.add_existing(game)
+        for error in (OSError("unavailable"), ValueError("invalid detection output"),
+                      subprocess.TimeoutExpired("describe", 20),
+                      subprocess.CalledProcessError(1, "describe")):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(library, "describe", side_effect=error):
+                library.set_shortcut(entry["name"], "menu", True)
+                self.assertNotIn("StartupWMClass", library.shortcut_path(entry["name"], "menu").read_text())
+        shutil.rmtree(game)
+        with patch.object(library, "describe", side_effect=AssertionError("missing selection")):
+            library.set_shortcut(entry["name"], "menu", True)
+
     def test_shortcuts_quote_the_manager_only_when_they_must(self):
         # Menu editors take a quoted program for a missing one.
         library = core.Library(self.home / ".local/bin/sandbox-game", ROOT, ROOT / "Sandbox game",
