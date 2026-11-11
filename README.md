@@ -1825,3 +1825,13 @@ route reads the same config.
 
 Running the tests, the systemd backend's probes and notes on how the pieces
 behave are in [docs/development.md](docs/development.md).
+
+## License
+
+[AGPL-3.0-or-later](LICENSE).
+
+The bundled `sandbox-xwayland-satellite` binary keeps its own licence:
+[MPL-2.0](satellite-LICENSE), from the [fork it is built
+from](docs/satellite.md). MPL-2.0 is one-way compatible with the AGPL, so the
+two can travel together while each keeps its terms. The games this runs are
+neither part of nor covered by either.
