@@ -23,8 +23,10 @@ class LibraryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
+        # Shortcuts too go to the test's own folder, never the real one.
         self.library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game",
-                                    home=self.home, config=self.home / "config")
+                                    home=self.home, config=self.home / "config",
+                                    data=self.home / "data")
 
     def test_new_install_and_game_use_the_same_persistent_prefix(self):
         entry = self.library.create("NIKKE", "/runners/DWProton", internet=True)
@@ -1065,19 +1067,22 @@ class LibraryTests(unittest.TestCase):
         library.set_shortcut(name, "desktop", False)
         self.assertTrue(hidden.exists())
 
-    def test_hidden_taskbar_entry_is_removed_when_automatic_uses_native(self):
+    def test_hidden_taskbar_entry_matches_by_window_class_only_under_proton(self):
+        # Native games get one too, for KDE, which names a sandbox's windows
+        # after the entry's file; only Proton's carries the window class.
         library = self.library
         game = self.native_game(self.home / "Native Game")
         entry = library.add_existing(game)
         hidden = library.taskbar_path(entry["name"])
         library.refresh_shortcuts(entry)
-        self.assertFalse(hidden.exists())
+        self.assertIn("NoDisplay=true\n", hidden.read_text())
+        self.assertNotIn("StartupWMClass=", hidden.read_text())
         library.update_settings(entry["name"], {"launch_with": "proton"})
         library.refresh_shortcuts(entry)
-        self.assertTrue(hidden.exists())
+        self.assertIn(f"StartupWMClass=steam_app_{entry['name']}\n", hidden.read_text())
         library.update_settings(entry["name"], {"launch_with": "auto"})
         library.refresh_shortcuts(entry)
-        self.assertFalse(hidden.exists())
+        self.assertNotIn("StartupWMClass=", hidden.read_text())
 
     def test_play_creates_hidden_taskbar_entry_before_launch(self):
         library = self.library

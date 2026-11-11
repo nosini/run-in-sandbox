@@ -501,6 +501,132 @@ wine32_status() {
     done < <(printf '%s\n' "${!missing[@]}" | sort)
 }
 
+# A Wayland client small enough to need no library, for what the launcher
+# asks of the desktop's compositor itself: connected to the socket in
+# argv[1], with the compositor's globals read. The scripts that use it come
+# after it. Exits 3 if no compositor answers there; a protocol error or a
+# connection lost later is an exception of the script's.
+read -r -d '' WAYLAND_CLIENT <<'EOF' || true
+import os, socket, struct, sys
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(2)
+try:
+    sock.connect(sys.argv[1])
+except OSError:
+    sys.exit(3)
+ids, data, handlers = [1], b"", {}
+def new_id():
+    ids[0] += 1
+    return ids[0]
+def send(obj, opcode, payload=b"", fds=()):
+    message = struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload
+    if fds:
+        socket.send_fds(sock, [message], list(fds))
+    else:
+        sock.sendall(message)
+def string(text):
+    raw = text.encode() + b"\0"
+    return struct.pack("=I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
+def take_string(body):
+    size = struct.unpack_from("=I", body)[0]
+    return body[4:4 + size - 1].decode(errors="replace"), body[4 + (size + 3) // 4 * 4:]
+def roundtrip():
+    global data
+    done = new_id()
+    send(1, 0, struct.pack("=I", done))                 # wl_display.sync
+    while True:
+        while len(data) < 8 or len(data) < struct.unpack_from("=II", data)[1] >> 16:
+            chunk = sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("the compositor closed the connection")
+            data += chunk
+        obj, word = struct.unpack_from("=II", data)
+        body, data = data[8:word >> 16], data[word >> 16:]
+        if obj == done:
+            return
+        if obj == 1 and word & 0xffff == 0:             # wl_display.error
+            raise ConnectionError("the compositor refused: " + take_string(body[8:])[0])
+        if obj in handlers:
+            handlers[obj](word & 0xffff, body)
+
+globals_ = []
+registry = new_id()
+send(1, 1, struct.pack("=I", registry))                 # wl_display.get_registry
+def on_global(opcode, body):
+    if opcode == 0:
+        name = struct.unpack_from("=I", body)[0]
+        interface, rest = take_string(body[4:])
+        globals_.append((name, interface, struct.unpack_from("=I", rest)[0]))
+handlers[registry] = on_global
+try:
+    roundtrip()
+except (OSError, struct.error, UnicodeDecodeError):
+    sys.exit(3)
+
+def bind(name, interface, version):
+    obj = new_id()
+    send(registry, 0, struct.pack("=I", name) + string(interface) + struct.pack("=II", version, obj))
+    return obj
+EOF
+
+# A Wayland socket of the game's own, through security-context-v1 where the
+# compositor has it: KWin does, Mutter does not. KWin marks every connection
+# made through it as sandboxed and keeps from it what only the desktop itself
+# should have -- other windows' management, fake input, screencasts, the
+# clipboard in the background, making contexts of its own -- and names its
+# windows after the app ID given here, whatever a program calls them.
+# argv: the desktop's socket, then the runtime dir for the new one, the app
+# ID and an instance ID; without those, only whether the compositor has it.
+# Prints "ready PATH" once the compositor listens on PATH, then holds the
+# other end of what the compositor watches until its own input ends -- when
+# the launcher does, however it does -- and the compositor stops listening.
+# Exits 3, printing nothing, where there is no security context to have.
+read -r -d '' SECURITY_CONTEXT <<'EOF' || true
+import signal, tempfile
+offered = [name for name, interface, _ in globals_ if interface == "wp_security_context_manager_v1"]
+if not offered:
+    sys.exit(3)
+if len(sys.argv) < 5:
+    sys.exit(0)
+signal.signal(signal.SIGINT, signal.SIG_IGN)            # a terminal's ^C is the launcher's
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+folder = tempfile.mkdtemp(prefix="sandbox-game-wayland.", dir=sys.argv[2])
+path = os.path.join(folder, "wayland-0")
+try:
+    try:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen()
+        watched, held = os.pipe()
+    except OSError as error:
+        print(f"could not make the socket: {error}", flush=True)
+        sys.exit(1)
+    manager = bind(offered[0], "wp_security_context_manager_v1", 1)
+    context = new_id()
+    send(manager, 1, struct.pack("=I", context), (listener.fileno(), watched))   # create_listener
+    send(context, 1, string("eu.nosini.SandboxGame"))  # set_sandbox_engine
+    send(context, 2, string(sys.argv[3]))               # set_app_id
+    send(context, 3, string(sys.argv[4]))               # set_instance_id
+    send(context, 4)                                    # commit
+    send(context, 0)                                    # destroy: the listener stays
+    try:
+        roundtrip()
+    except OSError as error:
+        print(error, flush=True)
+        sys.exit(1)
+    listener.close()
+    os.close(watched)
+    sock.close()
+    print("ready", path, flush=True)
+    sys.stdin.buffer.read()
+finally:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    os.rmdir(folder)
+EOF
+
 # sandbox-game --check: what of all this holds on this machine, one line
 # each. "!!" is something a sandbox here goes without that it would normally
 # have, and makes the exit status 1; "--" something optional or not
@@ -593,6 +719,14 @@ check_host() {
         _check_line ok gamescope "installed; games under it cannot reach the desktop's compositor"
     else
         _check_line -- gamescope "installed, but this kernel's Landlock cannot keep games under it off the desktop's compositor"
+    fi
+    case "${WAYLAND_DISPLAY:-wayland-0}" in /*) out="$WAYLAND_DISPLAY" ;; *) out="$rt/${WAYLAND_DISPLAY:-wayland-0}" ;; esac
+    if [ ! -S "$out" ]; then
+        _check_line -- wayland "no Wayland desktop here to ask"
+    elif python3 -I -c "$WAYLAND_CLIENT"$'\n'"$SECURITY_CONTEXT" "$out" 2>/dev/null; then
+        _check_line ok wayland "the desktop gives each sandbox a socket of its own (security context)"
+    else
+        _check_line -- wayland "no security context from this desktop (GNOME has none): sandboxes share its socket"
     fi
     if { [ -n "$(helper sandbox-xwayland-satellite)" ] || command -v xwayland-satellite >/dev/null; } \
             && command -v Xwayland >/dev/null; then
@@ -1861,56 +1995,6 @@ fi
 # size, starting from its logical position, overlaps pushed apart keeping the
 # monitors' relative placement. Exits non-zero if there is nothing to go on.
 read -r -d '' WINE_DESKTOP_SIZE <<'EOF' || true
-import socket, struct, sys
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.settimeout(2)
-sock.connect(sys.argv[1])
-ids, data, handlers = [1], b"", {}
-def new_id():
-    ids[0] += 1
-    return ids[0]
-def send(obj, opcode, payload=b""):
-    sock.sendall(struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload)
-def string(text):
-    raw = text.encode() + b"\0"
-    return struct.pack("=I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
-def take_string(body):
-    size = struct.unpack_from("=I", body)[0]
-    return body[4:4 + size - 1].decode(errors="replace"), body[4 + (size + 3) // 4 * 4:]
-def roundtrip():
-    global data
-    done = new_id()
-    send(1, 0, struct.pack("=I", done))                 # wl_display.sync
-    while True:
-        while len(data) < 8 or len(data) < struct.unpack_from("=II", data)[1] >> 16:
-            chunk = sock.recv(65536)
-            if not chunk:
-                sys.exit(1)
-            data += chunk
-        obj, word = struct.unpack_from("=II", data)
-        body, data = data[8:word >> 16], data[word >> 16:]
-        if obj == done:
-            return
-        if obj == 1 and word & 0xffff == 0:             # wl_display.error
-            sys.exit(1)
-        if obj in handlers:
-            handlers[obj](word & 0xffff, body)
-
-globals_ = []
-registry = new_id()
-send(1, 1, struct.pack("=I", registry))                 # wl_display.get_registry
-def on_global(opcode, body):
-    if opcode == 0:
-        name = struct.unpack_from("=I", body)[0]
-        interface, rest = take_string(body[4:])
-        globals_.append((name, interface, struct.unpack_from("=I", rest)[0]))
-handlers[registry] = on_global
-roundtrip()
-
-def bind(name, interface, version):
-    obj = new_id()
-    send(registry, 0, struct.pack("=I", name) + string(interface) + struct.pack("=II", version, obj))
-    return obj
 outputs = []
 for name, interface, version in globals_:
     if interface == "wl_output":
@@ -2022,7 +2106,7 @@ if [ "$GS" = 1 ]; then
         done
         case "$WL" in /*) _wl="$WL" ;; *) _wl="$RT/$WL" ;; esac
         if [ "$_nested" = 0 ]; then
-            if _size="$(python3 -I -c "$WINE_DESKTOP_SIZE" "$_wl" 2>/dev/null)" \
+            if _size="$(python3 -I -c "$WAYLAND_CLIENT"$'\n'"$WINE_DESKTOP_SIZE" "$_wl" 2>/dev/null)" \
                     && [[ "$_size" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
                 GS_ARGS+=( -w "${BASH_REMATCH[1]}" -h "${BASH_REMATCH[2]}" )
             else
@@ -2088,6 +2172,39 @@ if [ "$X11_BACKEND" = satellite ]; then
              /run/sandbox-x11-bin/xwayland-satellite :0 -nolisten tcp )
 fi
 
+# ---- Wayland security context ---------------------------------------------
+# Its helper runs beside the launcher for as long as the launcher does, as a
+# coprocess: what it holds goes to no program started from here, and its
+# input ends with the launcher, or with cleanup, which ends it sooner.
+# Windows from this socket go by "sandbox-game-NAME", the manager's
+# shortcuts' name, which KDE's taskbar matches. With none to be had the
+# desktop's own socket stays; that it is missing is no cause for a warning
+# where it never was, but a compositor that has it and fails to give one is.
+WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+security_context() {
+    local line rc
+    coproc WL_CONTEXT {
+        exec python3 -I -c "$WAYLAND_CLIENT"$'\n'"$SECURITY_CONTEXT" \
+            "$WL_HOST" "$RT" "sandbox-game-$NAME" "$NAME.$$" 2>/dev/null
+    }
+    WL_CONTEXT_HELPER="$WL_CONTEXT_PID"; WL_CONTEXT_FD="${WL_CONTEXT[1]}"
+    if read -r line <&"${WL_CONTEXT[0]}" && [[ "$line" == "ready /"* ]]; then
+        WL_HOST="${line#ready }"
+        return
+    fi
+    wait "$WL_CONTEXT_HELPER" && rc=0 || rc=$?
+    WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+    [ "$rc" = 3 ] || echo "sandbox-game: warning: the desktop's compositor offers a security context" \
+        "but did not make one${line:+ ($line)}; the game gets the desktop's own Wayland socket" >&2
+}
+end_security_context() {
+    [ -n "$WL_CONTEXT_HELPER" ] || return 0
+    local fd="$WL_CONTEXT_FD"
+    exec {fd}>&-
+    wait "$WL_CONTEXT_HELPER" 2>/dev/null || true
+    WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+}
+
 # ---- environment, display and devices --------------------------------------
 # Use explicit names, never prefixes such as AWS_* or even arbitrary LC_*:
 # shell sessions and file managers can carry credentials in their environment.
@@ -2152,6 +2269,10 @@ if [ "$HEADLESS" = 0 ]; then
             echo "Wayland socket not found: $WL_HOST; use --headless or explicitly opt into --host-x11" >&2
             exit 1
         }
+        # Where the compositor can make one, a socket of the sandbox's own
+        # (see SECURITY_CONTEXT) takes the desktop's place, for the game and
+        # gamescope or satellite alike: everything below reads WL_HOST.
+        security_context
         if [ "$OUTER_DISPLAY" = 1 ]; then
             # Nested: the desktop's compositor is the private server's
             # business alone -- gamescope's, or satellite's in split display.
@@ -2270,6 +2391,7 @@ cleanup() {
     done
     unwork
     rm_proton_layer
+    end_security_context
     # --net: pasta outlives the game unless told otherwise; see "network".
     if [ -n "$PASTA_PID" ]; then
         local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"

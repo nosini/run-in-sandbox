@@ -124,15 +124,20 @@ in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
 `sandbox-manager --launch NAME`, which also works from a shell. The manager also
 maintains hidden taskbar entries for Proton games without an applications-menu
-shortcut, under `~/.local/share/applications/run-in-sandbox/taskbar/`. They are
+shortcut, and for every other game, under `~/.local/share/applications/run-in-sandbox/taskbar/`. They are
 created as the library loads and before Play starts the game, follow name and
 icon changes, and are removed when the sandbox is deleted in the manager.
 They do not appear in the applications menu or on the desktop. Enabling an
 applications-menu shortcut replaces the hidden entry; disabling it restores one.
-For a game run with Proton, `StartupWMClass=steam_app_NAME` matches
+On KDE Plasma, whose compositor names every window of a sandbox after its
+Wayland security context (see [Managing sandboxes](#managing-sandboxes)), the
+taskbar matches all of a game's windows, gamescope's included, to its
+`sandbox-game-NAME.desktop` entry, visible or hidden, and shows the game's
+icon and name. On GNOME, for a game run with Proton,
+`StartupWMClass=steam_app_NAME` matches
 the app ID its windows get (see [Windows games — Proton](#windows-games--proton)),
 so the desktop shows a game window drawn on it directly with the game's icon
-and name. Windows inside gamescope's window always show as gamescope. Visible
+and name; windows inside gamescope's window always show as gamescope. Visible
 shortcuts can be edited by hand: the manager updates only the name, the `Exec` and
 `TryExec` lines, and the icon (unless another one was chosen), adds a missing
 `StartupWMClass` without changing one that is there, and leaves every other
@@ -789,7 +794,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
-| `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, `--net`, NTSYNC, and the 32-bit libraries Proton needs. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
+| `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, the desktop's Wayland security context, `--net`, NTSYNC, and the 32-bit libraries Proton needs. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
 | `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
 | `--stop-all` | the same, for every running sandbox |
 | `--list` | every sandbox: size, time played, when last played, whether running |
@@ -1062,6 +1067,22 @@ inner domain. Their internal Wayland socket is in a separate directory where
 the game has no permission to connect, on kernels supporting the Unix-socket
 restriction. Satellite bridges clipboard selections and forwards Wayland
 interfaces; this is not a claim of equivalent desktop isolation to gamescope.
+
+Where the desktop's compositor supports Wayland security contexts
+(`security-context-v1`: KDE Plasma's KWin does, GNOME's Mutter does not), the
+sandbox never gets the desktop's own Wayland socket. The launcher asks the
+compositor for a socket of the sandbox's own and mounts that in its place, for
+gamescope, satellite and `--wayland` games alike. The compositor marks every
+connection made through it as sandboxed: KWin then withholds managing other
+windows, fake input, screencasts, reading the clipboard in the background and
+making further security contexts, and names the sandbox's windows
+`sandbox-game-NAME` whatever they call themselves (see the taskbar entries
+under [Manage the library](#manage-the-library)). The socket lives in a folder
+of its own in the runtime directory, and the compositor stops accepting
+connections on it when the launch ends. Nothing needs setting up: a compositor
+without security contexts leaves things as they were, and one that has them
+but refuses to make one gets a warning and the desktop's socket.
+`sandbox-game --check` says which this desktop is.
 `--host-x11` exposes the host X socket and cookie and does not expose Wayland.
 `--headless` exposes neither. No session D-Bus socket is provided. Without it,
 GTK cannot read the desktop's settings, so one is passed in: GNOME's title-bar

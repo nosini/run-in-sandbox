@@ -845,7 +845,9 @@ PY
         """Provide window matching without a visible applications-menu shortcut."""
         with self.lock:
             path = self.taskbar_path(name)
-            if self.shortcut_path(name, "menu").is_file() or "\nStartupWMClass=" not in text:
+            # Every game has one: KDE names the windows of every sandbox
+            # that has a security context after the entry's file name.
+            if self.shortcut_path(name, "menu").is_file():
                 path.unlink(missing_ok=True)
                 return
             if not self.capture(name).is_dir():

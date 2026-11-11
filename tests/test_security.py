@@ -1937,7 +1937,8 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         lines = result.stdout.splitlines()
         marks = {line.split()[1]: line.split()[0] for line in lines}
         self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
-                                       "gpu", "gamescope", "satellite", "network", "ntsync", "32-bit"], result.stdout)
+                                       "gpu", "gamescope", "wayland", "satellite", "network", "ntsync",
+                                       "32-bit"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:
         # here at least the playback-only server, the test runtime dir having none.
@@ -2102,10 +2103,13 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         args = self.recorded_args("--proton=" + str(proton), "--gamescope=-f -W 1920 -H 1080")
         self.assertIn("-f", args[args.index("gamescope"):])
 
-    def fake_compositor(self, outputs):
+    def fake_compositor(self, outputs, contexts=None, refuse=False):
         """Serve wl_output and xdg-output for OUTPUTS on the test's Wayland socket.
 
         Each output is (mode width, mode height, transform, logical x, y, w, h).
+        With CONTEXTS, a list, it also offers security-context-v1 and appends
+        each context made: its metadata and the descriptors it was given.
+        REFUSE answers the commit with a protocol error instead.
         """
         import socket, threading
         path = self.runtime / "wayland-0"
@@ -2121,12 +2125,16 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
             raw = text.encode() + b"\0"
             return struct.pack("=I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
 
+        def take_string(body):
+            return body[4:4 + struct.unpack_from("=I", body)[0] - 1].decode()
+
         def serve(conn):
-            data, registry, bound = b"", None, {}
+            data, registry, bound, fds, made = b"", None, {}, [], {}
             with conn:
                 while True:
                     while len(data) < 8 or len(data) < struct.unpack_from("=II", data)[1] >> 16:
-                        chunk = conn.recv(65536)
+                        chunk, received, _, _ = socket.recv_fds(conn, 65536, 4)
+                        fds += received
                         if not chunk:
                             return
                         data += chunk
@@ -2140,6 +2148,9 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                                          + struct.pack("=I", 4))
                         out += event(registry, 0, struct.pack("=I", 100)
                                      + string("zxdg_output_manager_v1") + struct.pack("=I", 3))
+                        if contexts is not None:
+                            out += event(registry, 0, struct.pack("=I", 200)
+                                         + string("wp_security_context_manager_v1") + struct.pack("=I", 1))
                     elif obj == 1 and opcode == 0:               # sync
                         out = event(struct.unpack_from("=I", body)[0], 0, struct.pack("=I", 0))
                     elif obj == registry:                        # bind
@@ -2157,6 +2168,20 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                         new, output = struct.unpack_from("=II", body)
                         lx, ly, lw, lh = outputs[bound[output] - 1][3:]
                         out = event(new, 0, struct.pack("=ii", lx, ly)) + event(new, 1, struct.pack("=ii", lw, lh))
+                    elif bound.get(obj) == 200 and opcode == 1:  # create_listener
+                        listen_fd, close_fd = fds[:2]
+                        del fds[:2]
+                        made[struct.unpack_from("=I", body)[0]] = {
+                            "listen": listen_fd, "close": close_fd, "committed": False}
+                    elif obj in made and opcode in (1, 2, 3):    # engine, app ID, instance
+                        made[obj][("engine", "app_id", "instance")[opcode - 1]] = take_string(body)
+                    elif obj in made and opcode == 4:            # commit
+                        if refuse:
+                            out = event(1, 0, struct.pack("=II", obj, 2) + string("refused"))
+                            conn.sendall(out)
+                            return
+                        made[obj]["committed"] = True
+                        contexts.append(made[obj])
                     conn.sendall(out)
 
         def accept():
@@ -2167,6 +2192,57 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                     return
                 threading.Thread(target=serve, args=(conn,), daemon=True).start()
         threading.Thread(target=accept, daemon=True).start()
+
+    def test_security_context_gives_the_sandbox_a_socket_of_its_own(self):
+        # Where the compositor offers security-context-v1 (KWin), the sandbox
+        # gets a listener the compositor marks as sandboxed instead of the
+        # desktop's socket, named after the manager's shortcuts; the listener
+        # ends, and its folder goes, with the launch.
+        contexts = []
+        self.fake_compositor([(1920, 1080, 0, 0, 0, 1920, 1080)], contexts)
+        host = str(self.runtime / "wayland-0")
+        for options, inside in ((("--wayland",), str(self.runtime / "wayland-0")),
+                                ((), "/run/host-wayland/wayland-0")):
+            args = self.recorded_args(*options)
+            binds = [args[i + 1] for i in range(len(args) - 2)
+                     if args[i] == "--ro-bind" and args[i + 2] == inside]
+            self.assertEqual(len(binds), 1)
+            self.assertNotEqual(binds[0], host)
+            own = Path(binds[0])
+            self.assertEqual(own.parent.parent, self.runtime)
+            self.assertTrue(own.parent.name.startswith("sandbox-game-wayland."))
+            self.assertFalse(own.parent.exists(), "the socket's folder outlived the launch")
+            context = contexts.pop()
+            self.assertEqual(contexts, [])
+            name = next((self.home / "game-sandboxes").iterdir()).name
+            self.assertEqual(context["engine"], "eu.nosini.SandboxGame")
+            self.assertEqual(context["app_id"], "sandbox-game-" + name)
+            self.assertTrue(context["instance"].startswith(name + "."))
+            # Bound to the path the sandbox got, listening, and over: the
+            # compositor's end of what the launcher held reads end-of-file.
+            import socket
+            with socket.socket(fileno=os.dup(context["listen"])) as listener:
+                self.assertEqual(listener.getsockname(), str(own))
+                self.assertEqual(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN), 1)
+            self.assertEqual(os.read(context["close"], 1), b"")
+            os.close(context["listen"])
+            os.close(context["close"])
+
+    def test_refused_security_context_falls_back_with_a_warning(self):
+        self.fake_compositor([(1920, 1080, 0, 0, 0, 1920, 1080)], [], refuse=True)
+        args = self.recorded_args("--wayland")
+        i = args.index(str(self.runtime / "wayland-0"))
+        self.assertEqual(args[i - 1:i + 2], ["--ro-bind", str(self.runtime / "wayland-0"),
+                                            str(self.runtime / "wayland-0")])
+        result = self.cli("--wayland", self.game, "/bin/true")
+        self.assertIn("offers a security context but did not make one", result.stderr)
+        self.assertEqual(list(self.runtime.glob("sandbox-game-wayland.*")), [])
+
+    def test_check_reports_the_security_context(self):
+        self.env["WAYLAND_DISPLAY"] = "wayland-0"
+        self.fake_compositor([(1920, 1080, 0, 0, 0, 1920, 1080)], [])
+        result = self.cli("--check", check=False)
+        self.assertRegex(result.stdout, r"ok  wayland +the desktop gives each sandbox a socket")
 
     def test_split_display_x11_screen_covers_wines_desktop(self):
         # Wine's Wayland driver sets the monitors out at their own pixel sizes;
@@ -2231,10 +2307,10 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         listener.listen()
         listener.settimeout(8)
         def serve():
-            # The first connection asks for the monitor layout before the
-            # sandbox starts, and gets no answer it can use; the second is the
-            # game's.
-            for _ in range(2):
+            # The first two connections ask for the monitor layout and a
+            # security context before the sandbox starts, and get no answer
+            # they can use; the third is the game's.
+            for _ in range(3):
                 connection, _ = listener.accept()
                 with connection:
                     connection.sendall(b"wayland")
@@ -2338,9 +2414,9 @@ sys.exit(int(sys.argv[2]))
         listener.listen()
         listener.settimeout(8)
         def serve():
-            # The monitor layout query before the sandbox starts, then the
-            # attached program's.
-            for _ in range(2):
+            # The monitor layout and security context queries before the
+            # sandbox starts, then the attached program's.
+            for _ in range(3):
                 connection, _ = listener.accept()
                 with connection:
                     connection.sendall(b"wayland")

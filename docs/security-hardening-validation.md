@@ -2,7 +2,7 @@
 
 What was tested for the work in
 [security-hardening-plan.md](security-hardening-plan.md), where, and what was
-not. Recorded 2026-11-07.
+not. Recorded 2026-11-07; section 4 recorded 2026-11-11.
 
 Test machine: a virtual machine without a GPU, running openSUSE Tumbleweed
 20261003, kernel 7.2.8,
@@ -128,6 +128,56 @@ needed, since they are started from inside the sandbox and inherit the game's.
 `SystemdBackendTests` under it: 194 tests, 34 skipped. Proton, GPUs, real
 sound, the other engines and aarch64 are not covered.
 
+## 4. Wayland security context
+
+Where the desktop's compositor offers Wayland security contexts
+(`security-context-v1`), `sandbox-game` asks it for a socket of the sandbox's
+own, mounts it over the desktop's for the game, gamescope and satellite alike,
+and closes it when the launch ends. Every connection the compositor accepts
+through it is marked as sandboxed, and it names the sandbox's windows
+`sandbox-game-NAME` whatever they call themselves. A compositor without
+security contexts changes nothing; one that offers the manager but refuses to
+make a context prints a warning and keeps the desktop's socket.
+`sandbox-game --check` says which case this desktop is.
+
+Automated (`tests/test_security.py`, against a faked compositor):
+
+- `test_security_context_gives_the_sandbox_a_socket_of_its_own`: with and
+  without `--wayland`, the socket bound into the sandbox is a listener of its
+  own, in a `sandbox-game-wayland.` folder of the runtime directory, and not
+  the desktop's socket; the security context carries the engine's ID and an
+  app ID of `sandbox-game-NAME`; the context's socket listened at the path the
+  sandbox got; the folder is gone after the launch; the compositor's end of
+  the context reads end-of-file once the launch is over.
+- `test_refused_security_context_falls_back_with_a_warning`: a compositor
+  that refuses keeps the desktop's socket, warns, and leaves nothing of the
+  context in the runtime directory.
+- `test_check_reports_the_security_context`: the `--check` line for a
+  compositor that gives one and for one that has none.
+- `tests/test_manager.py`:
+  `test_hidden_taskbar_entry_matches_by_window_class_only_under_proton`:
+  every game gets a hidden taskbar entry, but only a Proton game's carries
+  `StartupWMClass=steam_app_NAME`; native games rely on KDE naming their
+  windows after the entry, so their entries never claim a window class.
+
+By hand on the test machine:
+
+- Full suite with the default policy: 395 tests, OK, 37 skipped — the same
+  backend-dependent skips as in the runs above. The run left nothing in the
+  VM's home.
+- The live checks were rerun against the final helper on the VM's KDE Plasma
+  desktop, and passed: the game runs on the compositor's socket for its
+  security context, and `--check` reports it.
+
+Not covered:
+
+- Mutter, and any other compositor without security contexts, only through the
+  fallback paths the faked-compositor tests exercise; no live run.
+- A compositor that offers the manager but refuses a context, live; the
+  faked-compositor test stands in for it.
+- How compositors other than KWin treat a sandboxed connection, and real GPU
+  hardware: as above, not on the test machine.
+
 ## Results
 
 - Steps 1–2, full suite on the test machine: 338 tests, 1 failure, 36 skipped. The
@@ -136,3 +186,6 @@ sound, the other engines and aarch64 are not covered.
   tests and tests that need hardware or software the test machine lacks.
 - Steps 1–3, full suite on the test machine with the default policy: 346 tests, OK,
   36 skipped.
+- Steps 1–4, full suite on the test machine with the default policy: 395 tests,
+  OK, 37 skipped. The live checks on the VM's KDE Plasma desktop were rerun
+  against the final helper and passed; the run left nothing in its home.
