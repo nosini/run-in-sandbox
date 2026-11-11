@@ -1,6 +1,9 @@
 # Security hardening implementation plan
 
-Status: proposed work, not implemented. Recorded 2026-11-07 for handoff.
+Status: implemented. Recorded 2026-11-07 for handoff; the three items were
+landed as commits `c086430` (the sandbox's own /etc), `a71182e` (saved
+requirements) and `c4a04d0` (the opt-in seccomp allowlist). This document
+describes the work as planned, not necessarily as shipped.
 
 The requested scope is a minimal `/etc`, explicit requirements for protections,
 and an opt-in seccomp allowlist. SELinux/AppArmor integration is excluded.
