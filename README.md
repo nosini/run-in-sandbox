@@ -123,17 +123,23 @@ name, and both follow later changes the manager makes. Deleting the sandbox
 in the manager removes its shortcuts. Each is a `sandbox-game-NAME.desktop`
 file in `~/.local/share/applications` or the desktop folder, running
 `sandbox-manager --launch NAME`, which also works from a shell. The manager also
-maintains hidden taskbar entries for Proton games without an applications-menu
-shortcut, and for every other game, under `~/.local/share/applications/run-in-sandbox/taskbar/`. They are
+maintains a hidden taskbar entry for every game without an applications-menu
+shortcut, in that shortcut's place: `~/.local/share/applications/sandbox-game-NAME.desktop`
+with `NoDisplay=true` and `X-RunInSandbox-Hidden=true`. They are
 created as the library loads and before Play starts the game, follow name and
 icon changes, and are removed when the sandbox is deleted in the manager.
 They do not appear in the applications menu or on the desktop. Enabling an
 applications-menu shortcut replaces the hidden entry; disabling it restores one.
+(Older versions kept them in `~/.local/share/applications/run-in-sandbox/taskbar/`;
+the manager moves them as it refreshes the library.)
 On KDE Plasma, whose compositor names every window of a sandbox after its
 Wayland security context (see [Managing sandboxes](#managing-sandboxes)), the
 taskbar matches all of a game's windows, gamescope's included, to its
 `sandbox-game-NAME.desktop` entry, visible or hidden, and shows the game's
-icon and name. On GNOME, for a game run with Proton,
+icon and name. GNOME does the same with a Mutter patched for security contexts
+that takes the app ID of `sandbox-game`'s contexts: it looks the app ID up as a
+desktop file ID, which is why the entries sit directly in `applications/`.
+On a stock GNOME, for a game run with Proton,
 `StartupWMClass=steam_app_NAME` matches
 the app ID its windows get (see [Windows games — Proton](#windows-games--proton)),
 so the desktop shows a game window drawn on it directly with the game's icon

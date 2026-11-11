@@ -885,9 +885,11 @@ class LibraryTests(unittest.TestCase):
         self.assertIn(f"Icon={icon}", desktop.read_text().splitlines())
         library.set_shortcut(name, "menu", False)
         self.assertEqual(library.shortcuts(name), {"menu": False, "desktop": True})
-        # A removed shortcut is not brought back by a refresh.
+        # A removed shortcut is not brought back by a refresh: the hidden
+        # taskbar entry takes its place.
         library.refresh_shortcuts(renamed, icon)
-        self.assertFalse(menu.exists())
+        self.assertTrue(library.hidden_entry(menu))
+        self.assertEqual(library.shortcuts(name), {"menu": False, "desktop": True})
         with patch.object(core.subprocess, "run",
                           return_value=subprocess.CompletedProcess([], 0, "", "")):
             library.operate(name, "delete")
@@ -1024,10 +1026,12 @@ class LibraryTests(unittest.TestCase):
         entry = library.entry("train")
         icon = library.capture("train") / "icons/abc.png"
         library.refresh_shortcuts(entry, icon)
-        path = self.home / "data/applications/run-in-sandbox/taskbar/sandbox-game-train.desktop"
+        # Directly in applications/: GNOME looks it up by its desktop file ID.
+        path = self.home / "data/applications/sandbox-game-train.desktop"
         self.assertEqual(path, library.taskbar_path("train"))
         text = path.read_text()
         self.assertIn("NoDisplay=true\n", text)
+        self.assertIn(library.HIDDEN_KEY + "\n", text)
         self.assertIn("StartupWMClass=steam_app_train\n", text)
         self.assertIn(f"Icon={icon}\n", text)
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
@@ -1050,22 +1054,57 @@ class LibraryTests(unittest.TestCase):
         name = entry["name"]
         library.refresh_shortcuts(entry)
         hidden = library.taskbar_path(name)
-        self.assertTrue(hidden.exists())
+        self.assertTrue(library.hidden_entry(hidden))
         library.set_shortcut(name, "menu", True)
-        self.assertFalse(hidden.exists())
         menu = library.shortcut_path(name, "menu")
+        # The shortcut replaces the hidden entry in the same place.
+        self.assertEqual(hidden, menu)
+        self.assertFalse(library.hidden_entry(menu))
+        self.assertEqual(menu.read_text(), library.shortcut_text(library.entry(name)))
+        self.assertEqual(library.shortcuts(name), {"menu": True, "desktop": False})
         text = menu.read_text().replace(f"StartupWMClass=steam_app_{name}\n", "StartupWMClass=custom.exe\n")
         menu.write_text(text)
         library.refresh_shortcuts(entry)
         self.assertEqual(menu.read_text(), text)
-        self.assertFalse(hidden.exists())
         self.assertNotIn("NoDisplay=true", text)
         library.set_shortcut(name, "menu", False)
-        self.assertTrue(hidden.exists())
+        self.assertTrue(library.hidden_entry(hidden))
         library.set_shortcut(name, "desktop", True)
-        self.assertTrue(hidden.exists())
+        self.assertTrue(library.hidden_entry(hidden))
         library.set_shortcut(name, "desktop", False)
-        self.assertTrue(hidden.exists())
+        self.assertTrue(library.hidden_entry(hidden))
+        # A shortcut that only says NoDisplay is still the user's.
+        library.set_shortcut(name, "menu", True)
+        menu.write_text(menu.read_text() + "NoDisplay=true\n")
+        library.refresh_shortcuts(entry)
+        self.assertFalse(library.hidden_entry(menu))
+        self.assertEqual(library.shortcuts(name), {"menu": True, "desktop": False})
+
+    def test_hidden_taskbar_entries_move_out_of_the_old_folder(self):
+        library = self.shortcut_library()
+        entry = library.create("Train")
+        name = entry["name"]
+        legacy = library.legacy_taskbar_path(name)
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(library.shortcut_text(entry) + "NoDisplay=true\n")
+        library.refresh_shortcuts(entry)
+        self.assertFalse(legacy.exists())
+        self.assertFalse((library.data / "applications/run-in-sandbox").exists())
+        self.assertTrue(library.hidden_entry(library.taskbar_path(name)))
+        # Also where a menu shortcut already exists, and on deletion.
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("old")
+        library.set_shortcut(name, "menu", True)
+        self.assertFalse(legacy.exists())
+        self.assertFalse(library.hidden_entry(library.shortcut_path(name, "menu")))
+        legacy.parent.mkdir(parents=True)
+        (legacy.parent / "sandbox-game-other.desktop").write_text("other")
+        legacy.write_text("old")
+        with patch.object(core.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            library.operate(name, "delete")
+        self.assertFalse(legacy.exists())
+        self.assertTrue((legacy.parent / "sandbox-game-other.desktop").exists())
+        self.assertFalse(library.shortcut_path(name, "menu").exists())
 
     def test_hidden_taskbar_entry_matches_by_window_class_only_under_proton(self):
         # Native games get one too, for KDE, which names a sandbox's windows

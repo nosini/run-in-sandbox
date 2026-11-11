@@ -736,7 +736,8 @@ PY
         found = {}
         for where in self.SHORTCUTS:
             try:
-                found[where] = self.shortcut_path(name, where).is_file()
+                path = self.shortcut_path(name, where)
+                found[where] = path.is_file() and not (where == "menu" and self.hidden_entry(path))
             except ValueError:
                 found[where] = False
         return found
@@ -831,31 +832,64 @@ PY
         path = self.shortcut_path(name, where)
         if enabled:
             text = self.shortcut_text(self.entry(name), icon)
-            self.write_shortcut(path, text, where, name)
+            with self.lock:
+                # The hidden entry in its place is replaced, not merged into.
+                if where == "menu" and self.hidden_entry(path):
+                    path.unlink(missing_ok=True)
+                self.write_shortcut(path, text, where, name)
         else:
             path.unlink(missing_ok=True)
             text = self.shortcut_text(self.entry(name), icon)
         self.refresh_taskbar_entry(name, text)
 
+    # Marks a hidden taskbar entry, which takes the applications-menu
+    # shortcut's place while there is none.
+    HIDDEN_KEY = "X-RunInSandbox-Hidden=true"
+
     def taskbar_path(self, name):
+        # The menu shortcut's own path: desktops look a sandbox's app ID up
+        # as a desktop file ID, which for a file in a subfolder of
+        # applications/ takes in the folder's name (GNOME, unlike KDE).
+        return self.shortcut_path(name, "menu")
+
+    def legacy_taskbar_path(self, name):
+        """Where hidden entries were kept before, removed wherever met."""
         self.capture(name)
         return self.data / "applications/run-in-sandbox/taskbar" / f"sandbox-game-{name}.desktop"
+
+    def remove_legacy_taskbar_entry(self, name):
+        path = self.legacy_taskbar_path(name)
+        path.unlink(missing_ok=True)
+        for folder in (path.parent, path.parent.parent):
+            try:
+                folder.rmdir()
+            except OSError:
+                break                       # still holds others, or never was
+
+    def hidden_entry(self, path):
+        """Whether PATH is a hidden taskbar entry rather than a shortcut."""
+        try:
+            return path.is_file() and not path.is_symlink() and self.HIDDEN_KEY in \
+                path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return False
 
     def refresh_taskbar_entry(self, name, text):
         """Provide window matching without a visible applications-menu shortcut."""
         with self.lock:
+            self.remove_legacy_taskbar_entry(name)
             path = self.taskbar_path(name)
-            # Every game has one: KDE names the windows of every sandbox
-            # that has a security context after the entry's file name.
-            if self.shortcut_path(name, "menu").is_file():
-                path.unlink(missing_ok=True)
+            # Every game has one: KDE names the windows of every sandbox that
+            # has a security context after the entry's file name, as does
+            # GNOME where its Mutter has them.
+            if (path.exists() or path.is_symlink()) and not self.hidden_entry(path):
                 return
             if not self.capture(name).is_dir():
                 return  # an icon request may finish after the sandbox was deleted
             # These entries are entirely generated; visible shortcuts keep their
             # hand-written fields through write_shortcut's merge instead.
-            text += "NoDisplay=true\n"
-            if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == text:
+            text += "NoDisplay=true\n" + self.HIDDEN_KEY + "\n"
+            if path.is_file() and path.read_text(encoding="utf-8") == text:
                 return
             atomic_write(path, text, mode=0o644)
 
@@ -870,7 +904,9 @@ PY
 
     def remove_shortcuts(self, name):
         with self.lock:
-            self.taskbar_path(name).unlink(missing_ok=True)
+            self.remove_legacy_taskbar_entry(name)
+            if self.hidden_entry(self.taskbar_path(name)):
+                self.taskbar_path(name).unlink(missing_ok=True)
         for where, present in self.shortcuts(name).items():
             if present:
                 self.shortcut_path(name, where).unlink(missing_ok=True)
