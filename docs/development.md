@@ -62,6 +62,18 @@ The satellite fork's popup lifetime regression tests and live Mutter check
 are maintained in [nosini/xwayland-satellite](https://github.com/nosini/xwayland-satellite),
 alongside the fix. The local fork checkout is `../xwayland-satellite`.
 
+The virtualized GPU's tests (`-k virtual`) skip without Mesa's Venus
+driver. They only record arguments and run the render server's wrapper with
+stubs, so in a container or VM without it they can run against a copy of the
+checkout whose `VIRTIO_ICD`, in `sandbox-game` and `tests/test_security.py`,
+names any existing file. Whether games actually reach the GPU through Venus
+is for `virtual-gpu/desktop-venus-check.sh`, run in a Wayland desktop
+session: it starts a render server of its own and runs vkcube directly and
+through Venus, on the desktop and in gamescope with and without glamor,
+under the project's seccomp filter and Landlock domains, and writes each
+run's result and the extensions Venus lacks to `summary.txt`. `virtual-gpu/dri3_open_probe.py` checks whether an X server
+hands out a render node through DRI3.
+
 ## Probes for the systemd backend
 
 [`systemd-backend/probes/`](../systemd-backend/probes/) holds standalone
@@ -159,3 +171,32 @@ Run them as an ordinary user from the checkout, with a fresh, short
   DMA-BUF under both the default and the systemd backend.
 - MangoHud can crash in its exit handler after mkxp-z closes its Wayland
   connection (exit 134 after "Shutting down."), independent of the sandbox.
+
+### Virtualized GPU
+
+- An Xwayland with glamor, gamescope's too, answers X11 `DRI3Open` with a
+  working render node descriptor opened outside the game's domain, so
+  Landlock and a missing `/dev/dri` don't stop it. The mode therefore runs
+  gamescope's and satellite's Xwayland through `virtual-gpu/xwayland-no-glamor`
+  (`-glamor off`, no DRI3), and refuses the host's X server.
+- Without DRI3, Mesa's X11 Vulkan WSI reports no presentation support for
+  Venus, and a program that creates a swapchain anyway leaves its window
+  unpainted: a browser-based launcher in split display came up white and
+  repainted only what it damaged. `MESA_VK_WSI_DEBUG=sw` presents there,
+  with `xcb_put_image` over the X socket (Mesa only looks for MIT-SHM when
+  DRI3 is there). The sandbox does not set it: one environment covers the
+  whole game, and it would take a Wayland game off dma-bufs as well. The
+  split-display runner's X11 driver sets it per process, when the X server
+  lacks DRI3 ([dwproton-nikke-split](https://github.com/nosini/dwproton-nikke-split)
+  r10, patch 6).
+- Without a GPU, Venus over `virgl_test_server --venus` on lavapipe and an
+  Xvfb reproduce that: `vkcube --wsi xcb` crashes after Mesa's "No DRI3
+  support detected" and runs with `sw`. `Xvfb -fbdir DIR` exposes the screen
+  as an XWD file for pixel checks.
+- The render server sees every Vulkan driver on the host. Started without
+  `VK_LOADER_DRIVERS_DISABLE='*lvp*'`, Zink's software path in the game can
+  end up on lavapipe through it.
+- A descriptor the launcher hands the render server's wrapper must not stay
+  open in it: an extra writer on bwrap's `--info-fd` pipe kept the launcher
+  waiting for end-of-file with `--net`, and the game never started. The
+  wrapper closes everything from fd 3 once it has started bwrap.

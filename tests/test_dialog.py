@@ -276,6 +276,31 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertNotIn("hdr", state.result())
         self.assertEqual(Preferences({"engine": "native", "values": {}}).result()["hdr"], "0")
 
+    def test_virtual_gpu_is_refused_where_sandbox_game_would_refuse_it(self):
+        state = Preferences({"engine": "proton", "values": {"virtual_gpu": "1", "wayland": "1"}})
+        self.assertIsNone(state.error())
+        self.assertEqual(state.result()["virtual_gpu"], "1")
+        # The host's X server would hand the game a render node anyway.
+        state.display = "host-x11"
+        self.assertIn("host X11", state.error())
+        state.display = "x11"
+        self.assertIsNone(state.error())
+        # The systemd backend's uid cannot reach the render server, whether
+        # chosen here or this sandbox's backend already.
+        state.values["separate_uid"] = "systemd"
+        self.assertIn("systemd", state.error())
+        state.values["separate_uid"] = ""
+        self.assertIsNone(state.error())
+        managed = Preferences({"engine": "native", "uid_backend": "systemd",
+                               "values": {"virtual_gpu": "1"}})
+        self.assertIn("systemd", managed.error())
+        # Off, it is saved as off, and nothing is refused.
+        state.values["virtual_gpu"] = "0"
+        state.display = "host-x11"
+        self.assertIsNone(state.error())
+        self.assertEqual(state.result()["virtual_gpu"], "0")
+        self.assertEqual(Preferences({"engine": "native", "values": {}}).result()["virtual_gpu"], "0")
+
     def test_switching_runtime_preserves_edits_and_omits_hidden_settings(self):
         state = Preferences({"engine": "nwjs", "can_proton": True, "values": {
             "mangohud": "1", "proton": "GE-Test", "casefold": "0", "webgl": "vulkan", "steam": "1",
@@ -523,6 +548,14 @@ class GtkDialogTests(unittest.TestCase):
         dialog.widgets["hdr"].set_active(False)
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["hdr"], "0")
+
+    def test_virtual_gpu_switch_is_saved(self):
+        dialog = self.create("preferences", {"engine": "proton", "values": {"virtual_gpu": "0"}})
+        self.assertTrue(dialog.rows["virtual_gpu"].get_visible())
+        self.assertFalse(dialog.widgets["virtual_gpu"].get_active())
+        dialog.widgets["virtual_gpu"].set_active(True)
+        dialog.save_preferences()
+        self.assertEqual(self.responses[0][1]["virtual_gpu"], "1")
 
     def test_launcher_changes_controls_inside_the_same_window(self):
         dialog = self.create("preferences", {"engine": "nwjs", "can_proton": True,

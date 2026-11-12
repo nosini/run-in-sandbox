@@ -717,16 +717,15 @@ check_host() {
         _check_line '!!' gpu "no render node: no GPU acceleration in games"
     fi
 
-    # The virtualized GPU mode is switched on with SANDBOX_GPU_VENUS=1, per
-    # launch, until it has a setting of its own. It needs Landlock's scoped
-    # signals, its server runs under its own path rules, and a private
-    # display's Xwayland has to be wrapped against DRI3.
+    # The virtualized GPU (--virtual-gpu) needs Landlock's scoped signals,
+    # its server runs under its own path rules, and a private display's
+    # Xwayland has to be wrapped against DRI3.
     if command -v virgl_test_server >/dev/null && [ -e "$VIRTIO_ICD" ] \
         && [ "$abi" -ge 6 ] 2>/dev/null \
         && [ -n "$(helper virtual-gpu/xwayland-no-glamor)" ]; then
-        _check_line -- venus "SANDBOX_GPU_VENUS=1 possible (virgl_test_server, libvulkan_virtio)"
+        _check_line -- venus "--virtual-gpu possible (virgl_test_server, libvulkan_virtio)"
     else
-        _check_line -- venus "SANDBOX_GPU_VENUS=1 unavailable: needs virglrenderer-test-server, libvulkan_virtio, Landlock ABI 6 and ./install.sh for the Xwayland wrapper"
+        _check_line -- venus "--virtual-gpu unavailable: needs virglrenderer-test-server, libvulkan_virtio, Landlock ABI 6 and ./install.sh for the Xwayland wrapper"
     fi
 
     if ! command -v gamescope >/dev/null; then
@@ -928,6 +927,10 @@ Other
   --mangohud            the MangoHud overlay (also: MANGOHUD=1)
   --hdr                 HDR for games that offer it (DXVK_HDR=1; gamescope's
                         --hdr-enabled); also turn it on in the desktop and game
+  --virtual-gpu         reach the GPU only through a render server of the
+                        launch's own, never its device nodes: Vulkan only
+                        (OpenGL draws on the CPU, 32-bit programs too); not
+                        with --host-x11 or SANDBOX_SEPARATE_UID=systemd
 
 Managing sandboxes
   --list                every sandbox: size, time played, last played, running
@@ -974,8 +977,7 @@ GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; H
 WAYLAND_X11=0; X11_EXE=""; HDR=0; X11_BACKEND=gamescope; X11_BACKEND_SET=0; GS_SET=0
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
 REQUIRE_CLI=""
-VENUS=0                                   # SANDBOX_GPU_VENUS=1, read once
-[ "${SANDBOX_GPU_VENUS:-0}" != 1 ] || VENUS=1
+VENUS=0                                   # --virtual-gpu
 [ "${MANGOHUD:-0}" = 1 ] && MHUD=1        # an inherited MANGOHUD=1 opts in too
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -995,6 +997,7 @@ while [ "$#" -gt 0 ]; do
         --net)       NET=1; shift ;;
         --mangohud)  MHUD=1; shift ;;
         --hdr)       HDR=1; shift ;;
+        --virtual-gpu) VENUS=1; shift ;;
         --gamescope) GS=1; GS_SET=1; shift ;;
         --gamescope=*) GS=1; GS_SET=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
@@ -1227,15 +1230,15 @@ esac
 # nodes are what the mode exists to keep from the game.
 if [ "$VENUS" = 1 ]; then
     [ "$HOST_X11" = 0 ] || {
-        echo "SANDBOX_GPU_VENUS=1 cannot be combined with --host-x11: the host X" >&2
+        echo "--virtual-gpu cannot be combined with --host-x11: the host X" >&2
         echo "server would answer DRI3 with a render node outside the game's domain" >&2
         exit 1; }
     [ "$SEPARATE_UID" != systemd ] || {
-        echo "SANDBOX_GPU_VENUS=1 does not work under SANDBOX_SEPARATE_UID=systemd:" >&2
+        echo "--virtual-gpu does not work under SANDBOX_SEPARATE_UID=systemd:" >&2
         echo "the sandbox's transient uid cannot connect to the render server's socket" >&2
         exit 1; }
     [ "${SANDBOX_GPU_CARD:-0}" != 1 ] || {
-        echo "SANDBOX_GPU_VENUS=1 cannot be combined with SANDBOX_GPU_CARD=1: the" >&2
+        echo "--virtual-gpu cannot be combined with SANDBOX_GPU_CARD=1: the" >&2
         echo "game would have the card nodes the mode exists to keep from it" >&2; exit 1; }
 fi
 if [ "$SEPARATE_UID" = systemd ] || { [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; }; then
@@ -2381,8 +2384,7 @@ else
 fi
 
 # ---- virtualized GPU (Venus) ------------------------------------------------
-# SANDBOX_GPU_VENUS=1, an env switch while the mode is under test: no option,
-# no documentation yet. The game's Vulkan goes to Mesa's Venus driver, which
+# --virtual-gpu: the game's Vulkan goes to Mesa's Venus driver, which
 # talks to a virglrenderer render server over a Unix socket; the server opens
 # the render nodes, the game never does. One server per launch, as the mode
 # would have it: without --multi-clients it forks a child for every
@@ -2402,10 +2404,10 @@ VENUS_BWRAP=(); VENUS_ENV=(); VENUS_RULES=(); VENUS_LAUNCH=(); VENUS_DIR=""
 VENUS_HOST_SOCK=""
 if [ "$VENUS" = 1 ]; then
     [ -e "$VIRTIO_ICD" ] || {
-        echo "SANDBOX_GPU_VENUS=1 needs Mesa's Venus driver (openSUSE: zypper in libvulkan_virtio)" >&2
+        echo "--virtual-gpu needs Mesa's Venus driver (openSUSE: zypper in libvulkan_virtio)" >&2
         exit 1; }
     VENUS_SERVER="$(command -v virgl_test_server)" || {
-        echo "SANDBOX_GPU_VENUS=1 needs the render server" >&2
+        echo "--virtual-gpu needs the render server" >&2
         echo "(openSUSE: zypper in virglrenderer-test-server)" >&2; exit 1; }
     VENUS_ENV=( VK_DRIVER_FILES="$VIRTIO_ICD"
                 VN_DEBUG=vtest VTEST_SOCKET_NAME=/run/sandbox-venus/venus.sock )
@@ -2420,7 +2422,7 @@ if [ "$VENUS" = 1 ]; then
         VENUS_DIR="$RT/sandbox-game/venus-$(printf '%s' "$NAME" | sha256sum | cut -c1-16)"
     fi
     [ "$(printf '%s' "$VENUS_DIR/venus.sock" | wc -c)" -le 107 ] || {
-        echo "SANDBOX_GPU_VENUS=1: this runtime directory's path is too long for a Unix socket" >&2
+        echo "--virtual-gpu: this runtime directory's path is too long for a Unix socket" >&2
         exit 1; }
     VENUS_HOST_SOCK="$VENUS_DIR/venus.sock"
     VENUS_BWRAP+=( --perms 0700 --dir /run/sandbox-venus
@@ -2463,7 +2465,7 @@ if [ "$VENUS" = 1 ]; then
             _xw="$(command -v Xwayland 2>/dev/null || true)"
         fi
         [ -n "$_xw" ] && [ -n "$_vg" ] || {
-            echo "SANDBOX_GPU_VENUS=1 needs Xwayland and virtual-gpu/xwayland-no-glamor," >&2
+            echo "--virtual-gpu needs Xwayland and virtual-gpu/xwayland-no-glamor," >&2
             echo "installed with this script (./install.sh): without it the private X" >&2
             echo "server answers DRI3 with a render node opened outside the game's domain" >&2
             exit 1; }
@@ -3305,7 +3307,7 @@ def supervise(bwrap, server, launcher, log):
             break
         done, _ = os.waitpid(server, os.WNOHANG)
         if done == server:
-            sys.stderr.write("SANDBOX_GPU_VENUS=1: the render server stopped; "
+            sys.stderr.write("--virtual-gpu: the render server stopped; "
                              f"see {log}\n")
             try:
                 os.kill(bwrap, signal.SIGTERM)
@@ -3352,7 +3354,7 @@ def main():
             pass
         time.sleep(0.05)
     if not ready:
-        sys.stderr.write("SANDBOX_GPU_VENUS=1: the render server did not start; "
+        sys.stderr.write("--virtual-gpu: the render server did not start; "
                          f"see {config['log']}\n")
         ended(pid)
         return 1
@@ -3379,6 +3381,13 @@ def main():
             sys.stderr.write(f"sandbox-game: cannot start the sandbox: {e}\n")
         os._exit(127)
     CHILDREN.append(bwrap)
+    # The launcher hands this wrapper the descriptors bwrap works through: its
+    # seccomp policy, the resolver's data, and the --info-fd/--block-fd pipes.
+    # Only the sandbox may keep them -- the bwrap fork above has its own
+    # copies now. An extra writer on the info pipe would keep the launcher's
+    # reader from ever seeing end-of-file, and it waits for that before it
+    # sets up the network and lets the game go.
+    os.closerange(3, 65536)
     return supervise(bwrap, pid, launcher, config["log"])
 
 
@@ -3572,6 +3581,11 @@ if [ "$OUTER_DISPLAY" = 1 ]; then
     # draws on the GPU itself (see the Venus section above).
     if [ "$VENUS" = 1 ]; then
         INNER_DISPLAY_RULES+=( --unix-connect /run/sandbox-venus/venus.sock )
+        # The private X server has no glamor, and so no DRI3 (see the Venus
+        # section): an X11 Vulkan client there cannot present dma-bufs. Mesa's
+        # software WSI (MESA_VK_WSI_DEBUG=sw) can, but set here it would take
+        # the Wayland game in split display off dma-bufs as well; the
+        # runner's X11 driver chooses it for its own processes instead.
         if [ "${#INNER_DISPLAY_ENV[@]}" -gt 0 ]; then
             INNER_DISPLAY_ENV+=( "${VENUS_ENV[@]}" )
         else

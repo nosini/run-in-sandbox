@@ -789,6 +789,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--headless` | no display sockets, compositor or GPU devices; mutually exclusive with display flags |
 | `--mangohud` | the MangoHud overlay. Exporting `MANGOHUD=1` opts in identically. |
 | `--hdr` | HDR for games that offer it; see [HDR](#hdr) |
+| `--virtual-gpu` | Vulkan through a render server of the launch's own, with no GPU device in the sandbox; see [Virtualized GPU](#virtualized-gpu) |
 | `--gamescope[=ARGS]` | run inside gamescope's nested compositor (default for X11 games); `ARGS` is word-split, so quote the lot |
 | `--proton[=VER]` | run `CMD` as a Windows program; the sandbox cwd becomes the `.exe`'s own directory, since games routinely load assets relative to it |
 | `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
@@ -876,6 +877,62 @@ reaches the sandbox. Under gamescope the surface is X11, and HDR10 appears
 there only with `--hdr-enabled` while the desktop has HDR on. `DXVK_HDR=0` in
 `env` turns DXVK's part back off for one game. NW.js, mkxp-z and the PGMMV
 player draw SDR only.
+
+### Virtualized GPU
+
+Normally a game opens the GPU's render node itself, and with it the whole
+kernel driver is within its reach. With **Virtualized GPU** in the game's
+preferences (`--virtual-gpu`), the game gets no GPU device at all. Its Vulkan
+goes to Mesa's Venus driver, which hands every command to a render server
+started for this launch alone, over a Unix socket; only the server opens the
+render node. Frames normally reach the display as GPU buffers, without a
+copy through the CPU.
+
+It needs Mesa's Venus driver and virglrenderer's server (openSUSE:
+`zypper in libvulkan_virtio virglrenderer-test-server`), Landlock ABI 6, and
+`./install.sh` for the Xwayland wrapper it uses under gamescope.
+`sandbox-game --check` says whether all of that is there.
+
+What it covers:
+
+- **Vulkan only.** DXVK and vkd3d-proton games are Vulkan underneath, and work.
+  OpenGL has no way to the GPU without a render node, so OpenGL programs —
+  many launchers, NW.js, mkxp-z, the PGMMV player — draw on the CPU instead.
+- **64-bit only.** There is no 32-bit Venus driver, so 32-bit programs draw on
+  the CPU. Under Proton, 32-bit DXVK in a WoW64 prefix goes through the 64-bit
+  driver and is not affected.
+- **Some Vulkan extensions don't come through**, such as
+  `VK_EXT_descriptor_buffer` (used by vkd3d-proton) and `VK_EXT_memory_budget`
+  (used by DXVK). A game that needs one may run slower or not start; turn
+  the setting off for it.
+- Overhead is small: around 0.1 ms per frame in a simple test.
+
+It is refused with **host X11**, whose X server would hand the game a render
+node anyway, with the **systemd separate uid backend**, whose uid cannot reach
+the render server, and with `SANDBOX_GPU_CARD=1`. Under gamescope and
+satellite, their Xwayland runs without glamor for the same reason: X11
+programs inside then draw on the CPU, while Vulkan still reaches the GPU.
+
+In **Native Wayland + private X11 (split)**, the launcher's X11 windows use
+that same Xwayland, and without DRI3 a Vulkan program there cannot hand it
+GPU buffers: a browser-based launcher then comes up white and repaints only
+what it damages. Mesa's software presentation (`MESA_VK_WSI_DEBUG=sw`) works
+there, with a copy of each frame through the CPU, which is fine for a
+launcher. The sandbox doesn't set it, since that would take the Wayland
+game off GPU buffers as well. The runner's X11 driver has to choose it for
+its own processes, as the [split-display
+runner](https://github.com/nosini/dwproton-nikke-split) does from revision 10. With
+another runner, `--env MESA_VK_WSI_DEBUG=sw` brings the launcher back, at the
+cost of that copy for the game too.
+
+The render server runs in the game's own memory, CPU and task limits, under
+the sandbox's syscall filter and Landlock rules of its own: no home folder,
+no `/tmp`, no desktop sockets, no network. It still runs as you, so a flaw
+in it that a game could exploit would be one in your account, not only in
+the game's sandbox. It ends with the game, and the game with it. Its log is
+`~/game-sandboxes/NAME/venus-server.log`, and its shader cache, kept so
+pipelines are not compiled again on every launch, is
+`~/game-sandboxes/NAME/venus-cache`.
 
 ## Attaching to a running game
 
@@ -1708,6 +1765,7 @@ x11_backend=gamescope|satellite
 x11_exe=Launcher.exe
 mangohud=0|1
 hdr=0|1
+virtual_gpu=0|1
 net=0|1
 mod_loaders=0|1
 steam=0|1
@@ -1764,7 +1822,8 @@ fragments may contain spaces.
 `env` explicitly adds variables to the clean sandbox environment, including
 when launching from the file manager.
 
-`hdr` does nothing with `host_x11=1`.
+`hdr` does nothing with `host_x11=1`. `virtual_gpu=1` with `host_x11=1`
+does not start at all; see [Virtualized GPU](#virtualized-gpu).
 `dotnet` applies only to a native program recognised as needing a .NET runtime.
 `with_proton` applies only when the game runs natively; empty means none.
 It mounts the runner at `/proton` and sets `WINEDLLPATH` so Wine can find the

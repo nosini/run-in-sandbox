@@ -4344,21 +4344,17 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         # The host X server answers DRI3Open with a render node of its own,
         # opened outside the game's Landlock domain; only a private display
         # can be used, so --host-x11 is refused before anything starts.
-        self.env["SANDBOX_GPU_VENUS"] = "1"
         self.env["DISPLAY"] = ":123"
-        self.addCleanup(self.env.pop, "SANDBOX_GPU_VENUS", None)
-        result = self.cli("--host-x11", self.game, "/bin/true", check=False)
+        result = self.cli("--virtual-gpu", "--host-x11", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot be combined with --host-x11", result.stderr)
 
     def test_virtualized_gpu_refuses_the_systemd_backend(self):
         # Its transient uid cannot connect to the render server's socket, and
         # the refusal comes before the capture is switched to that backend.
-        self.env["SANDBOX_GPU_VENUS"] = "1"
         self.env["SANDBOX_SEPARATE_UID"] = "systemd"
-        self.addCleanup(self.env.pop, "SANDBOX_GPU_VENUS", None)
         self.addCleanup(self.env.pop, "SANDBOX_SEPARATE_UID", None)
-        result = self.cli("--headless", self.game, "/bin/true", check=False)
+        result = self.cli("--virtual-gpu", "--headless", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not work under SANDBOX_SEPARATE_UID=systemd", result.stderr)
         self.assertFalse((self.home / "game-sandboxes" / "game" / "managed-uid").exists())
@@ -4366,11 +4362,9 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
     def test_virtualized_gpu_refuses_the_card_nodes(self):
         # The mode exists to keep the game off the GPU's nodes; asking for
         # both makes no sense and is refused before anything starts.
-        self.env["SANDBOX_GPU_VENUS"] = "1"
         self.env["SANDBOX_GPU_CARD"] = "1"
-        self.addCleanup(self.env.pop, "SANDBOX_GPU_VENUS", None)
         self.addCleanup(self.env.pop, "SANDBOX_GPU_CARD", None)
-        result = self.cli("--headless", self.game, "/bin/true", check=False)
+        result = self.cli("--virtual-gpu", "--headless", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot be combined with SANDBOX_GPU_CARD=1", result.stderr)
 
@@ -4389,7 +4383,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
             f'printf "%s\\n" "$@" >> {str(scope_log)!r}\n'
             'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n')
         systemd_run.chmod(0o755)
-        self.recorded_args()
+        self.recorded_args("--virtual-gpu")
         lines = scope_log.read_text().splitlines()
         at = max(i for i, line in enumerate(lines) if line == "--unit")
         command = lines[lines.index("--", at) + 1:]
@@ -4438,12 +4432,10 @@ time.sleep(600)
         xwayland.write_text("#!/bin/sh\nexit 0\n")
         xwayland.chmod(0o755)
         self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
-        self.env["SANDBOX_GPU_VENUS"] = "1"
-        self.addCleanup(self.env.pop, "SANDBOX_GPU_VENUS", None)
         return bindir
 
     def test_virtualized_gpu_serves_the_game_through_a_socket(self):
-        # SANDBOX_GPU_VENUS=1: the game's Vulkan goes to a render server of
+        # --virtual-gpu: the game's Vulkan goes to a render server of
         # the launch's own over a Unix socket, so its Landlock domain gets no
         # render node rules, and the variables that send it there reach the
         # game's domain alone -- never gamescope, which draws on the GPU
@@ -4453,7 +4445,7 @@ time.sleep(600)
         if not Path(VIRTIO_ICD).exists():
             self.skipTest("libvulkan_virtio is not installed")
         bindir = self.venus_stub()
-        args = self.recorded_args()
+        args = self.recorded_args("--virtual-gpu")
 
         sock = "/run/sandbox-venus/venus.sock"
         triples = list(zip(args, args[1:], args[2:]))
@@ -4556,6 +4548,26 @@ time.sleep(600)
         time.sleep(0.5)
         self.assertEqual(self.venus_servers(), [])
 
+    def test_virtualized_gpu_split_display_leaves_presentation_to_the_runner(self):
+        # Split display's own Xwayland has no glamor and so no DRI3 (see the
+        # Venus section): an X11 Vulkan client cannot present dma-bufs there.
+        # The runner's X11 driver picks Mesa's software WSI for its own
+        # processes; set for the game's domain, it would take the Wayland
+        # game off dma-bufs too. --env still sets it for the whole game.
+        if not Path(VIRTIO_ICD).exists():
+            self.skipTest("libvulkan_virtio is not installed")
+        self.venus_stub()
+        proton = self.base / "proton"
+        proton.mkdir()
+        (proton / "proton").write_text("#!/bin/sh\nexit 0\n")
+        (proton / "proton").chmod(0o755)
+        options = ("--virtual-gpu", "--wayland-x11", "--proton=" + str(proton))
+        args = self.recorded_args(*options)
+        self.assertFalse([a for a in args if "MESA_VK_WSI_DEBUG" in a],
+                         "the sandbox chose a WSI for the whole game")
+        over = self.recorded_args(*options, "--env=MESA_VK_WSI_DEBUG=sw")
+        self.assertIn(("--setenv", "MESA_VK_WSI_DEBUG", "sw"), list(zip(over, over[1:], over[2:])))
+
     def test_virtualized_gpu_single_domain_keeps_the_nodes_out(self):
         # Without a private display server there is no domain to keep the
         # nodes for: they are not bound at all, so not even a slip in the
@@ -4564,13 +4576,16 @@ time.sleep(600)
         if not Path(VIRTIO_ICD).exists():
             self.skipTest("libvulkan_virtio is not installed")
         self.venus_stub()
-        args = self.recorded_args("--wayland")
+        args = self.recorded_args("--virtual-gpu", "--wayland")
         nodes = [*Path("/dev").glob("dri/renderD*"), *Path("/dev").glob("nvidia*")]
         for node in nodes:
             self.assertNotIn(str(node), args)
         triples = list(zip(args, args[1:], args[2:]))
         self.assertIn(("--setenv", "VK_DRIVER_FILES", VIRTIO_ICD), triples)
         self.assertIn(("--setenv", "VTEST_SOCKET_NAME", "/run/sandbox-venus/venus.sock"), triples)
+        # A Wayland game keeps its dma-buf path.
+        self.assertFalse([a for a in args if a.startswith("MESA_VK_WSI_DEBUG=")],
+                         "the sandbox chose a WSI for the game")
 
     def test_virtualized_gpu_socket_path_fits_sun_path(self):
         # sun_path holds 108 bytes including its NUL; a long sandbox name
@@ -4579,7 +4594,7 @@ time.sleep(600)
             self.skipTest("libvulkan_virtio is not installed")
         self.venus_stub()
         long = "g" * 90
-        args = self.recorded_args("--headless", "--name", long)
+        args = self.recorded_args("--virtual-gpu", "--headless", "--name", long)
         dest = "/run/sandbox-venus/venus.sock"
         triples = list(zip(args, args[1:], args[2:]))
         source = next((b for a, b, c in triples if a == "--bind" and c == dest), None)
@@ -4597,11 +4612,137 @@ time.sleep(600)
         recorder = bindir / "bwrap"
         recorder.write_text(RECORDING_BWRAP)
         recorder.chmod(0o755)
-        result = self.cli("--headless", self.game, "/bin/true", check=False)
+        result = self.cli("--virtual-gpu", "--headless", self.game, "/bin/true", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("the render server did not start", result.stderr)
         self.assertTrue((self.home / "game-sandboxes/game/venus-server.log").exists())
         self.assertEqual(self.venus_servers(), [])
+
+    def test_virtualized_gpu_wrapper_releases_the_launchers_descriptors(self):
+        # With --net the launcher gives its background command bwrap's info
+        # pipe and go pipe, and reads the game's pid from the info pipe until
+        # end-of-file. --virtual-gpu puts the render server's wrapper in
+        # between: it hands those descriptors on to bwrap, but must not keep
+        # copies of its own, or the launcher waits forever for an end-of-file
+        # that only the wrapper could give -- the game never starts. The
+        # wrapper is run here as the launcher runs it, with stubs for the
+        # server, its bwrap and the game's.
+        import fcntl
+        import select
+        wrapper = self.venus_wrapper(self.base / "wrapper")
+        work = wrapper.parent
+        server_bwrap = work / "server-bwrap"
+        server_bwrap.write_text(
+            '#!/usr/bin/python3\n'
+            'import os, sys\n'
+            'at = len(sys.argv) - 1 - sys.argv[::-1].index("--")\n'
+            'command = sys.argv[at + 1:]\n'
+            'os.execv(command[0], command)\n')
+        server_bwrap.chmod(0o755)
+        server = work / "virgl_test_server"
+        server.write_text(
+            '#!/usr/bin/python3\n'
+            'import os, socket, sys, time\n'
+            'path = sys.argv[sys.argv.index("--socket-path") + 1]\n'
+            'open(sys.argv[0] + ".pid", "w").write(str(os.getpid()))\n'
+            'sock = socket.socket(socket.AF_UNIX)\n'
+            'sock.bind(path)\n'
+            'sock.listen(8)\n'
+            'time.sleep(600)\n')
+        server.chmod(0o755)
+        # The game's bwrap: report the pid down the info descriptor as bwrap
+        # does, close it, then wait for the go-ahead.
+        game_bwrap = work / "game-bwrap"
+        game_bwrap.write_text(
+            '#!/usr/bin/python3\n'
+            'import json, os\n'
+            'os.write(10, json.dumps({"child-pid": os.getpid()}).encode() + b"\\n")\n'
+            'os.close(10)\n'
+            'os.read(11, 1)\n')
+        game_bwrap.chmod(0o755)
+        (work / "cache").mkdir()
+        (work / "server.json").write_text(json.dumps({
+            "socket": str(work / "venus.sock"), "log": str(work / "venus-server.log"),
+            "bwrap": str(server_bwrap), "landlock": "/bin/true",
+            "seccomp": "/bin/true", "server": str(server),
+            "cache": str(work / "cache"), "acl": "", "policy": "", "rules": []}))
+
+        info_r, info_w = os.pipe()
+        go_r, go_w = os.pipe()
+        for fd in (info_r, info_w, go_r, go_w):
+            self.addCleanup(self.close_quietly, fd)
+        # Above 10, so the shell below can move them there without colliding.
+        high_w = fcntl.fcntl(info_w, fcntl.F_DUPFD_CLOEXEC, 20)
+        high_r = fcntl.fcntl(go_r, fcntl.F_DUPFD_CLOEXEC, 20)
+        os.close(info_w)
+        os.close(go_r)
+        info_w, go_r = high_w, high_r
+        self.addCleanup(self.close_quietly, info_w)
+        self.addCleanup(self.close_quietly, go_r)
+        proc = subprocess.Popen(
+            ["/bin/bash", "-c",
+             'exec 10>&"$1" 11<&"$2"\n'
+             'eval "exec $1>&- $2<&-"\n'
+             'shift 2\n'
+             'exec "$@"\n',
+             "bash", str(info_w), str(go_r),
+             sys.executable, "-I", str(wrapper), str(game_bwrap)],
+            pass_fds=(info_w, go_r), env=self.env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(self.end_quietly, proc)
+        os.close(info_w)
+        os.close(go_r)
+        data, deadline = b"", time.monotonic() + 10
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([info_r], [], [], left)[0]:
+                self.fail("the launcher's info pipe never reached end-of-file:"
+                          " the wrapper kept its write end open")
+            chunk = os.read(info_r, 4096)
+            if not chunk:
+                break
+            data += chunk
+        self.assertIn(b'"child-pid"', data)
+        os.write(go_w, b"x")
+        os.close(go_w)
+        code = proc.wait(timeout=10)
+        err = proc.stderr.read().decode()
+        proc.stderr.close()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("did not start", err)
+        # The render server is ended with the launch, not left listening.
+        pid = int(Path(str(server) + ".pid").read_text())
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(Path(f"/proc/{pid}").exists(),
+                         "the render server outlived the wrapper")
+
+    def venus_wrapper(self, directory):
+        # The server.py the launch writes, lifted from the heredoc: the fd
+        # inheritance it gets is the launcher's, which no container can fake
+        # through a real bwrap here.
+        source = (ROOT / "sandbox-game").read_text()
+        marker = 'cat > "$VENUS_DIR/server.py" 18>&- <<\'PY\'\n'
+        start = source.index(marker) + len(marker)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "server.py"
+        path.write_text(source[start:source.index("\nPY\n", start)] + "\n")
+        return path
+
+    def close_quietly(self, fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def end_quietly(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
 
     def venus_servers(self):
         # Any process still holding the render server's command line: the

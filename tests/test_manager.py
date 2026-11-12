@@ -680,6 +680,19 @@ class LibraryTests(unittest.TestCase):
         self.library.update_settings(entry["name"], {"host_x11": "0", "hdr": "0"})
         self.assertNotIn("--hdr", self.pref_flags(entry, 1))
 
+    def test_virtual_gpu_preference_is_saved_and_kept_on_host_x11(self):
+        entry = self.library.create("game")
+        self.library.save_preferences(entry["name"], {"scope": "game", "virtual_gpu": "1"})
+        self.assertEqual(core.read_settings(self.library.config / "games" / entry["name"])["virtual_gpu"], "1")
+        self.assertIn("--virtual-gpu", self.pref_flags(entry, 1))
+        self.assertIn("--virtual-gpu", self.pref_flags(entry, 0))
+        # Unlike HDR, not dropped: sandbox-game refuses the pair rather than
+        # hand the GPU to a game that was to be kept from it.
+        self.library.update_settings(entry["name"], {"host_x11": "1"})
+        self.assertIn("--virtual-gpu", self.pref_flags(entry, 1))
+        self.library.update_settings(entry["name"], {"host_x11": "0", "virtual_gpu": "0"})
+        self.assertNotIn("--virtual-gpu", self.pref_flags(entry, 1))
+
     def test_split_display_in_the_defaults_leaves_a_game_with_its_own_display(self):
         entry = self.library.create("game")
         self.library.update_settings(entry["name"], {"wayland": "1", "wayland_x11": "1", "gamescope": "1",

@@ -239,7 +239,7 @@ class Preferences:
         self.values = dict(request.get("values", {}))
         for key in ("x11_backend", "proton", "casefold", "webgl", "with_proton"):
             self.values[key] = file_choice(key, self.values)
-        for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
+        for key in ("net", "mangohud", "hdr", "virtual_gpu", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
             self.values[key] = "1" if self.values.get(key) == "1" else "0"
         for key in ("lan_allow", "hosts"):
@@ -439,6 +439,16 @@ class Preferences:
             return lan_error(self.values["lan_allow"])
         if self.hosts_controls and hosts_error(self.values["hosts"]):
             return hosts_error(self.values["hosts"])
+        if self.values["virtual_gpu"] == "1":
+            # sandbox-game refuses both; saying so here beats a game that
+            # will not start.
+            if self.display == "host-x11":
+                return ("The virtualized GPU cannot be used with host X11: the desktop's X server "
+                        "would hand the game the GPU anyway. Choose another display.")
+            uid = self.values.get("separate_uid") or self.security_default("separate_uid")[0]
+            if uid == "systemd":
+                return ("The virtualized GPU does not work with the systemd separate uid backend: "
+                        "its uid cannot reach the render server.")
         if "private-display" in self.values["require"].split(",") and self.display in (
                 "host-x11", "wayland", "wayland-x11"):
             return "A private display is required, which the chosen display does not give."
@@ -501,6 +511,7 @@ class Preferences:
             result["mangohud"] = self.values.get("mangohud", "0")
         if self.hdr_controls:
             result["hdr"] = self.values["hdr"]
+        result["virtual_gpu"] = self.values["virtual_gpu"]
         if self.proton_controls:
             if self.split_controls:
                 result["x11_exe"] = self.values.get("x11_exe", "").strip()
@@ -790,6 +801,10 @@ class Dialog:
         self.switch("hdr", "HDR, for games that offer it (turn it on in the desktop's display settings too)",
                     self.state.values["hdr"] == "1",
                     lambda widget, *_: self.set_value("hdr", "1" if widget.get_active() else "0"))
+        self.switch("virtual_gpu", "Virtualized GPU: Vulkan through a render server, no GPU device in the sandbox "
+                    "(OpenGL and 32-bit programs draw on the CPU)",
+                    self.state.values["virtual_gpu"] == "1",
+                    lambda widget, *_: self.set_value("virtual_gpu", "1" if widget.get_active() else "0"))
         protons = list(dict.fromkeys(["auto", *request.get("protons", [])]))
         pinned = self.state.values["proton"]
         if pinned not in protons:
