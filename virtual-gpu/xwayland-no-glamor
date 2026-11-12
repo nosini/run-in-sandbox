@@ -1,5 +1,6 @@
 #!/bin/sh
-# Bound over /usr/bin/Xwayland in the sandbox: gamescope starts Xwayland by
-# that path. Without glamor, Xwayland offers no DRI3, whose Open request
-# would hand X11 clients a render node descriptor opened outside Landlock.
+# Bound over the private X server's Xwayland in the sandbox -- gamescope starts
+# it at /usr/bin/Xwayland, satellite at /run/sandbox-x11-bin/Xwayland. Without
+# glamor, Xwayland offers no DRI3, whose Open request would hand X11 clients a
+# render node descriptor opened outside Landlock.
 exec /run/xwayland-real "$@" -glamor off

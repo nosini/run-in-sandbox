@@ -3,8 +3,9 @@
 # sudo ./install.sh --systemd-backend UID...
 # sudo ./install.sh --uninstall-systemd-backend
 #   Install sandbox-game and sandbox-attach into ~/.local/bin, their helpers
-#   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib, nwjs-casefold.js) into
-#   ~/.local/lib/sandbox-game, and the Nautilus scripts, for the current user.
+#   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib, nwjs-casefold.js and
+#   virtual-gpu/xwayland-no-glamor) into ~/.local/lib/sandbox-game, and the
+#   Nautilus scripts, for the current user.
 #   No root needed; nothing outside ~/.local is touched.
 #   The separate --systemd-backend mode installs administrator services and
 #   GPU grants for the given host UIDs; it does not install per-user files.
@@ -51,6 +52,7 @@ each() {
     "$@" 644 sandbox-manager-lib.py   "$HELPERS"
     "$@" 755 sandbox-game-icon        "$HELPERS"
     "$@" 644 nwjs-casefold.js         "$HELPERS"
+    "$@" 755 virtual-gpu/xwayland-no-glamor "$HELPERS"
     "$@" 755 "Sandbox game"             "$SCRIPTS"
     "$@" 755 "Sandbox game preferences" "$SCRIPTS"
     "$@" 755 "Stop sandboxed game"      "$SCRIPTS"
@@ -128,6 +130,7 @@ case "${1:-}" in
         each_old remove_one
         remove_one - sandbox-xwayland-satellite "$HELPERS"
         remove_one - satellite-LICENSE "$HELPERS"
+        rmdir "$HELPERS/virtual-gpu" 2>/dev/null || true
         rmdir "$HELPERS" 2>/dev/null || true
         each_completion remove_one
         if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
