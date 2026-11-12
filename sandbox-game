@@ -713,6 +713,15 @@ check_host() {
         _check_line '!!' gpu "no render node: no GPU acceleration in games"
     fi
 
+    # The virtualized GPU mode is switched on with SANDBOX_GPU_VENUS=1, per
+    # launch, until it has a setting of its own.
+    if command -v virgl_test_server >/dev/null \
+        && [ -e /usr/share/vulkan/icd.d/virtio_icd.x86_64.json ]; then
+        _check_line -- venus "SANDBOX_GPU_VENUS=1 possible (virgl_test_server, libvulkan_virtio)"
+    else
+        _check_line -- venus "SANDBOX_GPU_VENUS=1 unavailable: needs virglrenderer-test-server and libvulkan_virtio"
+    fi
+
     if ! command -v gamescope >/dev/null; then
         _check_line '!!' gamescope "not installed: the default display needs it (--wayland does not)"
     elif python3 "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
@@ -2344,6 +2353,77 @@ else
         --setenv PULSE_SERVER "unix:$RT/pulse/native" )
 fi
 
+# ---- virtualized GPU (Venus) ------------------------------------------------
+# SANDBOX_GPU_VENUS=1, an env switch while the mode is under test: no option,
+# no documentation yet. The game's Vulkan goes to Mesa's Venus driver, which
+# talks to a virglrenderer render server over a Unix socket; the server opens
+# the render nodes, the game never does. One server per launch, as the mode
+# would have it: without --multi-clients it forks a child for every
+# connection, so each game's contexts live and die with the game.
+#
+# What this sets up is mounts and environment; the server itself starts once
+# the launch can no longer be refused for anything else (see "landlock"), so
+# one refused here leaves nothing running. Under a private display server the
+# game's Landlock domain gets no render nodes at all, only this socket;
+# gamescope keeps them in the outer domain, where the display is drawn. Under
+# it, gamescope's Xwayland is replaced by virtual-gpu/xwayland-no-glamor:
+# without glamor it offers no DRI3, whose Open answer would hand X11 clients
+# a render node descriptor opened outside the game's domain, past Landlock's
+# path rules (virtual-gpu/dri3_open_probe.py).
+VENUS_PID=""; VENUS_BWRAP=(); VENUS_ENV=()
+if [ "${SANDBOX_GPU_VENUS:-0}" = 1 ]; then
+    [ "${SANDBOX_GPU_CARD:-0}" != 1 ] || {
+        echo "SANDBOX_GPU_VENUS=1 cannot be combined with SANDBOX_GPU_CARD=1: the" >&2
+        echo "game would have the card nodes the mode exists to keep from it" >&2; exit 1; }
+    [ -e /usr/share/vulkan/icd.d/virtio_icd.x86_64.json ] || {
+        echo "SANDBOX_GPU_VENUS=1 needs Mesa's Venus driver (openSUSE: zypper in libvulkan_virtio)" >&2
+        exit 1; }
+    command -v virgl_test_server >/dev/null || {
+        echo "SANDBOX_GPU_VENUS=1 needs the render server" >&2
+        echo "(openSUSE: zypper in virglrenderer-test-server)" >&2; exit 1; }
+    VENUS_ENV=( VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json
+                VN_DEBUG=vtest VTEST_SOCKET_NAME=/run/sandbox-venus/venus.sock )
+    [ -d "$RT/sandbox-game" ] || mkdir -m 0700 "$RT/sandbox-game"
+    VENUS_HOST_SOCK="$RT/sandbox-game/$NAME-venus.sock"
+    VENUS_BWRAP+=( --perms 0700 --dir /run/sandbox-venus
+                   --bind "$VENUS_HOST_SOCK" /run/sandbox-venus/venus.sock )
+    if [ "$OUTER_DISPLAY" = 1 ]; then
+        # The variables must reach the game only: gamescope, which draws on
+        # the GPU itself, would read them as its own -- so they are set for
+        # the game's domain, at "landlock". Here only its Landlock rules
+        # change, and the hole in gamescope's Xwayland is closed.
+        if [ "$X11_BACKEND" = satellite ]; then
+            echo "sandbox-game: warning: SANDBOX_GPU_VENUS=1 with --x11-backend=satellite leaves" >&2
+            echo "                       satellite's Xwayland its DRI3 hole; use gamescope's" >&2
+        else
+            _xw="$(command -v Xwayland 2>/dev/null || true)"
+            _vg=""
+            for _d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
+                [ -n "$_vg" ] || [ ! -f "$_d/virtual-gpu/xwayland-no-glamor" ] \
+                    || _vg="$_d/virtual-gpu/xwayland-no-glamor"
+            done
+            [ -n "$_xw" ] && [ -n "$_vg" ] || {
+                echo "SANDBOX_GPU_VENUS=1 needs Xwayland and virtual-gpu/xwayland-no-glamor," >&2
+                echo "beside this script or in ~/.local/lib/sandbox-game: without it gamescope's" >&2
+                echo "Xwayland answers DRI3 with a render node opened outside the game's domain" >&2
+                exit 1; }
+            # The wrapper execs the real Xwayland, which this makes reachable
+            # at the fixed path the wrapper names, with -glamor off. After
+            # SATELLITE_ARGS below, so it wins there too.
+            VENUS_BWRAP+=( --ro-bind "$(realpath "$_xw")" /run/xwayland-real
+                           --ro-bind "$_vg" /usr/bin/Xwayland )
+        fi
+    else
+        # No private display server, one Landlock domain: the variables go
+        # into the sandbox's environment like any other, still beaten by
+        # --env, which is applied last.
+        for _v in "${VENUS_ENV[@]}"; do
+            VIDEO_ENV+=( --setenv "${_v%%=*}" "${_v#*=}" )
+        done
+    fi
+    echo "sandbox-game: note: 32-bit programs get no GPU this way; there is no 32-bit Venus driver" >&2
+fi
+
 # ---- desktop settings ------------------------------------------------------
 # GTK takes a title bar's buttons from GNOME's button-layout setting, which it
 # reads through the settings portal or dconf -- neither is in here -- so every
@@ -2362,7 +2442,7 @@ if [ "$HEADLESS" = 0 ] && command -v gsettings >/dev/null \
 fi
 
 # ---- overlay for the game's own install dir --------------------------------
-OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
+OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""; VENUS_PID=""
 # Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
 # when the mount goes away. That is deliberate while mounted -- it holds
 # in-flight temporary files and nothing should look inside -- but afterwards it
@@ -2399,6 +2479,13 @@ cleanup() {
         # the cleanup here, playtime and exit status with it.
         [[ ! "$p" =~ ^[0-9]+$ ]] || kill "$p" 2>/dev/null || true
         rm -f "$PASTA_PID"
+    fi
+    # The virtualized GPU's render server, one per launch (see its section
+    # below). The game's connections to it are gone with the game, so its
+    # children, one per connection, are not kept alive once it is ended.
+    if [ -n "$VENUS_PID" ]; then
+        kill "$VENUS_PID" 2>/dev/null || true
+        VENUS_PID=""
     fi
     # Under a uid of its own, what the game changed in its own folder, copied
     # up with that folder's permissions, is opened to you again: see share in
@@ -3023,6 +3110,9 @@ BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
     --perms 0700 --tmpfs "$RT"
     "${DISPLAY_ARGS[@]}"
     "${SATELLITE_ARGS[@]}"
+    "${VENUS_BWRAP[@]}"               # the virtual GPU's socket, and the
+                                      # no-glamor Xwayland; after the private
+                                      # display server's own binds, so it wins
     "${AUDIO_ARGS[@]}"
     "${TOOLS_ARGS[@]}"
     "${EXTRA_RO[@]}"
@@ -3058,6 +3148,8 @@ BWRAP+=( --remount-ro /etc )
 LANDLOCK="$(helper sandbox-landlock)"
 [ -n "$LANDLOCK" ] || { echo "sandbox-landlock not found; run install.sh" >&2; exit 1; }
 LL_ARGS=( --ls / --ro /run/sandbox-landlock )
+LL_GPU=()                             # the render nodes: the display server's
+                                      # domain alone, in the virtualized GPU mode
 # Required (see "required protections"), they stop the game from starting.
 LL_REQUIRE=()
 required landlock && LL_REQUIRE+=( fs )
@@ -3074,8 +3166,17 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
         --bind|--bind-try|--dev-bind|--dev-bind-try)
             # A card node bound on its own is there for gamescope to see, not
             # to be opened. (SANDBOX_GPU_CARD=1 binds /dev/dri whole instead.)
+            # In the virtualized GPU mode the render nodes join the card
+            # nodes: the display server's rules only, where the drawing is
+            # done. The game reaches the GPU through its socket instead.
             case "${BWRAP[i+2]}" in
                 /dev/dri/card*) ;;
+                /dev/dri/renderD*|/dev/nvidia*)
+                    if [ "${SANDBOX_GPU_VENUS:-0}" = 1 ]; then
+                        LL_GPU+=( --rw "${BWRAP[i+2]}" )
+                    else
+                        LL_ARGS+=( --rw "${BWRAP[i+2]}" )
+                    fi ;;
                 *) LL_ARGS+=( --rw "${BWRAP[i+2]}" ) ;;
             esac
             i=$((i + 3)) ;;
@@ -3108,6 +3209,32 @@ while [ "$i" -lt "${#BWRAP[@]}" ]; do
         *)                      i=$((i + 1)) ;;
     esac
 done
+
+# The render server, for the virtualized GPU mode: started once no check
+# before this can refuse the launch any more, so it outlives nothing but the
+# game it serves (cleanup ends it). A socket a killed earlier launch left
+# behind would keep the server from binding its place.
+if [ "${SANDBOX_GPU_VENUS:-0}" = 1 ]; then
+    rm -f -- "$VENUS_HOST_SOCK"
+    # Only the host's own Vulkan drivers on the server side: with lavapipe
+    # there too, a driver the game might pick is not what this is for -- and
+    # the game's own loader sees only the Venus ICD anyway (see VENUS_ENV).
+    VK_LOADER_DRIVERS_DISABLE='*lvp*' virgl_test_server --venus --no-virgl \
+        --socket-path "$VENUS_HOST_SOCK" > "$CAP/venus-server.log" 2>&1 18>&- &
+    VENUS_PID=$!
+    for _ in $(seq 50); do [ -S "$VENUS_HOST_SOCK" ] && break; sleep 0.1; done
+    [ -S "$VENUS_HOST_SOCK" ] || {
+        echo "SANDBOX_GPU_VENUS=1: the render server did not start; see $CAP/venus-server.log" >&2
+        kill "$VENUS_PID" 2>/dev/null || true; VENUS_PID=""
+        exit 1; }
+    if [ "$SEPARATE_UID" = 1 ]; then
+        # Connecting takes write permission on the socket, which is ours;
+        # the sandbox's uid gets it like the display's (see "a uid of its own").
+        setfacl -m "g:$SB_CLIENTS:rw" "$VENUS_HOST_SOCK" || {
+            echo "could not let the sandbox's uid connect to the render server's socket" >&2
+            exit 1; }
+    fi
+fi
 # sandbox-landlock also stays behind as the starter for what sandbox-attach
 # brings in (see --attach there), listening in /run/sandbox-attach: on the
 # sandbox's root, which no rule lets the game change, so it can neither
@@ -3146,7 +3273,20 @@ if [ "$OUTER_DISPLAY" = 1 ]; then
         INNER_DISPLAY_RULES=( --unix-connect "$HOST_WL" )
         INNER_DISPLAY_ENV=( env WAYLAND_DISPLAY="$HOST_WL" )
     fi
-    set -- /run/sandbox-landlock "${LL_ARGS[@]}" --rw /run/sandbox-attach "${GS_START[@]}" \
+    # The virtualized GPU mode: the game's domain connects to the render
+    # server's socket, and the variables that send it there go in with it --
+    # for the game and what sandbox-attach starts, never for gamescope, which
+    # draws on the GPU itself (see the Venus section above).
+    if [ "${SANDBOX_GPU_VENUS:-0}" = 1 ]; then
+        INNER_DISPLAY_RULES+=( --unix-connect /run/sandbox-venus/venus.sock )
+        if [ "${#INNER_DISPLAY_ENV[@]}" -gt 0 ]; then
+            INNER_DISPLAY_ENV+=( "${VENUS_ENV[@]}" )
+        else
+            INNER_DISPLAY_ENV=( env "${VENUS_ENV[@]}" )
+        fi
+    fi
+    set -- /run/sandbox-landlock "${LL_ARGS[@]}" ${LL_GPU[@]+"${LL_GPU[@]}"} \
+        --rw /run/sandbox-attach "${GS_START[@]}" \
         "${INNER_DISPLAY_ENV[@]}" /run/sandbox-landlock "${LL_ARGS[@]}" "${INNER_DISPLAY_RULES[@]}" \
         --unix-connect-where-writable --no-abstract-scope \
         ${INNER_REQUIRE[@]+"${INNER_REQUIRE[@]}"} --attach /run/sandbox-attach -- "$@"
