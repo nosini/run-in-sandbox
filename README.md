@@ -895,7 +895,8 @@ It needs Mesa's Venus driver and virglrenderer's server (openSUSE:
 
 What it covers:
 
-- **Vulkan only.** DXVK and vkd3d-proton games are Vulkan underneath, and work.
+- **Vulkan only.** DXVK and vkd3d-proton games are Vulkan underneath, and can
+  run this way; see the known problems below.
   OpenGL has no way to the GPU without a render node, so OpenGL programs —
   many launchers, NW.js, mkxp-z, the PGMMV player — draw on the CPU instead.
 - **64-bit only.** There is no 32-bit Venus driver, so 32-bit programs draw on
@@ -905,7 +906,9 @@ What it covers:
   `VK_EXT_descriptor_buffer` (used by vkd3d-proton) and `VK_EXT_memory_budget`
   (used by DXVK). A game that needs one may run slower or not start; turn
   the setting off for it.
-- Overhead is small: around 0.1 ms per frame in a simple test.
+- **The CPU can't write directly into the GPU's memory.** Through Venus,
+  vkd3d-proton finds the GPU's memory split as on a card without resizable
+  BAR, even where the card has it, and stages uploads through a slower path.
 
 It is refused with **host X11**, whose X server would hand the game a render
 node anyway, with the **systemd separate uid backend**, whose uid cannot reach
@@ -924,6 +927,27 @@ its own processes, as the [split-display
 runner](https://github.com/nosini/dwproton-nikke-split) does from revision 10. With
 another runner, `--env MESA_VK_WSI_DEBUG=sw` brings the launcher back, at the
 cost of that copy for the game too.
+
+Known problems, as tested in November 2026 with Mesa 26.2 on an RX 9070 XT:
+
+- **Heavy games run badly.** The overhead is around 0.1 ms per frame in a
+  simple test, but every GPU wait is a round trip to the render server over
+  its socket. NIKKE (DXVK) played fine. Assassin's Creed Black Flag Resynced
+  (vkd3d-proton, 4K) tore and lagged, with its menus below 30 fps. Venus
+  inside a virtual machine has a faster transport for this, which the
+  sandbox can't use.
+- **vkd3d-proton games can freeze in native Wayland.** Without the shared
+  fences that a socket can't carry, Venus presents each frame from a thread
+  of its own. With vkd3d-proton, Black Flag Resynced stopped on its loading
+  screen that way, with nothing busy anywhere. The same game worked in
+  gamescope. In native Wayland, `VN_PERF=no_async_present` in the game's
+  `env` makes Venus present on the game's own thread instead, which fixed
+  the freeze. The sandbox doesn't set it, since it adds a wait to every
+  frame for games that don't need it.
+
+So this mode is for games that are light on the GPU, or ones you'd rather
+keep from the kernel driver at some cost in speed. Turn it off for a game
+that runs badly.
 
 The render server runs in the game's own memory, CPU and task limits, under
 the sandbox's syscall filter and Landlock rules of its own: no home folder,

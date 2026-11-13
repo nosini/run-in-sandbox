@@ -193,6 +193,15 @@ Run them as an ordinary user from the checkout, with a fresh, short
   Xvfb reproduce that: `vkcube --wsi xcb` crashes after Mesa's "No DRI3
   support detected" and runs with `sw`. `Xvfb -fbdir DIR` exposes the screen
   as an XWD file for pixel checks.
+- Over vtest, Venus has neither implicit fencing nor external sync. It
+  presents from a thread of its own (`vn_wsi[Q,I]`), and every wait is a
+  sync-wait request whose returned descriptor the client polls. A
+  vkd3d-proton game froze in native Wayland with its `vkd3d-swapchain`
+  thread polling such a descriptor, `vn_wsi` idle, the server idle and the
+  compositor releasing buffers. `VN_PERF=no_async_present` cured it. To see
+  where a frozen game waits, read `comm` and `wchan` under
+  `/proc/PID/task/*`; Wine names the game's process after its executable,
+  so `pgrep -x NAME.exe` finds it.
 - The render server sees every Vulkan driver on the host. Started without
   `VK_LOADER_DRIVERS_DISABLE='*lvp*'`, Zink's software path in the game can
   end up on lavapipe through it.
