@@ -1468,6 +1468,107 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertIn("no preloadScript array", result.stderr)
         self.assertEqual((capture / "mkxp.json").read_text(), original)
 
+    def test_nwjs_casefold_covers_node_fs_reads_and_writes(self):
+        runtime = self.base / "node-runtime"
+        app = runtime / "app"
+        (app / "Img" / "Pictures").mkdir(parents=True)
+        (app / "Img" / "Pictures" / "b.png").write_text("image")
+        (app / "Save").mkdir()
+        (app / "Save" / "old.sav").write_text("old")
+        outside = runtime / "Outside"
+        outside.mkdir()
+        (outside / "File.txt").write_text("outside")
+        script = r'''
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[2];
+const casefold = process.argv[3];
+process.chdir(root);
+class Media {
+    get src() { return this._src; }
+    set src(value) { this._src = value; }
+}
+global.HTMLImageElement = Media;
+global.HTMLMediaElement = Media;
+global.HTMLSourceElement = Media;
+global.XMLHttpRequest = class { open() {} };
+global.FontFace = class { constructor() {} };
+global.window = { fetch: async () => {}, FontFace: global.FontFace };
+global.document = { baseURI: "chrome-extension://test/" };
+global.location = { protocol: "chrome-extension:" };
+global.nw = { __dirname: root };
+require(casefold);
+
+assert.strictEqual(fs.readFileSync(path.join(root, "img/pictures/B.PNG"), "utf8"), "image");
+assert.strictEqual(fs.readFileSync(path.join(root, "img/pictures/b.png"), "utf8"), "image");
+assert(fs.existsSync(path.join(root, "IMG/PICTURES/B.PNG")));
+assert(fs.statSync(path.join(root, "img/Pictures/b.png")).isFile());
+assert(fs.lstatSync(path.join(root, "Img/pictures/b.png")).isFile());
+fs.accessSync(path.join(root, "img/pictures/b.png"));
+assert(fs.readdirSync(path.join(root, "IMG")).includes("Pictures"));
+const fd = fs.openSync(path.join(root, "img/PICTURES/B.PNG"), "r");
+fs.closeSync(fd);
+assert.strictEqual(fs.readFileSync(path.join(root, "..", "Outside", "File.txt"), "utf8"), "outside");
+assert.throws(() => fs.readFileSync(path.join(root, "img/pictures/Missing.png")), /ENOENT/);
+
+async function main() {
+    assert.strictEqual(await new Promise((resolve, reject) =>
+        fs.readFile(path.join(root, "img/PICTURES/B.PNG"), "utf8",
+                    (error, data) => error ? reject(error) : resolve(data))), "image");
+    await new Promise((resolve, reject) =>
+        fs.stat(path.join(root, "img/pictures/b.png"),
+                (error) => error ? reject(error) : resolve()));
+    await new Promise((resolve, reject) =>
+        fs.access(path.join(root, "img/pictures/b.png"),
+                  (error) => error ? reject(error) : resolve()));
+    await new Promise((resolve, reject) =>
+        fs.open(path.join(root, "img/PICTURES/B.PNG"), "r",
+                (error, fd) => error ? reject(error) : (fs.closeSync(fd), resolve())));
+    await new Promise((resolve, reject) =>
+        fs.readdir(path.join(root, "IMG"),
+                   (error, names) => error ? reject(error) : resolve(assert(names.includes("Pictures")))));
+    assert(await new Promise((resolve) => fs.exists(path.join(root, "IMG"), resolve)));
+    assert.strictEqual(await fs.promises.readFile(path.join(root, "img/PICTURES/B.PNG"), "utf8"), "image");
+    assert((await fs.promises.stat(path.join(root, "img/pictures/b.png"))).isFile());
+    await fs.promises.access(path.join(root, "img/pictures/b.png"));
+    const handle = await fs.promises.open(path.join(root, "img/PICTURES/B.PNG"), "r");
+    await handle.close();
+    assert((await fs.promises.readdir(path.join(root, "IMG"))).includes("Pictures"));
+
+    // Writes resolve the folder, never the final name.
+    fs.writeFileSync(path.join(root, "SAVE", "slot1.sav"), "one");
+    assert.strictEqual(fs.readFileSync(path.join(root, "save/slot1.sav"), "utf8"), "one");
+    await new Promise((resolve, reject) =>
+        fs.writeFile(path.join(root, "SAVE", "slot2.sav"), "two",
+                     (error) => error ? reject(error) : resolve()));
+    await fs.promises.writeFile(path.join(root, "SAVE", "slot3.sav"), "three");
+    fs.mkdirSync(path.join(root, "SAVE", "NewFolder"));
+    assert(fs.statSync(path.join(root, "save/NewFolder")).isDirectory());
+    fs.renameSync(path.join(root, "SAVE", "slot1.sav"), path.join(root, "SAVE", "renamed.sav"));
+    assert.strictEqual(fs.readFileSync(path.join(root, "save/renamed.sav"), "utf8"), "one");
+    await new Promise((resolve, reject) =>
+        fs.unlink(path.join(root, "SAVE", "slot2.sav"),
+                  (error) => error ? reject(error) : resolve()));
+    await fs.promises.unlink(path.join(root, "SAVE", "slot3.sav"));
+
+    // A file added after the folder was read is found by a case-blind miss.
+    fs.readdirSync(root);
+    fs.writeFileSync(path.join(root, "New.dat"), "new");
+    assert(fs.existsSync(path.join(root, "NEW.DAT")));
+    console.log("fs wrappers ok");
+}
+main().catch((error) => { console.error(error); process.exit(1); });
+'''
+        result = subprocess.run(["node", "-e", script, "casefold", str(app),
+                                 str(ROOT / "nwjs-casefold.js")],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fs wrappers ok", result.stdout)
+        # The last write landed in the existing Save folder, not a new SAVE.
+        self.assertFalse((app / "SAVE").exists())
+        self.assertTrue((app / "Save" / "NewFolder").is_dir())
+
     def test_a_game_can_turn_off_the_defaults_gamescope_options(self):
         # The defaults say fullscreen at 1920x1080. A game's own "no override,
         # not fullscreen" has to be written, as an empty value, or the
