@@ -38,6 +38,7 @@ INHERITED = {
     "nwjs": ("nwjs",),
     "casefold": ("casefold",),
     "webgl": ("webgl",),
+    "kawariki": ("kawariki",),
     "with_proton": ("with_proton",),
     "resolution": ("gamescope_args",),
 }
@@ -64,7 +65,7 @@ def file_choice(key, values):
         return "proton" if value == "proton" else "auto"
     if key == "x11_backend":
         return "satellite" if value == "satellite" else "gamescope"
-    if key == "casefold":
+    if key in ("casefold", "kawariki"):
         return "0" if value == "0" else "1"
     if key == "webgl":
         return "vulkan" if value == "vulkan" else "auto"
@@ -238,7 +239,7 @@ class Preferences:
         self.request = request
         self.defaults_only = bool(request.get("defaults"))
         self.values = dict(request.get("values", {}))
-        for key in ("x11_backend", "proton", "nwjs", "casefold", "webgl", "with_proton"):
+        for key in ("x11_backend", "proton", "nwjs", "casefold", "webgl", "kawariki", "with_proton"):
             self.values[key] = file_choice(key, self.values)
         for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
@@ -319,6 +320,10 @@ class Preferences:
     @property
     def nwjs_controls(self):
         return self.defaults_only or self.engine == "nwjs"
+
+    @property
+    def mkxp_controls(self):
+        return self.defaults_only or self.engine == "mkxp"
 
     @property
     def lan_controls(self):
@@ -513,6 +518,8 @@ class Preferences:
             result["nwjs"] = self.values.get("nwjs", "auto")
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
+        if self.mkxp_controls:
+            result["kawariki"] = self.values.get("kawariki", "1")
         if self.dotnet_controls:
             result["dotnet"] = self.values["dotnet"]
         if self.with_proton_controls:
@@ -810,6 +817,8 @@ class Dialog:
         self.choice("nwjs", "NW.js version", [(p, "Newest installed (auto)" if p == "auto" else p) for p in nwjs])
         self.choice("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")])
         self.choice("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")])
+        self.choice("kawariki", "Kawariki compatibility patches",
+                    [("1", "On"), ("0", "Off")])
         self.switch("dotnet", ".NET runtime (yours, read-only)", self.state.values["dotnet"] == "1",
                     lambda widget, *_: self.set_value("dotnet", "1" if widget.get_active() else "0"))
         native_proton = self.state.values["with_proton"]
@@ -930,6 +939,7 @@ class Dialog:
         self.rows["hide_tray"].set_visible(self.state.proton_controls)
         for key in ("nwjs", "casefold", "webgl"):
             self.rows[key].set_visible(self.state.nwjs_controls)
+        self.rows["kawariki"].set_visible(self.state.mkxp_controls)
         self.rows["resolution"].set_visible(self.state.uses_gamescope)
         # Split display keeps gamescope windowed (see sandbox-game).
         self.rows["fullscreen"].set_visible(self.state.uses_gamescope and self.state.display != "wayland-x11")

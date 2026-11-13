@@ -208,7 +208,7 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "NWJS_DIR",
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "KAWARIKI_DIR", "PGMMV_DIR", "NWJS_DIR",
                     "SANDBOX_DIALOG", "XDG_DATA_HOME",
                     "SANDBOX_GPU_CARD", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64"):
             self.env.pop(key, None)
@@ -1403,6 +1403,70 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("9.9.9 not found", result.stderr)
         self.assertIn("0.50.0 0.40.0", result.stderr)
+
+    def test_mkxp_kawariki_follows_the_preference_without_rewriting_the_config(self):
+        mkxp = self.base / "mkxp-z"
+        mkxp.mkdir()
+        (mkxp / "mkxp-z").write_text("#!/bin/sh\nexit 0\n")
+        (mkxp / "mkxp-z").chmod(0o755)
+        (mkxp / "mkxp.json").write_text('{"fontSub": ["Arial>Liberation Sans"]}\n')
+        kawariki = self.home / ".local" / "share" / "kawariki"
+        (kawariki / "mkxp").mkdir(parents=True)
+        (kawariki / "mkxp" / "preload.rb").write_text("# preload\n")
+        self.env.pop("KAWARIKI_DIR", None)
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        capture.mkdir(parents=True)
+        baseline = ('{\n'
+                    '  // keep this comment\n'
+                    '  "preloadScript": [\n'
+                    '    "/mkxp/scripts/preload/win32_wrap.rb",\n'
+                    '  ],\n'
+                    '  "fontSub": ["Arial>Liberation Sans"],\n'
+                    '}\n')
+        (capture / "mkxp.json").write_text(baseline)
+        args = self.recorded_args("--mkxp=" + str(mkxp))
+        self.assertIn(["--ro-bind", str(kawariki), "/kawariki"],
+                      [args[i:i + 3] for i in range(len(args))])
+        added = (capture / "mkxp.json").read_text()
+        self.assertIn('"/kawariki/mkxp/preload.rb"', added)
+        # Last, after win32_wrap, which it replaces for games that use Win32API.
+        self.assertLess(added.index("win32_wrap.rb"), added.index("/kawariki/mkxp/preload.rb"))
+        self.assertIn("keep this comment", added)
+        self.assertIn('"fontSub": ["Arial>Liberation Sans"]', added)
+        # Turning it off removes only the entry, leaving the original bytes.
+        config = self.home / ".config" / "sandbox-game"
+        (config / "games").mkdir(parents=True, exist_ok=True)
+        (config / "games" / name).write_text("kawariki=0\n")
+        args = self.recorded_args("--mkxp=" + str(mkxp))
+        self.assertNotIn(["--ro-bind", str(kawariki), "/kawariki"],
+                         [args[i:i + 3] for i in range(len(args))])
+        self.assertEqual((capture / "mkxp.json").read_text(), baseline)
+        # Installed or not, kawariki=0 leaves the launch alone.
+        (config / "games" / name).unlink()
+        shutil.rmtree(kawariki)
+        (capture / "mkxp.json").write_text(baseline)
+        args = self.recorded_args("--mkxp=" + str(mkxp))
+        self.assertNotIn("/kawariki", args)
+        self.assertNotIn("/kawariki/mkxp/preload.rb", (capture / "mkxp.json").read_text())
+
+    def test_mkxp_without_a_preload_script_warns_and_is_left_alone(self):
+        mkxp = self.base / "mkxp-z"
+        mkxp.mkdir()
+        (mkxp / "mkxp-z").write_text("#!/bin/sh\nexit 0\n")
+        (mkxp / "mkxp-z").chmod(0o755)
+        kawariki = self.home / ".local" / "share" / "kawariki"
+        (kawariki / "mkxp").mkdir(parents=True)
+        (kawariki / "mkxp" / "preload.rb").write_text("# preload\n")
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        capture.mkdir(parents=True)
+        original = '{"gameFolder": "/game"}\n'
+        (capture / "mkxp.json").write_text(original)
+        self.recorded_args("--mkxp=" + str(mkxp))
+        result = self.cli("--headless", "--mkxp=" + str(mkxp), self.game, "/bin/true")
+        self.assertIn("no preloadScript array", result.stderr)
+        self.assertEqual((capture / "mkxp.json").read_text(), original)
 
     def test_a_game_can_turn_off_the_defaults_gamescope_options(self):
         # The defaults say fullscreen at 1920x1080. A game's own "no override,

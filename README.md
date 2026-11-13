@@ -581,6 +581,20 @@ binary moved out on its own will not start. Also searched under
 `~/.local/lib/mkxp*`, `~/mkxp*`, `~/Games/mkxp*` and `/opt/mkxp*`;
 `MKXP_DIR=/path` overrides.
 
+[Kawariki](https://github.com/Orochimarufan/Kawariki) (GPL-3.0) is a preload
+that patches Windows-only RGSS scripts and plugins. It is not bundled: it is
+searched for under `~/.local/share/kawariki*`, `~/.local/lib/kawariki*`,
+`~/kawariki*`, `~/Games/kawariki*` and `/opt/kawariki*`, and
+`KAWARIKI_DIR=/path` overrides. Its preload entry point is added last in the
+captured `mkxp.json`, after `win32_wrap`, as Kawariki's own launcher does.
+When a game's scripts call `Win32API.new`, Kawariki replaces the stock
+Win32API, `win32_wrap`'s included, with its own: the common kernel32 and
+user32 calls (ini files, key state, cursor and window queries) are
+implemented, and any other call becomes a stub that does nothing and says so
+in the log. A game that worked better with `win32_wrap` alone can turn
+Kawariki off with `kawariki=0`. The root is mounted read-only at `/kawariki`;
+a game without Kawariki installed runs without it.
+
 Japanese games want a Japanese font installed — VL Gothic is the usual one — for
 `fontSub` in `mkxp.json` to have anything to substitute.
 
@@ -692,7 +706,7 @@ gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version and mod loaders are asked for
 Windows games only; the NW.js version, whether file names ignore case, and what
-WebGL runs on, for RPG Maker MV/MZ only.
+WebGL runs on, for RPG Maker MV/MZ only. Kawariki is asked for mkxp-z games.
 The .NET runtime and Proton for a program that starts Wine itself are asked for
 native programs only; see [Native programs that need .NET, or run Wine
 themselves](#native-programs-that-need-net-or-run-wine-themselves).
@@ -704,7 +718,7 @@ Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
 Each dropdown (launch with, display, X11 backend, Proton version, NW.js
-version, file names, WebGL, Proton for a program that starts Wine
+version, file names, WebGL, Kawariki, Proton for a program that starts Wine
 itself, gamescope resolution) starts with **Default — …**, naming the value it
 stands for. For a game that
 is the defaults' value; for the defaults it is the built-in one. Choosing it
@@ -799,7 +813,7 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--mod-loaders` | with `--proton`: load the mod loader a game ships, such as BepInEx; see [Mods](#mods-bepinex-melonloader-and-other-dll-loaders) |
 | `--steam` | with `--proton`: start the program through Proton's `steam.exe`, as Steam does, instead of as a non-Steam program; see [Windows games — Proton](#windows-games--proton) |
 | `--hide-tray` | with `--proton`: keep closed the window Wine shows tray icons in; see [Windows games — Proton](#windows-games--proton) |
-| `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
+| `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z; Kawariki is used when installed and `kawariki=1` |
 | `--nwjs-version=VER` | the NW.js build for an RPG Maker MV/MZ game, by the version in its directory name; `NWJS_DIR` still wins |
 | `--pgmmv[=DIR]` | run a Pixel Game Maker MV game natively; `CMD` is optional and supplies extra player arguments |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
@@ -1042,14 +1056,17 @@ Both refuse while the game runs, and ask first when run in a terminal.
 `mkxp.json` is generated from the runtime's own commented one on first launch,
 however that is laid out, with `gameFolder` and the preload scripts added,
 and then left alone, so per-game tweaks — a soundfont, RTP paths, `fontSub` —
-survive the next start.
+survive the next start. The one exception is Kawariki's own `preloadScript`
+entry, which is added or removed on each launch from the `kawariki` setting;
+everything else in the file stays byte for byte as written. A file without a
+`preloadScript` array is left alone, with a warning.
 
 The host environment is cleared. The launcher supplies `HOME`, user names, a
 fixed `/usr/bin:/bin` search path, private XDG directories, locale/timezone/terminal
 settings and the selected display variables. Tokens, session-bus addresses and
 loader overrides are not inherited; pass necessary game-specific settings with
 `--env KEY=VALUE`. Variables read on the host still work: the runtime
-discovery ones (`PROTON_DIR`, `MKXP_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
+discovery ones (`PROTON_DIR`, `MKXP_DIR`, `KAWARIKI_DIR`, `NWJS_DIR`), `SANDBOX_TOOLS_DIR`,
 `SANDBOX_SECCOMP`, `SANDBOX_GPU_CARD` and `SANDBOX_X11_TIMEOUT`, and
 `MANGOHUD=1` still selects the overlay.
 
@@ -1723,6 +1740,7 @@ launch_with=auto|proton
 nwjs=auto|<version>
 casefold=0|1
 webgl=auto|vulkan
+kawariki=0|1
 gamescope=0|1
 host_x11=0|1
 gamescope_args=-f -W 2560 -H 1440
@@ -1783,6 +1801,8 @@ Windows game. This refreshes the prefix's builtin DLLs, including dependencies
 needed by Direct3D; the native launcher manages its own prefix.
 `nwjs` applies only to RPG Maker MV/MZ and names a found build by the version
 in its directory name; `auto` is the newest, and `NWJS_DIR` overrides it.
+`kawariki` applies only under mkxp-z; it defaults to `1` and does nothing when
+Kawariki is not installed.
 `lan` and `lan_allow` apply only with `net=1`.
 `hosts` and `hosts_writable` apply only with `private_hosts=1`; commas separate
 the entries in `hosts`.

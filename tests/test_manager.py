@@ -617,6 +617,11 @@ class LibraryTests(unittest.TestCase):
         self.library.save_preferences(entry["name"], {"scope": "game", "nwjs": "0.40.0"})
         self.assertEqual(self.library.scope_settings(entry["name"])["nwjs"], "0.40.0")
 
+    def test_kawariki_setting_saves_for_its_game(self):
+        entry = self.library.create("game")
+        self.library.save_preferences(entry["name"], {"scope": "game", "kawariki": "0"})
+        self.assertEqual(self.library.scope_settings(entry["name"])["kawariki"], "0")
+
     def test_different_games_with_the_same_folder_name_get_separate_sandboxes(self):
         entries = []
         for parent in ("one", "two"):

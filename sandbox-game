@@ -82,6 +82,8 @@
 #               mkxp-z resolves everything relative to its own binary, never
 #               the cwd, so the game is handed over as "gameFolder": "/game"
 #               in a generated config bound over the runtime's own mkxp.json.
+#               Kawariki is found beside the other runtimes and added to that
+#               config unless kawariki=0 or it is not installed.
 #   --nwjs-version=VER  choose the NW.js build for an MV/MZ launch by the
 #               version in its directory name; $NWJS_DIR still overrides it.
 #               sandbox-game itself only resolves and checks it -- "Sandbox
@@ -941,7 +943,7 @@ Examples
   sandbox-game --mkxp ~/Games/SomeVXAceGame
   sandbox-game --pgmmv ~/Games/SomePixelGameMakerGame
 
-Read on the host: PROTON_DIR, MKXP_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBOX_TOOLS_DIR,
+Read on the host: PROTON_DIR, MKXP_DIR, KAWARIKI_DIR, PGMMV_DIR, NWJS_DIR, DOTNET_ROOT, SANDBOX_TOOLS_DIR,
 SANDBOX_SECCOMP=log, SANDBOX_SECCOMP_POLICY=allowlist, SANDBOX_GPU_CARD=1,
 SANDBOX_SEPARATE_UID=1, SANDBOX_X11_TIMEOUT=SECONDS, MANGOHUD=1. Sound is playback only
 once `install.sh --restrict-audio` has set that up.
@@ -1650,6 +1652,22 @@ mkxp_bin() {                          # $1 = install dir -> binary name, if any
     [ -n "$b" ] || return 1
     basename "$b"
 }
+# Kawariki is a preload of its own: its root holds mkxp/preload.rb, which
+# patches Windows-only RGSS scripts and loads its Win32API stubs. First hit
+# wins, as for mkxp-z; KAWARIKI_DIR names the root outright.
+find_kawariki() {                     # $1 = auto | root -> install dir
+    local spec="$1" d
+    if [ "$spec" != auto ]; then
+        [ -f "${spec%/}/mkxp/preload.rb" ] && printf '%s\n' "${spec%/}"
+        return 0
+    fi
+    for d in "$HOME/.local/share"/kawariki*/ "$HOME/.local/lib"/kawariki*/ \
+             "$HOME"/kawariki*/ "$HOME/Games"/kawariki*/ /opt/kawariki*/; do
+        d="${d%/}"
+        if [ -d "$d" ] && [ -f "$d/mkxp/preload.rb" ]; then printf '%s\n' "$d"; return 0; fi
+    done
+    return 0
+}
 
 MKXP=""; MKXP_ARGS=()
 if [ -n "$MKXP_SPEC" ]; then
@@ -1661,6 +1679,16 @@ if [ -n "$MKXP_SPEC" ]; then
         echo "looked for a dir with an executable mkxp* binary under:" >&2
         echo "  ~/.local/share/mkxp*  ~/.local/lib/mkxp*  ~/mkxp*  ~/Games/mkxp*  /opt/mkxp*" >&2
         echo "override with MKXP_DIR=/path/to/mkxp-z-install" >&2; exit 1; }
+    # Kawariki is optional and only matters when installed: without it the
+    # launch goes on exactly as before. It goes last, after win32_wrap, as its
+    # own launcher puts it: when a game's scripts call Win32API.new, Kawariki
+    # removes the Win32API that is there, win32_wrap's included, and defines
+    # its own, which covers the common kernel32/user32 calls and stubs the rest.
+    KAWARIKI=""
+    if [ "$(cfg_get kawariki 1)" = 1 ]; then
+        KAWARIKI="${KAWARIKI_DIR:-$(find_kawariki auto)}"
+        [ -z "$KAWARIKI" ] || [ -f "$KAWARIKI/mkxp/preload.rb" ] || KAWARIKI=""
+    fi
     # mkxp-z resolves gameFolder against its own binary, never the cwd, so the
     # game has to be named outright. Seed the config from the runtime's own
     # commented one and then leave it alone, so per-game tweaks (fontSub, RTP,
@@ -1679,6 +1707,10 @@ if [ -n "$MKXP_SPEC" ]; then
             [ "$first" = 1 ] || echo ','
             printf '        "/mkxp/scripts/preload/%s.rb"' "$f"; first=0
         done
+        if [ -n "$KAWARIKI" ]; then
+            [ "$first" = 1 ] || echo ','
+            printf '        "/kawariki/mkxp/preload.rb"'; first=0
+        fi
         echo; echo '    ],'
     }
     # Ours go in right after the object's opening brace, wherever that is --
@@ -1709,6 +1741,175 @@ while i < n:
         i += 1
 sys.exit(1)
 PY
+    # The captured config is seeded once and then belongs to the game. Only
+    # Kawariki's own entry in preloadScript changes from launch to launch: add
+    # it or take it out, leaving comments, trailing commas and every other
+    # byte as they were. A config without such an array is left alone.
+    read -r -d '' MKXP_KAWARIKI <<'PY' || true
+import json, sys
+
+path, want, entry, enabled = sys.argv[1], sys.argv[2] == "1", sys.argv[3], sys.argv[4] == "1"
+with open(path, encoding="utf-8", newline="") as stream:
+    text = stream.read()
+
+def string_end(s, i):
+    quote, i = s[i], i + 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == quote:
+            return i + 1
+        else:
+            i += 1
+    return i
+
+def skip(s, i):
+    n = len(s)
+    while i < n:
+        if s[i].isspace():
+            i += 1
+        elif s.startswith("//", i):
+            j = s.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif s.startswith("/*", i):
+            j = s.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            break
+    return i
+
+n, i, depth, value = len(text), 0, 0, None
+while i < n:
+    c = text[i]
+    if c in "\"'":
+        start = i
+        i = string_end(text, i)
+        after = skip(text, i)
+        if depth == 1 and after < n and text[after] == ":":
+            rawkey = text[start:i]
+            if rawkey[0] == "'":
+                key = rawkey[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            else:
+                try:
+                    key = json.loads(rawkey)
+                except ValueError:
+                    key = None
+            if key == "preloadScript":
+                value = skip(text, after + 1)
+                break
+        continue
+    if text.startswith("//", i) or text.startswith("/*", i):
+        i = skip(text, i)
+    elif depth == 1 and (c.isalpha() or c in "_$"):
+        start = i
+        while i < n and (text[i].isalnum() or text[i] in "_$"):
+            i += 1
+        after = skip(text, i)
+        if text[start:i] == "preloadScript" and after < n and text[after] == ":":
+            value = skip(text, after + 1)
+            break
+    elif c == "{":
+        depth += 1
+        i += 1
+    elif c == "}":
+        depth -= 1
+        i += 1
+    else:
+        i += 1
+
+if value is None or value >= n or text[value] != "[":
+    if want or enabled or entry in text:
+        print("sandbox-game: warning: no preloadScript array in %s; Kawariki not changed"
+              % path, file=sys.stderr)
+    sys.exit(0)
+
+start = value
+i, depth = start + 1, 1
+while i < n:
+    c = text[i]
+    if c in "\"'":
+        i = string_end(text, i)
+    elif text.startswith("//", i) or text.startswith("/*", i):
+        i = skip(text, i)
+    elif c == "[":
+        depth += 1
+        i += 1
+    elif c == "]":
+        depth -= 1
+        if depth == 0:
+            break
+        i += 1
+    else:
+        i += 1
+if depth != 0:
+    print("sandbox-game: warning: unterminated preloadScript array in %s; Kawariki not changed"
+          % path, file=sys.stderr)
+    sys.exit(0)
+end = i
+
+items, i = [], start + 1
+while i < end:
+    i = skip(text, i)
+    if i >= end:
+        break
+    first = i
+    depth = 0
+    while i < end:
+        c = text[i]
+        if c in "\"'":
+            i = string_end(text, i)
+            continue
+        if text.startswith("//", i) or text.startswith("/*", i):
+            i = skip(text, i)
+            continue
+        if c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        i += 1
+    items.append((first, i))
+    if i < end:
+        i += 1
+
+def string_value(raw):
+    a = skip(raw, 0)
+    if a >= len(raw) or raw[a] not in "\"'":
+        return None
+    b = string_end(raw, a)
+    if skip(raw, b) != len(raw):
+        return None
+    if raw[a] == "'":
+        return raw[a + 1:b - 1].replace("\\'", "'").replace("\\\\", "\\")
+    try:
+        return json.loads(raw[a:b])
+    except ValueError:
+        return None
+
+at = next((k for k, (a, b) in enumerate(items) if string_value(text[a:b]) == entry), None)
+if want and at is None:
+    # Last, after win32_wrap, as on a fresh config: Kawariki replaces Win32API.
+    if items:
+        b = items[-1][1]
+        text = text[:b] + ", " + json.dumps(entry) + text[b:]
+    else:
+        text = text[:start + 1] + json.dumps(entry) + text[start + 1:]
+elif not want and at is not None:
+    # The inverse of the insertion above: from the end of the entry before.
+    a, b = items[at]
+    if at > 0:
+        text = text[:items[at - 1][1]] + text[b:]
+    elif at + 1 < len(items):
+        text = text[:a] + text[items[at + 1][0]:]
+    else:
+        j = skip(text, b)
+        text = text[:a] + text[j + 1 if j < end and text[j] == "," else b:]
+else:
+    sys.exit(0)
+with open(path, "w", encoding="utf-8", newline="") as stream:
+    stream.write(text)
+PY
     if [ ! -f "$CAP/mkxp.json" ]; then
         OURS="$(echo '    // added by sandbox-game: the game is bind-mounted at /game'
                 echo '    "gameFolder": "/game",'; mkxp_preload)"
@@ -1722,10 +1923,17 @@ PY
               echo '    "gameFolder": "/game"'; echo '}'; } > "$CAP/mkxp.json"
         fi
     fi
+    # The setting has to reach captures made before it existed: change only
+    # Kawariki's entry, so hand edits in the rest of the file stay put.
+    python3 -I -c "$MKXP_KAWARIKI" "$CAP/mkxp.json" \
+        "$([ -n "$KAWARIKI" ] && echo 1 || echo 0)" /kawariki/mkxp/preload.rb \
+        "$(cfg_get kawariki 1)" \
+        || echo "sandbox-game: warning: could not update Kawariki in $CAP/mkxp.json" >&2
     MKXP_ARGS=(
         --ro-bind "$MKXP" /mkxp
         --ro-bind "$CAP/mkxp.json" /mkxp/mkxp.json
     )
+    [ -z "$KAWARIKI" ] || MKXP_ARGS+=( --ro-bind "$KAWARIKI" /kawariki )
     set -- "/mkxp/$MKXP_BIN" "$@"
 fi
 

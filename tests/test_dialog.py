@@ -208,6 +208,18 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertTrue(defaults.nwjs_controls)
         self.assertEqual(defaults.inherited("nwjs"), "auto")
 
+    def test_kawariki_is_saved_for_mkxp_games(self):
+        mkxp = Preferences({"engine": "mkxp", "values": {"kawariki": "1"},
+                            "security": {"game": {"kawariki": "1"}, "all": {}}})
+        self.assertTrue(mkxp.mkxp_controls)
+        self.assertEqual(mkxp.result()["kawariki"], "1")
+        mkxp.choose("kawariki", "0")
+        self.assertEqual(mkxp.result()["kawariki"], "0")
+        self.assertFalse(Preferences({"engine": "nwjs", "values": {}}).mkxp_controls)
+        defaults = Preferences({"defaults": True, "values": {}})
+        self.assertTrue(defaults.mkxp_controls)
+        self.assertEqual(defaults.inherited("kawariki"), "1")
+
     def test_inherited_display_follows_the_runtime(self):
         defaults = {"wayland": "1", "wayland_x11": "1"}
         state = Preferences({"engine": "native", "can_proton": True, "values": dict(defaults),
@@ -225,7 +237,7 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertFalse(state.offers_default("with_proton"))
         self.assertFalse(state.offers_default("resolution"))
         self.assertEqual(state.inherited("display"), "x11")
-        self.assertEqual(state.result()["inherit"], "display,proton,nwjs,casefold,webgl")
+        self.assertEqual(state.result()["inherit"], "display,proton,nwjs,casefold,webgl,kawariki")
         # Merged values without each file's own (legacy callers): no Default.
         self.assertNotIn("inherit", Preferences({"engine": "native", "values": {}}).result())
 
@@ -574,6 +586,15 @@ class GtkDialogTests(unittest.TestCase):
         nwjs.save_preferences()
         self.assertEqual(self.responses[0][1]["nwjs"], "0.50.0")
         self.assertFalse(self.create("preferences", {"engine": "mkxp"}).rows["nwjs"].get_visible())
+
+    def test_kawariki_row_follows_the_engine(self):
+        nwjs = self.create("preferences", {"engine": "nwjs"})
+        self.assertFalse(nwjs.rows["kawariki"].get_visible())
+        mkxp = self.create("preferences", {"engine": "mkxp"})
+        self.assertTrue(mkxp.rows["kawariki"].get_visible())
+        mkxp.widgets["kawariki"].set_selected(1)
+        mkxp.save_preferences()
+        self.assertEqual(self.responses[0][1]["kawariki"], "0")
 
     def test_dotnet_switch_only_for_programs_needing_it(self):
         dialog = self.create("preferences", {"engine": "native", "dotnet": True})

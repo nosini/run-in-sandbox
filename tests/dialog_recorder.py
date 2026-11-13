@@ -33,6 +33,8 @@ if state.engine == "nwjs":
 fields += ["net", "scope"]
 if state.nwjs_controls:
     fields += ["nwjs"]
+if state.mkxp_controls:
+    fields += ["kawariki"]
 # Dropdowns are chosen as the window does, so that a choice equal to the
 # defaults is saved rather than left on Default.
 for key, value in zip(fields, form):
@@ -57,6 +59,8 @@ for key, value in zip(fields, form):
         state.choose(key, "0" if value == "Match exactly" else "1")
     elif key == "webgl":
         state.choose(key, "vulkan" if value == "Vulkan" else "auto")
+    elif key == "kawariki":
+        state.choose(key, "0" if value == "Off" else "1")
 # Controls outside the positional form, by key, as the window stores them.
 state.values.update(json.loads(os.environ.get("TEST_VALUES", "{}")))
 if os.environ.get("TEST_GS_FORM"):
