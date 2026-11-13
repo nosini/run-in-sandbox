@@ -31,6 +31,8 @@ if state.proton_controls:
 if state.engine == "nwjs":
     fields += ["casefold", "webgl"]
 fields += ["net", "scope"]
+if state.nwjs_controls:
+    fields += ["nwjs"]
 # Dropdowns are chosen as the window does, so that a choice equal to the
 # defaults is saved rather than left on Default.
 for key, value in zip(fields, form):
@@ -48,6 +50,8 @@ for key, value in zip(fields, form):
     elif key == "mod_loaders" or key == "net":
         state.values[key] = "0" if value == "Off" else "1"
     elif key == "proton":
+        state.choose(key, "auto" if value == "Newest installed (auto)" else value)
+    elif key == "nwjs":
         state.choose(key, "auto" if value == "Newest installed (auto)" else value)
     elif key == "casefold":
         state.choose(key, "0" if value == "Match exactly" else "1")

@@ -35,6 +35,7 @@ INHERITED = {
     "display": ("wayland", "wayland_x11", "gamescope", "host_x11"),
     "x11_backend": ("x11_backend",),
     "proton": ("proton",),
+    "nwjs": ("nwjs",),
     "casefold": ("casefold",),
     "webgl": ("webgl",),
     "with_proton": ("with_proton",),
@@ -67,7 +68,7 @@ def file_choice(key, values):
         return "0" if value == "0" else "1"
     if key == "webgl":
         return "vulkan" if value == "vulkan" else "auto"
-    if key == "proton":
+    if key in ("proton", "nwjs"):
         return value or "auto"
     return value
 
@@ -237,7 +238,7 @@ class Preferences:
         self.request = request
         self.defaults_only = bool(request.get("defaults"))
         self.values = dict(request.get("values", {}))
-        for key in ("x11_backend", "proton", "casefold", "webgl", "with_proton"):
+        for key in ("x11_backend", "proton", "nwjs", "casefold", "webgl", "with_proton"):
             self.values[key] = file_choice(key, self.values)
         for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
                     "hosts_writable"):
@@ -509,6 +510,7 @@ class Preferences:
                                   ("hide_tray", "0")):
                 result[key] = self.values.get(key, fallback)
         if self.nwjs_controls:
+            result["nwjs"] = self.values.get("nwjs", "auto")
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
         if self.dotnet_controls:
@@ -801,6 +803,11 @@ class Dialog:
                     lambda widget, *_: self.set_value("steam", "1" if widget.get_active() else "0"))
         self.switch("hide_tray", "Hide Wine's tray icon window", self.state.values.get("hide_tray") == "1",
                     lambda widget, *_: self.set_value("hide_tray", "1" if widget.get_active() else "0"))
+        nwjs = list(dict.fromkeys(["auto", *request.get("nwjs_versions", [])]))
+        pinned = self.state.values["nwjs"]
+        if pinned not in nwjs:
+            nwjs.append(pinned)
+        self.choice("nwjs", "NW.js version", [(p, "Newest installed (auto)" if p == "auto" else p) for p in nwjs])
         self.choice("casefold", "File names", [("1", "Ignore case, like Windows"), ("0", "Match exactly")])
         self.choice("webgl", "WebGL", [("auto", "Chromium's default"), ("vulkan", "Vulkan")])
         self.switch("dotnet", ".NET runtime (yours, read-only)", self.state.values["dotnet"] == "1",
@@ -921,7 +928,7 @@ class Dialog:
         self.rows["mod_loaders"].set_visible(self.state.proton_controls)
         self.rows["steam"].set_visible(self.state.proton_controls)
         self.rows["hide_tray"].set_visible(self.state.proton_controls)
-        for key in ("casefold", "webgl"):
+        for key in ("nwjs", "casefold", "webgl"):
             self.rows[key].set_visible(self.state.nwjs_controls)
         self.rows["resolution"].set_visible(self.state.uses_gamescope)
         # Split display keeps gamescope windowed (see sandbox-game).

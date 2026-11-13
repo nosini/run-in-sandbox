@@ -301,9 +301,11 @@ the ones actually used need to exist.
 
 Any Linux NW.js build. Searched for under `~/.config/nvm`,
 `~/.local/share/nwjs` and `~/nwjs` as a directory named `nwjs-*linux*`, newest
-by version; `NWJS_DIR=/path` overrides. Downloading a build from
-[nwjs.io](https://nwjs.io/) and unpacking it into `~/.local/share/nwjs/` works,
-as does `npm install -g nw`, which lands one at
+by version; `NWJS_DIR=/path` overrides. A game can choose another found build
+in its preferences (`nwjs=VER`, the version in the directory name), and
+`sandbox-game --list-nwjs` prints what was found, newest first. Downloading a
+build from [nwjs.io](https://nwjs.io/) and unpacking it into
+`~/.local/share/nwjs/` works, as does `npm install -g nw`, which lands one at
 `.../node_modules/nw/nwjs-*-linux-x64` — the search finds that as-is.
 
 RPG Maker ships `package.json` with an empty `"name"`, which NW.js refuses to
@@ -689,10 +691,11 @@ what the game can do is offered — a Windows game does not get Wayland in
 gamescope, which Wine's Wayland driver cannot use, and a Ren'Py build without
 SDL's Wayland driver gets only the X11 entries — and a setting it cannot have
 opens as what it gets instead. The Proton version and mod loaders are asked for
-Windows games only; whether file names ignore case, and what WebGL runs on, for RPG Maker
-MV/MZ only. The .NET runtime and Proton for a program that starts Wine itself
-are asked for native programs only; see [Native programs that need .NET, or run
-Wine themselves](#native-programs-that-need-net-or-run-wine-themselves).
+Windows games only; the NW.js version, whether file names ignore case, and what
+WebGL runs on, for RPG Maker MV/MZ only.
+The .NET runtime and Proton for a program that starts Wine itself are asked for
+native programs only; see [Native programs that need .NET, or run Wine
+themselves](#native-programs-that-need-net-or-run-wine-themselves).
 Turning on **Internet** shows the LAN controls, and **Private hosts file**
 the hosts entries; see [Network](#network).
 Choosing gamescope shows resolution and fullscreen controls inline.
@@ -700,9 +703,10 @@ Split display also offers **Private X11 backend**: gamescope or satellite.
 Save applies all changes together; Cancel or closing the window leaves the
 settings untouched.
 
-Each dropdown (launch with, display, X11 backend, Proton version, file names,
-WebGL, Proton for a program that starts Wine itself, gamescope resolution)
-starts with **Default — …**, naming the value it stands for. For a game that
+Each dropdown (launch with, display, X11 backend, Proton version, NW.js
+version, file names, WebGL, Proton for a program that starts Wine
+itself, gamescope resolution) starts with **Default — …**, naming the value it
+stands for. For a game that
 is the defaults' value; for the defaults it is the built-in one. Choosing it
 removes the setting from the file being saved, so it follows later changes to
 the defaults. A dropdown the game's file has no value for starts on Default;
@@ -748,15 +752,16 @@ sandbox-game [--wayland] [--name NAME] [--mangohud] [--gamescope[=ARGS]]
              [--host-x11|--headless] [--env K=V] [--ro SRC DST]
              [--dotnet[=DIR]] [--with-proton[=VER]] [--net [--allow-lan LIST|--lan]]
              [--hosts] [--add-host "ADDR NAME..."] [--hosts-writable]
+             [--nwjs-version=VER]
              [--proton[=VER] [--mod-loaders] [--steam] [--hide-tray]|--mkxp[=DIR]|--pgmmv[=DIR]] GAMEDIR CMD...
 sandbox-game --stop NAME | --stop-all
-sandbox-game --list | --reset-install NAME | --delete NAME
+sandbox-game --list | --reset-install NAME | --delete NAME | --list-nwjs
 ```
 
 `sandbox-game --help` lists the options. With bash-completion, Tab completes
 them too, along with running sandboxes after `--stop`, Proton installs after
-`--proton=`, and the command: type `/game/` and it lists the game's folder, as
-the sandbox will see it.
+`--proton=`, NW.js versions after `--nwjs-version=`, and the command: type
+`/game/` and it lists the game's folder, as the sandbox will see it.
 
 `CMD` refers to the game at `/game`, not at its path on disk:
 
@@ -795,11 +800,13 @@ sandbox-game --gamescope='-f -W 2560 -H 1440' --mangohud ~/Games/Unity /game/gam
 | `--steam` | with `--proton`: start the program through Proton's `steam.exe`, as Steam does, instead of as a non-Steam program; see [Windows games — Proton](#windows-games--proton) |
 | `--hide-tray` | with `--proton`: keep closed the window Wine shows tray icons in; see [Windows games — Proton](#windows-games--proton) |
 | `--mkxp[=DIR]` | run an RGSS game natively under mkxp-z |
+| `--nwjs-version=VER` | the NW.js build for an RPG Maker MV/MZ game, by the version in its directory name; `NWJS_DIR` still wins |
 | `--pgmmv[=DIR]` | run a Pixel Game Maker MV game natively; `CMD` is optional and supplies extra player arguments |
 | `--env K=V` | set a variable inside the sandbox; repeatable, applied last so it wins |
 | `--ro SRC DST` | bind something else in read-only |
 | `--print-name` | print the sandbox name for a directory and exit |
 | `--list-proton` | list the Proton installs found, newest first |
+| `--list-nwjs` | list the NW.js builds found, newest first |
 | `--check` | which protections hold on this machine, one line each: the sandbox itself, seccomp and its socket-family filter, Landlock, memory and CPU limits, playback-only sound, GPU render nodes, gamescope, the desktop's Wayland security context, `--net`, NTSYNC, and the 32-bit libraries Proton needs. `!!` marks something a sandbox here goes without (exit status 1), `--` something optional or not available by design |
 | `--stop NAME` | end a running sandbox and everything in it (the game, Wine, anything attached); for a game that hangs or holds on to the screen. Names as `sandbox-attach --list` shows them. The launch it ends exits cleanly, so no failure dialog. |
 | `--stop-all` | the same, for every running sandbox |
@@ -1713,6 +1720,7 @@ mod_loaders=0|1
 steam=0|1
 hide_tray=0|1
 launch_with=auto|proton
+nwjs=auto|<version>
 casefold=0|1
 webgl=auto|vulkan
 gamescope=0|1
@@ -1773,6 +1781,8 @@ When switching an existing prefix from another Wine, run that binary with
 `wineboot -u` and `WINEPREFIX` set to the launcher's prefix before starting the
 Windows game. This refreshes the prefix's builtin DLLs, including dependencies
 needed by Direct3D; the native launcher manages its own prefix.
+`nwjs` applies only to RPG Maker MV/MZ and names a found build by the version
+in its directory name; `auto` is the newest, and `NWJS_DIR` overrides it.
 `lan` and `lan_allow` apply only with `net=1`.
 `hosts` and `hosts_writable` apply only with `private_hosts=1`; commas separate
 the entries in `hosts`.

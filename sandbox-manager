@@ -186,7 +186,7 @@ def main():
             self.icon_wakeup = threading.Condition()
             # Scans cost a process or a walk of the whole prefix: keep their answers
             # until the library is refreshed, or an installer may have changed them.
-            self.proton_list, self.descriptions, self.program_lists = None, {}, {}
+            self.proton_list, self.nwjs_list, self.descriptions, self.program_lists = None, None, {}, {}
             self.proton_lock = threading.Lock()
             self.installers = set()
             self.last_poll = 0
@@ -449,6 +449,7 @@ def main():
             if rescan:
                 with self.proton_lock:
                     self.proton_list = None
+                    self.nwjs_list = None
             self.count.set_label("Refreshing library…")
             def loaded(located, error):
                 if self.reload_request is not request:
@@ -701,6 +702,12 @@ def main():
                     self.proton_list = self.library.protons()
                 return self.proton_list
 
+        def nwjs_versions(self):
+            with self.proton_lock:
+                if self.nwjs_list is None:
+                    self.nwjs_list = self.library.nwjs_versions()
+                return self.nwjs_list
+
         def scan_programs(self, entry, rescan=False):
             if entry["kind"] != "windows":
                 self.clear(self.program_list)
@@ -757,7 +764,8 @@ def main():
                 request.update(game=entry["title"], values=self.library.settings(entry["name"]),
                                security=scopes,
                                env={scope: values.get("env", "") for scope, values in scopes.items()},
-                               protons=self.protons(), uid_backend=self.library.uid_backend(entry["name"]),
+                               protons=self.protons(), nwjs_versions=self.nwjs_versions(),
+                               uid_backend=self.library.uid_backend(entry["name"]),
                                game_settings=(self.library.config / "games" / entry["name"]).exists())
                 return request
             def loaded(request, error):
@@ -803,7 +811,8 @@ def main():
                 values = self.library.scope_settings(None, defaults=True)
                 return dict(defaults=True, game="Defaults for all games", can_proton=True,
                             values=values, security={"all": values},
-                            env={"all": values.get("env", "")}, protons=self.protons())
+                            env={"all": values.get("env", "")}, protons=self.protons(),
+                            nwjs_versions=self.nwjs_versions())
             def loaded(request, error):
                 if self.defaults_window is not window:
                     return

@@ -190,8 +190,23 @@ class PreferencePolicyTests(unittest.TestCase):
         state.set_scope("all")
         self.assertEqual(state.choice("casefold"), "0")
         self.assertIsNone(state.choice("display"))
-        self.assertEqual(state.result()["inherit"], "display")
+        self.assertEqual(state.result()["inherit"], "display,nwjs")
         self.assertEqual(state.result()["casefold"], "0")
+
+    def test_nwjs_version_is_saved_for_nwjs_games(self):
+        nwjs = Preferences({"engine": "nwjs", "values": {"nwjs": "0.40.0"},
+                            "nwjs_versions": ["0.50.0", "0.40.0"],
+                            "security": {"game": {"nwjs": "0.40.0"}, "all": {}}})
+        self.assertTrue(nwjs.nwjs_controls)
+        self.assertEqual(nwjs.choice("nwjs"), "0.40.0")
+        self.assertEqual(nwjs.result()["nwjs"], "0.40.0")
+        nwjs.choose("nwjs", "0.50.0")
+        self.assertEqual(nwjs.result()["nwjs"], "0.50.0")
+        self.assertFalse(Preferences({"engine": "mkxp", "values": {}}).nwjs_controls)
+        # The defaults editor offers it, as it does every runtime's settings.
+        defaults = Preferences({"defaults": True, "values": {}})
+        self.assertTrue(defaults.nwjs_controls)
+        self.assertEqual(defaults.inherited("nwjs"), "auto")
 
     def test_inherited_display_follows_the_runtime(self):
         defaults = {"wayland": "1", "wayland_x11": "1"}
@@ -210,7 +225,7 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertFalse(state.offers_default("with_proton"))
         self.assertFalse(state.offers_default("resolution"))
         self.assertEqual(state.inherited("display"), "x11")
-        self.assertEqual(state.result()["inherit"], "display,proton,casefold,webgl")
+        self.assertEqual(state.result()["inherit"], "display,proton,nwjs,casefold,webgl")
         # Merged values without each file's own (legacy callers): no Default.
         self.assertNotIn("inherit", Preferences({"engine": "native", "values": {}}).result())
 
@@ -548,6 +563,17 @@ class GtkDialogTests(unittest.TestCase):
         self.assertEqual(self.responses[0][0], 0)
         self.assertEqual(self.responses[0][1]["launch_with"], "proton")
         self.assertEqual(self.responses[0][1]["proton"], "GE-Test")
+
+    def test_nwjs_version_row_follows_the_engine(self):
+        nwjs = self.create("preferences", {"engine": "nwjs", "nwjs_versions": ["0.50.0", "0.40.0"],
+                                            "security": {"game": {}, "all": {}}})
+        self.assertTrue(nwjs.rows["nwjs"].get_visible())
+        self.assertEqual([value for value, _ in nwjs.choices["nwjs"]],
+                         [None, "auto", "0.50.0", "0.40.0"])
+        nwjs.widgets["nwjs"].set_selected(2)
+        nwjs.save_preferences()
+        self.assertEqual(self.responses[0][1]["nwjs"], "0.50.0")
+        self.assertFalse(self.create("preferences", {"engine": "mkxp"}).rows["nwjs"].get_visible())
 
     def test_dotnet_switch_only_for_programs_needing_it(self):
         dialog = self.create("preferences", {"engine": "native", "dotnet": True})

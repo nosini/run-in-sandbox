@@ -142,6 +142,40 @@ derive_names() {
 
 is_nwapp() { [ -e "$1/package.json" ] || [ -e "$1/index.html" ]; }
 
+# NW.js builds unpacked under the usual places, as "VERSION<TAB>DIR", newest
+# first. A build's version is the one in its directory name, as nwjs.io and
+# "npm install -g nw" name it.
+nwjs_installs() {
+    local base d name ver
+    for base in "$HOME/.config/nvm" "$HOME/.local/share/nwjs" "$HOME/nwjs"; do
+        [ -d "$base" ] || continue
+        while IFS= read -r d; do
+            [ -d "$d" ] && [ -x "$d/nw" ] || continue
+            name="${d##*/}"
+            ver="$(grep -oE '[0-9]+(\.[0-9]+)+' <<<"$name" | tail -n1 || true)"
+            [ -n "$ver" ] || continue
+            printf '%s\t%s\n' "$ver" "$d"
+        done < <(find "$base" -type d -name 'nwjs-*linux*' 2>/dev/null)
+    done | sort -Vr -k1,1
+}
+
+list_nwjs() {                         # every build found, newest first
+    nwjs_installs | cut -f1 | awk '!seen[$0]++'
+}
+
+find_nwjs() {                         # $1 = auto | version | path -> build dir
+    local spec="$1" ver d
+    if [ "$spec" != auto ] && [ -d "${spec%/}" ] && [ -x "${spec%/}/nw" ]; then
+        printf '%s\n' "${spec%/}"; return 0
+    fi
+    while IFS="$(printf '\t')" read -r ver d; do
+        if [ "$spec" = auto ] || [ "$ver" = "$spec" ]; then
+            printf '%s\n' "$d"; return 0
+        fi
+    done < <(nwjs_installs)
+    return 0
+}
+
 # Programs among the files given, for this machine: ELF executables or PIE
 # programs for its architecture, going by their headers alone, never by
 # running them. Shared libraries have no entry point and do not count; nor do
@@ -392,7 +426,7 @@ renpy_without_wayland() {                      # $1 = game dir
 # WL=1 when native Wayland was chosen; DOTNET_APP=1 for a .NET program.
 # shellcheck disable=SC2034  # outputs, read by whoever sourced this
 pref_flags() {
-    local host_x11 split=0 gs=0 x11_exe x11_backend lan_allow e wp ga pv
+    local host_x11 split=0 gs=0 x11_exe x11_backend lan_allow e wp ga pv nv
     local -a host_entries cfg_env
     FLAG=( --name "$NAME" )
     host_x11="$(cfg_get host_x11 0)"
@@ -471,6 +505,12 @@ pref_flags() {
         [ "$(cfg_get steam 0)" = 1 ] && FLAG+=( --steam )
         [ "$(cfg_get hide_tray 0)" = 1 ] && FLAG+=( --hide-tray )
     fi
+    # NW.js selects its runtime beside the game, so this only says which of the
+    # found builds to use. NWJS_DIR still overrides the choice outright.
+    if [ -n "$APPDIR" ] && [ -z "${NWJS_DIR:-}" ]; then
+        nv="${NWJS_CHOICE:-$(cfg_get nwjs auto)}"
+        [ "$nv" = auto ] || FLAG+=( "--nwjs-version=$nv" )
+    fi
 }
 
 # Write one preferences window's answer ($1, JSON) for NAME: into its own
@@ -486,7 +526,7 @@ import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud", "hdr",
         "wayland_x11", "x11_exe", "x11_backend",
-        "net", "proton", "mod_loaders", "steam", "hide_tray", "casefold", "webgl",
+        "net", "proton", "mod_loaders", "steam", "hide_tray", "nwjs", "casefold", "webgl",
         "gamescope_resolution", "gamescope_fullscreen", "dotnet", "with_proton",
         "lan", "lan_allow", "mac_vendor", "private_hosts", "hosts", "hosts_writable", "env", "require",
         "separate_uid", "seccomp_policy", "seccomp", "inherit"}
@@ -495,8 +535,9 @@ assert all(k in keys and isinstance(v, str) and not any(c in v for c in "\n\r\t\
            for k, v in values.items())
 assert values.get("x11_backend", "gamescope") in {"gamescope", "satellite"}
 # Dropdowns left on Default: their keys are removed from the file.
-assert all(word in {"launch_with", "display", "x11_backend", "proton", "casefold", "webgl", "with_proton",
-                    "resolution"} for word in values.get("inherit", "").split(",") if word)
+assert all(word in {"launch_with", "display", "x11_backend", "proton", "nwjs", "casefold", "webgl",
+                    "with_proton", "resolution"}
+           for word in values.get("inherit", "").split(",") if word)
 for key, choices in (("separate_uid", {"", "0", "1", "systemd"}),
                      ("seccomp_policy", {"", "denylist", "allowlist"}),
                      ("seccomp", {"", "enforce", "log"})):
@@ -591,7 +632,7 @@ PY
         fi
     fi
 
-    bools="wayland wayland_x11 host_x11 mangohud hdr gamescope net launch_with mod_loaders steam hide_tray casefold webgl proton
+    bools="wayland wayland_x11 host_x11 mangohud hdr gamescope net launch_with mod_loaders steam hide_tray nwjs casefold webgl proton
            dotnet lan mac_vendor private_hosts hosts_writable"
     optional="with_proton lan_allow hosts x11_exe x11_backend require"
     security="$SECURITY_PREF_KEYS"
@@ -600,7 +641,7 @@ PY
         for key in $bools; do
             [[ "$inherited" != *" $key "* ]] || continue
             saved_key "$key" || continue
-            case "$key" in launch_with|webgl|proton) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
+            case "$key" in launch_with|webgl|proton|nwjs) fallback=auto ;; casefold) fallback=1 ;; *) fallback=0 ;; esac
             printf '%s=%s\n' "$key" "$(chosen "$key" "$fallback")"
         done
         if [ "$TARGET" = "$CFGDIR/defaults" ]; then

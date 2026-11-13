@@ -4,7 +4,8 @@
 #
 # Completes the options; running sandboxes after --stop; existing ones after
 # --name, --delete and --reset-install; requirement names after --require;
-# Proton installs after --proton= and --with-proton=; directories for GAMEDIR;
+# Proton installs after --proton= and --with-proton=, NW.js versions after
+# --nwjs-version=; directories for GAMEDIR;
 # and, for the command, paths inside GAMEDIR written the way the sandbox sees
 # them -- type /game/ and it lists the game's folder.
 
@@ -98,7 +99,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require) skip=1 ;;
+            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require | --nwjs-version) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -152,6 +153,16 @@ _sandbox_game()
                 fi
                 return
             fi ;;
+        --nwjs-version)
+            if [[ $split_here ]]; then
+                if [[ $cur == [/~.]* ]]; then
+                    _sandbox_game_filedir -d
+                else
+                    local IFS=$'\n'
+                    COMPREPLY=($(compgen -W "$(sandbox-game --list-nwjs 2>/dev/null)" -- "$cur"))
+                fi
+                return
+            fi ;;
         --mkxp | --pgmmv | --dotnet)
             [[ $split_here ]] && { _sandbox_game_filedir -d; return; } ;;
     esac
@@ -160,14 +171,14 @@ _sandbox_game()
         return
     fi
 
-    # --proton, --gamescope, --mkxp, --pgmmv, --dotnet and --with-proton take an
-    # optional =VALUE; they are listed plain, and typing the = gets the values
-    # completed.
+    # --proton, --gamescope, --mkxp, --nwjs-version, --pgmmv, --dotnet and
+    # --with-proton take an optional =VALUE; they are listed plain, and typing
+    # the = gets the values completed.
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-backend --x11-exe --gamescope --host-x11 --headless
-            --proton --mod-loaders --steam --hide-tray --mkxp --pgmmv --dotnet --with-proton --net --allow-lan
+            --proton --mod-loaders --steam --hide-tray --mkxp --nwjs-version --pgmmv --dotnet --with-proton --net --allow-lan
             --lan --mac-vendor --hosts --add-host --hosts-writable --ro --require --name --env --mangohud --hdr --list --stop
-            --stop-all --reset-install --delete --print-name --list-proton --check --help' -- "$cur"))
+            --stop-all --reset-install --delete --print-name --list-proton --list-nwjs --check --help' -- "$cur"))
         return
     fi
     _sandbox_game_filedir -d                   # GAMEDIR

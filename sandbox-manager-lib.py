@@ -667,6 +667,11 @@ PY
                                 check=True, text=True, timeout=10)
         return result.stdout.splitlines()
 
+    def nwjs_versions(self):
+        result = subprocess.run([str(self.backend), "--list-nwjs"], capture_output=True,
+                                check=True, text=True, timeout=10)
+        return result.stdout.splitlines()
+
     def running(self):
         """Ask the existing namespace-aware process scanner, never trust metadata."""
         attach = self.backend.with_name("sandbox-attach")

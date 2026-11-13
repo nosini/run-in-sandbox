@@ -82,6 +82,10 @@
 #               mkxp-z resolves everything relative to its own binary, never
 #               the cwd, so the game is handed over as "gameFolder": "/game"
 #               in a generated config bound over the runtime's own mkxp.json.
+#   --nwjs-version=VER  choose the NW.js build for an MV/MZ launch by the
+#               version in its directory name; $NWJS_DIR still overrides it.
+#               sandbox-game itself only resolves and checks it -- "Sandbox
+#               game" uses the same choice to bind that runtime.
 #   --pgmmv    run a Pixel Game Maker MV / Action Game Maker MV game with the
 #               native Linux player. CMD is optional: extra player arguments.
 #               =DIR names the whole bundle with bin/, lib/ and share/;
@@ -855,7 +859,7 @@ usage() {
 usage: sandbox-game [OPTIONS] GAMEDIR CMD...
        sandbox-game --list | --stop NAME | --stop-all
        sandbox-game --reset-install NAME | --delete NAME
-       sandbox-game --print-name GAMEDIR | --list-proton | --check | --help
+       sandbox-game --print-name GAMEDIR | --list-proton | --list-nwjs | --check | --help
 
 Runs CMD in a bwrap sandbox: no network, no home directory, GAMEDIR at /game
 as an overlay. Everything the game writes lands in ~/game-sandboxes/NAME/.
@@ -882,6 +886,8 @@ Runtimes
                         as Steam does, rather than as a non-Steam program
   --hide-tray           with --proton: hide Wine's window for tray icons
   --mkxp[=DIR]          RPG Maker XP/VX/VX Ace under mkxp-z; CMD optional
+  --nwjs-version=VER    the NW.js build for an MV/MZ game, by version
+                        ($NWJS_DIR wins); used by "Sandbox game"
   --pgmmv[=DIR]         Pixel Game Maker MV under the Linux player; CMD optional
   --dotnet[=DIR]        the host's .NET runtime, for a .NET program that does
                         not bundle it
@@ -923,6 +929,7 @@ Managing sandboxes
   --delete NAME         delete a sandbox: saves, settings, Wine prefix
   --print-name GAMEDIR  the sandbox name a folder gets
   --list-proton         the Proton installs found, newest first
+  --list-nwjs           the NW.js builds found, newest first
   --check               which protections hold on this machine, one line each,
                         and whether the saved requirements can be met
   -h, --help            this
@@ -953,7 +960,7 @@ add_env() {                           # reads $_e as KEY=VALUE
 
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
 # to it here would switch the overlay off for anyone who exports MANGOHUD=1.
-WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
+WAYLAND=0; NAME=""; EXTRA_RO=(); PROTON_SPEC=""; MKXP_SPEC=""; NWJS_SPEC=""; PGMMV_SPEC=""; MHUD=0; PRINT_NAME=0
 GS=0; GS_ARGS=(); ENV_ARGS=(); HOST_X11=0; HEADLESS=0; NET=0; MODS=0; STEAM=0; HIDE_TRAY=0; MAC_VENDOR=0
 WAYLAND_X11=0; X11_EXE=""; HDR=0; X11_BACKEND=gamescope; X11_BACKEND_SET=0; GS_SET=0
 DOTNET_SPEC=""; WITH_PROTON_SPEC=""; LAN_ALLOW=(); LAN_ALL=0; HOSTS=0; HOSTS_RW=0; HOSTS_ADD=()
@@ -981,6 +988,7 @@ while [ "$#" -gt 0 ]; do
         --gamescope=*) GS=1; GS_SET=1; read -r -a GS_ARGS <<<"${1#--gamescope=}"; shift ;;
         --print-name) PRINT_NAME=1; shift ;;
         --list-proton) list_protons; exit 0 ;;
+        --list-nwjs) list_nwjs; exit 0 ;;
         -h|--help)   usage; exit 0 ;;
         --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
         --stop=*)    _n="${1#--stop=}"   # empty is --stop-all's job, never this one's
@@ -999,6 +1007,11 @@ while [ "$#" -gt 0 ]; do
         --hide-tray) HIDE_TRAY=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
+        --nwjs-version) [ -n "${2:-}" ] && [[ "$2" != -* ]] || {
+                           echo "--nwjs-version needs a version (--nwjs-version=VERSION for one starting with -)" >&2
+                           exit 1; }
+                     NWJS_SPEC="$2"; shift 2 ;;
+        --nwjs-version=*) NWJS_SPEC="${1#--nwjs-version=}"; NWJS_SPEC="${NWJS_SPEC:-auto}"; shift ;;
         --pgmmv)     PGMMV_SPEC="auto"; shift ;;
         --pgmmv=*)   PGMMV_SPEC="${1#--pgmmv=}"; PGMMV_SPEC="${PGMMV_SPEC:-auto}"; shift ;;
         --dotnet)    DOTNET_SPEC="auto"; shift ;;
@@ -1056,6 +1069,31 @@ case "$X11_BACKEND" in gamescope|satellite) ;; *)
     echo "--allow-lan and --lan widen --net: they need it" >&2; exit 1; }
 [ "$NET" = 1 ] || [ "$MAC_VENDOR" = 0 ] || {
     echo "--mac-vendor is about the network card --net gives: it needs --net" >&2; exit 1; }
+
+# NW.js runs beside the game, under "Sandbox game"; this checks a version here
+# too, so a saved choice fails at the launch rather than in the wrapper.
+NWJS=""
+if [ -n "$NWJS_SPEC" ]; then
+    if [ -n "${NWJS_DIR:-}" ]; then
+        NWJS="$NWJS_DIR"
+    else
+        NWJS="$(find_nwjs "$NWJS_SPEC")"
+    fi
+    [ -n "$NWJS" ] && [ -x "$NWJS/nw" ] || {
+        found="$(list_nwjs | paste -sd' ' -)"
+        if [ -n "${NWJS_DIR:-}" ]; then
+            echo "no NW.js runtime at '$NWJS_DIR' (NWJS_DIR)" >&2
+        elif [ "$NWJS_SPEC" = auto ]; then
+            echo "no NW.js runtime found" >&2
+        else
+            echo "no NW.js runtime with version '$NWJS_SPEC'" >&2
+        fi
+        echo "looked for nwjs-*linux* under ~/.config/nvm, ~/.local/share/nwjs and ~/nwjs" >&2
+        echo "found: ${found:-none}" >&2
+        echo "override with NWJS_DIR=/path/to/nwjs-build" >&2
+        exit 1
+    }
+fi
 
 # The LAN allowances and hosts entries, checked before anything starts and
 # handed on in a form nothing has to parse again. The preferences window

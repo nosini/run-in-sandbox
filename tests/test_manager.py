@@ -602,6 +602,21 @@ class LibraryTests(unittest.TestCase):
         self.library.save_preferences(name, {"scope": "clear"})
         self.assertEqual(self.library.settings(name)["net"], "1")
 
+    def test_nwjs_versions_are_listed_newest_first(self):
+        builds = self.home / ".local" / "share" / "nwjs"
+        for version in ("0.40.0", "0.50.0"):
+            build = builds / f"nwjs-v{version}-linux-x64"
+            build.mkdir(parents=True)
+            (build / "nw").write_text("#!/bin/sh\n")
+            (build / "nw").chmod(0o755)
+        with patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.assertEqual(self.library.nwjs_versions(), ["0.50.0", "0.40.0"])
+
+    def test_nwjs_setting_saves_for_its_game(self):
+        entry = self.library.create("game")
+        self.library.save_preferences(entry["name"], {"scope": "game", "nwjs": "0.40.0"})
+        self.assertEqual(self.library.scope_settings(entry["name"])["nwjs"], "0.40.0")
+
     def test_different_games_with_the_same_folder_name_get_separate_sandboxes(self):
         entries = []
         for parent in ("one", "two"):

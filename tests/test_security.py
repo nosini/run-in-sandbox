@@ -208,7 +208,8 @@ class SecurityTests(unittest.TestCase):
                     "XDG_RUNTIME_DIR": str(self.runtime),
                     "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "REVIEW_SECRET": "must-not-leak"}
-        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "SANDBOX_DIALOG", "XDG_DATA_HOME",
+        for key in ("MANGOHUD", "PROTON_DIR", "MKXP_DIR", "PGMMV_DIR", "NWJS_DIR",
+                    "SANDBOX_DIALOG", "XDG_DATA_HOME",
                     "SANDBOX_GPU_CARD", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64"):
             self.env.pop(key, None)
         # A tools folder of the test's own, never the real one.
@@ -1344,6 +1345,64 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         (self.game / "package.json").write_text('{"name": "x", "inject_js_start": "own.js"}')
         for casefold in ("1", ""):
             self.assertEqual(fix_package(args, casefold)["inject_js_start"], "own.js")
+
+    def test_nwjs_version_choice_lists_and_binds_the_found_build(self):
+        (self.game / "www").mkdir()
+        (self.game / "www" / "index.html").write_text("")
+        builds = self.home / ".local" / "share" / "nwjs"
+        for version in ("0.40.0", "0.50.0"):
+            build = builds / f"nwjs-v{version}-linux-x64"
+            build.mkdir(parents=True)
+            (build / "nw").write_text("#!/bin/sh\n")
+            (build / "nw").chmod(0o755)
+        self.env.pop("NWJS_DIR", None)
+        self.assertEqual(self.cli("--list-nwjs").stdout.splitlines(), ["0.50.0", "0.40.0"])
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        for helper in ("sandbox-game-lib", "nwjs-casefold.js"):
+            (helpers / helper).symlink_to(ROOT / helper)
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\0" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        name = self.cli("--print-name", self.game).stdout.strip()
+        config = self.home / ".config" / "sandbox-game"
+        (config / "games").mkdir(parents=True)
+        (config / "games" / name).write_text("nwjs=0.40.0\n")
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(self.game)
+        self.env["PATH"] = "/usr/bin:/bin"
+        dialog = ROOT / "tests" / "dialog_recorder.py"
+        self.env["SANDBOX_DIALOG"] = str(dialog)
+        self.env["DIALOG_RECORD"] = str(self.base / "dialog.json")
+        self.env["DIALOG_EXIT"] = "1"
+
+        def launch():
+            result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = recorded.read_text().split("\0")[:-1]
+            mount = next(args[i:i + 3] for i, word in enumerate(args)
+                         if word == "--ro" and args[i + 2] == "/nwjs")
+            return Path(mount[1]), args
+
+        build, args = launch()
+        self.assertEqual(build.name, "nwjs-v0.40.0-linux-x64")
+        self.assertIn("--nwjs-version=0.40.0", args)
+        self.env["NWJS_DIR"] = str(builds / "nwjs-v0.50.0-linux-x64")
+        build, args = launch()
+        self.assertEqual(build.name, "nwjs-v0.50.0-linux-x64")
+        self.assertNotIn("--nwjs-version=0.40.0", args)
+        self.env.pop("NWJS_DIR")
+        (config / "games" / name).write_text("nwjs=9.9.9\n")
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("9.9.9 not found", result.stderr)
+        self.assertIn("0.50.0 0.40.0", result.stderr)
 
     def test_a_game_can_turn_off_the_defaults_gamescope_options(self):
         # The defaults say fullscreen at 1920x1080. A game's own "no override,

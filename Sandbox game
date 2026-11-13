@@ -25,7 +25,8 @@
 # beside sandbox-game; it stays out of the scripts dir, where Nautilus would
 # offer it as a menu entry.
 #
-# NW.js runtime is auto-found; override with NWJS_DIR=/path if needed.
+# NW.js runtime is auto-found; the game's nwjs= preference chooses a version,
+# and NWJS_DIR=/path overrides both.
 # Proton: the saved version wins, else the newest install; PROTON_DIR=/path
 # overrides outright. The prefix is built fresh under
 # ~/game-sandboxes/<name>/compat/, never your real Steam one.
@@ -54,6 +55,18 @@ LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
 [ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
 . "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):\n$LIB"
+
+# NW.js choices from a shell. Nautilus passes no arguments, so its selection
+# still comes from NAUTILUS_SCRIPT_SELECTED_FILE_PATHS or the working directory.
+NWJS_CLI=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --nwjs-version) NWJS_CLI="${2:?--nwjs-version needs a version}"; shift 2 ;;
+        --nwjs-version=*) NWJS_CLI="${1#--nwjs-version=}"; shift ;;
+        --list-nwjs) list_nwjs; exit 0 ;;
+        *) break ;;
+    esac
+done
 
 SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
 [ -n "$SEL" ] || SEL="$(pwd)"
@@ -104,16 +117,22 @@ elif [ -n "$APPDIR" ]; then
     ALLOW_MANGOHUD=0
     GAMEDIR="$R_GAMEDIR"
     if [ "$(basename "$APPDIR")" = www ]; then APP_IN="/game/www"; else APP_IN="/game"; fi
-    NW_DIR="${NWJS_DIR:-}"
-    if [ -z "$NW_DIR" ]; then
-        for base in ~/.config/nvm ~/.local/share/nwjs ~/nwjs; do
-            [ -d "$base" ] || continue
-            NW_DIR="$(find "$base" -type d -name 'nwjs-*linux*' 2>/dev/null | sort -V | tail -n1)"
-            [ -n "$NW_DIR" ] && break
-        done
+    NWJS_CHOICE="${NWJS_CLI:-$(cfg_get nwjs auto)}"
+    if [ -n "${NWJS_DIR:-}" ]; then
+        NW_DIR="$NWJS_DIR"
+    else
+        NW_DIR="$(find_nwjs "$NWJS_CHOICE")"
     fi
-    [ -n "$NW_DIR" ] && [ -x "$NW_DIR/nw" ] \
-        || die "NW.js runtime not found under ~/.config/nvm (or set NWJS_DIR=...)."
+    if [ -z "$NW_DIR" ] || [ ! -x "$NW_DIR/nw" ]; then
+        found="$(list_nwjs | paste -sd' ' -)"
+        if [ -n "${NWJS_DIR:-}" ]; then
+            die "NW.js runtime not found at $NWJS_DIR (NWJS_DIR)."
+        elif [ "$NWJS_CHOICE" = auto ]; then
+            die "NW.js runtime not found under ~/.config/nvm, ~/.local/share/nwjs or ~/nwjs. Found: ${found:-none}. Set NWJS_DIR=/path to a build."
+        else
+            die "NW.js version $NWJS_CHOICE not found. Found: ${found:-none}. Choose another version in Sandbox game preferences, or set NWJS_DIR=/path to a build."
+        fi
+    fi
     NW_NAME="$(basename "$GAMEDIR")"; NW_NAME="${NW_NAME//[^A-Za-z0-9._-]/_}"
     # nw under the game's name -- the process name, and the node name the
     # sound server keys the game's device by -- in a directory of links to
