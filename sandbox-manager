@@ -165,6 +165,7 @@ def main():
                             raise ValueError(f"Leave out the env= in front: {word[4:]}")
                     result["env"] = " ".join(words)
                 self.manager.library.save_preferences(self.name, result)
+                self.manager.refresh_runtimes()  # launch_with may now choose Proton
                 self.state.mark_saved(result)
                 self.refresh()  # Default may now stand for another value
                 self.appearance.save(self.selected("appearance"))
@@ -236,7 +237,8 @@ def main():
             self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
             self.listbox.add_css_class("navigation-sidebar")
             self.listbox.set_filter_func(lambda row: self.library.matches(row.entry, self.search.get_text(),
-                ["all", "sandbox", "external"][self.location_filter.get_selected()], row.location))
+                ["all", "sandbox", "external"][self.location_filter.get_selected()], row.location,
+                row.runtime))
             self.listbox.connect("row-selected", self.select_row)
             scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
             scroll.set_child(self.listbox)
@@ -428,8 +430,10 @@ def main():
 
         def with_locations(self, entries):
             # Where each game lives, found here once rather than on every keystroke,
-            # and whether its folder is there: never looked at on the main thread.
-            return [(entry, self.library.installation(entry), self.library.folder_state(entry))
+            # whether its folder is there, and what runs it: never looked at on
+            # the main thread.
+            return [(entry, self.library.installation(entry), self.library.folder_state(entry),
+                     self.library.runtime(entry))
                     for entry in entries]
 
         def show_count(self):
@@ -457,15 +461,16 @@ def main():
                 if error:
                     self.count.set_label("Could not refresh library")
                     return
-                entries = [entry for entry, _, _ in located]
+                entries = [entry for entry, _, _, _ in located]
                 self.entries = entries
                 self.clear(self.listbox)
                 self.rows = {}
-                for entry, location, folder in located:
+                for entry, location, folder, runtime in located:
                     row = Gtk.ListBoxRow()
                     row.entry = entry
                     row.location = location
                     row.folder = folder
+                    row.runtime = runtime
                     box = Gtk.Box(spacing=10)
                     for side in ("top", "bottom", "start", "end"):
                         getattr(box, "set_margin_" + side)(10)
@@ -475,7 +480,7 @@ def main():
                     box.append(row.icon)
                     text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
                     title = Gtk.Label(label=entry["title"], xalign=0, ellipsize=3)
-                    row.state = Gtk.Label(label="Ready", xalign=0)
+                    row.state = Gtk.Label(label="Ready", xalign=0, ellipsize=3)
                     row.state.add_css_class("dim-label")
                     text.append(title)
                     text.append(row.state)
@@ -497,6 +502,22 @@ def main():
                 self.poll(True)
             self.work(lambda: self.with_locations(self.library.entries()), loaded)
 
+        def refresh_runtimes(self):
+            """What runs each game, read again without rebuilding the list or the
+            page being edited: saved settings can choose Proton for one game, or
+            the defaults for all of them."""
+            entries = {name: row.entry for name, row in self.rows.items()}
+            def done(runtimes, error):
+                if error:
+                    return
+                for name, runtime in runtimes.items():
+                    row = self.rows.get(name)
+                    if row is not None and row.entry is entries[name]:
+                        row.runtime = runtime
+                self.listbox.invalidate_filter()
+                self.update_state()
+            self.work(lambda: {name: self.library.runtime(entry) for name, entry in entries.items()}, done)
+
         def search_folders(self):
             """Reconnect missing games found in the game folders, with the library
             already shown: walking them can take a while on a cold disk."""
@@ -507,7 +528,8 @@ def main():
                     return  # a newer search shows its own findings
                 self.search_request = None
                 self.show_count()
-                shown = [(entry, self.rows[entry["name"]].location, self.rows[entry["name"]].folder)
+                shown = [(entry, self.rows[entry["name"]].location, self.rows[entry["name"]].folder,
+                          self.rows[entry["name"]].runtime)
                          for entry in self.entries]
                 if not error and located != shown:
                     # Read again rather than shown as found: a game edited or
@@ -630,6 +652,8 @@ def main():
                                    "or use Locate game to choose another copy.")
                 self.action(files, "Game folders", description, "Game folders…", lambda *_: self.game_folders())
             location = row.location if row and row.entry is entry else self.library.installation(entry)
+            runtime = row.runtime if row and row.entry is entry else ""
+            self.info(files, "Runs with", runtime or "Not known until the game folder is found")
             self.info(files, "Installation", {"sandbox": "Inside this sandbox", "external": "External game folder",
                                             "unknown": "Installation location unknown"}[location])
             self.size_label = Gtk.Label(label="Not calculated", xalign=0, selectable=True, wrap=True)
@@ -841,9 +865,10 @@ def main():
         def update_state(self):
             live = self.running | {name for name, process in self.processes.items() if process.poll() is None}
             for name, row in self.rows.items():
-                row.state.set_label("Starting…" if name in self.pending else "Running" if name in live else
-                                    "Choose a launcher" if row.entry["kind"] == "windows" and not row.entry.get("program") else
-                                    "Locate game folder" if not row.entry.get("selection") else "Ready")
+                state = ("Starting…" if name in self.pending else "Running" if name in live else
+                         "Choose a launcher" if row.entry["kind"] == "windows" and not row.entry.get("program") else
+                         "Locate game folder" if not row.entry.get("selection") else "Ready")
+                row.state.set_label(f"{state} · {row.runtime}" if row.runtime else state)
             if not self.selected:
                 return
             entry = self.selected

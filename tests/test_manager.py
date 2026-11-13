@@ -90,6 +90,40 @@ class LibraryTests(unittest.TestCase):
         # A location found beforehand is used as it is.
         self.assertTrue(self.library.matches(external, "", "sandbox", "sandbox"))
 
+    def test_runtime_names_what_play_starts_and_search_finds_it(self):
+        windows = self.library.create("Windows game")
+        self.assertEqual(self.library.runtime(windows), "Windows program · Proton")
+        game = self.native_game(self.home / "Games/Ace")
+        entry = dict(name="ace", title="Ace", kind="existing", directory=str(game),
+                     selection=str(game), program="", arguments="", engine="mkxp")
+        self.library.save_entry(entry)
+        runtime = self.library.runtime(entry)
+        self.assertEqual(runtime, "RPG Maker XP/VX/VX Ace · mkxp-z")
+        self.assertTrue(self.library.matches(entry, "vx ace", runtime=runtime))
+        self.assertTrue(self.library.matches(entry, "MKXP", runtime=runtime))
+        self.assertFalse(self.library.matches(entry, "nw.js", runtime=runtime))
+        self.assertFalse(self.library.matches(entry, "mkxp"))  # no runtime known
+        # Launch with Proton in the settings decides it, as for Play.
+        self.library.save_preferences("ace", {"scope": "game", "launch_with": "proton"})
+        self.assertEqual(self.library.runtime(entry), "Windows program · Proton")
+
+    def test_runtime_detects_and_keeps_the_engine_of_older_captures(self):
+        game = self.native_game(self.home / "Games/Old")
+        entry = dict(name="old", title="Old", kind="existing", directory=str(game),
+                     selection=str(game), program="", arguments="")
+        self.library.save_entry(entry)
+        with patch.object(self.library, "describe", return_value={"engine": "nwjs"}) as describe:
+            self.assertEqual(self.library.runtime(entry), "RPG Maker MV/MZ · NW.js")
+        describe.assert_called_once()
+        saved = self.library.entry("old")
+        self.assertEqual(saved["engine"], "nwjs")
+        with patch.object(self.library, "describe", side_effect=AssertionError("Already detected")):
+            self.assertEqual(self.library.runtime(saved), "RPG Maker MV/MZ · NW.js")
+        # A missing game folder shows nothing rather than failing the library.
+        gone = dict(entry, name="gone", selection=str(self.home / "Games/Gone"))
+        self.library.save_entry(gone)
+        self.assertEqual(self.library.runtime(gone), "")
+
     def test_icon_discovery_does_not_follow_links_to_host_files(self):
         entry = self.library.create("game")
         original = self.home / "private.ico"

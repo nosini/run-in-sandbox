@@ -105,6 +105,16 @@ and **External game folder**. The location of the game's files determines the
 category, independently of which runtime it uses. Older entries with an unknown
 location remain visible under **All games** until their folder is located.
 
+Under each title the list shows what Play starts the game with, as
+**Overview → Runs with** does: RPG Maker MV/MZ on NW.js, RPG Maker
+XP/VX/VX Ace on mkxp-z, Pixel Game Maker MV on its Linux player, a Linux
+program, or a Windows program under Proton, which **Launch with Proton** in
+the settings also chooses. The search matches this text as well as the title,
+so `mkxp` or `VX Ace` lists the games mkxp-z runs. It names the engine family,
+the same one the launcher goes by: the launcher does not tell XP, VX and
+VX Ace apart, nor MV and MZ. A game added by an older version has its engine
+detected once its folder is found, and keeps it.
+
 Game icons are picked up from the selected executable's embedded icon or nearby
 PNG/ICO files. Extraction and image decoding run in a separate bwrap sandbox,
 and the manager caches a small PNG. No icon searches or downloads are made.

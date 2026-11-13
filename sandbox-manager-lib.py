@@ -198,9 +198,12 @@ class Library:
             return "sandbox"
         return "unknown"
 
-    def matches(self, entry, query="", location="all", installation=None):
-        """INSTALLATION, when known, saves looking at the game's folder again."""
-        return query.casefold() in entry["title"].casefold() and (
+    def matches(self, entry, query="", location="all", installation=None, runtime=""):
+        """INSTALLATION, when known, saves looking at the game's folder again.
+        The query also finds games by what runs them (RUNTIME), so "VX Ace" or
+        "mkxp" lists those."""
+        query = query.casefold()
+        return (query in entry["title"].casefold() or query in runtime.casefold()) and (
             location == "all" or (installation or self.installation(entry)) == location)
 
     def game_folders(self):
@@ -746,6 +749,33 @@ PY
             except ValueError:
                 found[where] = False
         return found
+
+    # What runs each engine sandbox-game-lib's game_engine names, as the library
+    # shows it. The engine family only: XP, VX and VX Ace all go to mkxp-z, and
+    # MV and MZ to NW.js, without the launcher telling them apart.
+    RUNTIMES = {"nwjs": "RPG Maker MV/MZ · NW.js", "mkxp": "RPG Maker XP/VX/VX Ace · mkxp-z",
+                "pgmmv": "Pixel Game Maker MV · Linux player", "native": "Linux program",
+                "proton": "Windows program · Proton"}
+
+    def runtime(self, entry):
+        """What Play starts the game with, or "" while that is unknown. Like
+        uses_proton, a launch_with=proton setting wins. Captures from before the
+        engine was saved are detected once and remember it; never call this on
+        the main thread."""
+        if entry.get("kind") == "windows" or self.settings(entry["name"]).get("launch_with") == "proton":
+            return self.RUNTIMES["proton"]
+        engine = entry.get("engine", "")
+        selection = entry.get("selection", "")
+        if not engine and selection:
+            try:
+                if Path(selection).exists():
+                    engine = self.describe(selection, entry["name"]).get("engine", "")
+                    if engine:
+                        with self.lock:
+                            self.update_entry(entry["name"], engine=engine)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                pass  # an unavailable game shows no runtime, as before
+        return self.RUNTIMES.get(engine, "")
 
     def uses_proton(self, entry):
         if entry.get("kind") == "windows" or entry.get("engine") == "proton" \

@@ -223,6 +223,17 @@ def tick():
             manager.listbox.invalidate_filter()
             assert manager.rows[entry["name"]].get_child_visible()
             manager.location_filter.set_selected(0)
+            # What runs the game, under its title and found by the search.
+            row = manager.rows[entry["name"]]
+            assert row.state.get_label() == "Choose a launcher · Windows program · Proton", row.state.get_label()
+            manager.search.set_text("proton")
+            manager.listbox.invalidate_filter()
+            assert row.get_child_visible()
+            manager.search.set_text("mkxp")
+            manager.listbox.invalidate_filter()
+            assert not row.get_child_visible()
+            manager.search.set_text("")
+            manager.listbox.invalidate_filter()
             assert not manager.play.get_sensitive()
             assert len(proton_scans) == 1, proton_scans
             preferences = manager.preferences
