@@ -5026,6 +5026,7 @@ class SystemdBackendTests(unittest.TestCase):
         capture = self.home / 'game-sandboxes' / name
         for cycle in range(6):
             with self.subTest(cycle=cycle):
+                before = set(registry.glob('i*.userns'))
                 if cycle % 2:
                     proc = self.launch_named(name, '/bin/sh', '-ec',
                                              'printf x >> "$HOME/save"; echo ready; exec sleep 30')
@@ -5034,11 +5035,14 @@ class SystemdBackendTests(unittest.TestCase):
                 else:
                     self.cli('--headless', '--name', name, self.game,
                              '/bin/sh', '-ec', 'printf x >> "$HOME/save"')
-                inode = (capture / '.managed-userns').read_text().split()[1]
+                # The record goes with the game, so the registry is compared
+                # with what it held before.
+                self.assertFalse((capture / '.managed-userns').exists())
                 deadline = time.monotonic() + 3
-                while (registry / f'i{inode}.userns').exists() and time.monotonic() < deadline:
+                while set(registry.glob('i*.userns')) - before \
+                        and time.monotonic() < deadline:
                     time.sleep(.05)
-                self.assertFalse((registry / f'i{inode}.userns').exists(),
+                self.assertEqual(set(registry.glob('i*.userns')) - before, set(),
                                  'namespace allocation survived game exit')
                 self.assertEqual((capture / 'home/save').read_text(), 'x' * (cycle + 1))
                 self.assertFalse((capture / 'work/work').exists())

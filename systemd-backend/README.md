@@ -32,7 +32,13 @@ The installer verifies the packaged managers, workers, shared library and
 vendor units against one source RPM build, installs the service-wide SELinux
 module before socket activation, and loads overlayfs. It installs an overlay
 ordering drop-in, enables the delegation sockets, and installs/enables the
-render helper, dedicated tmpfs mount, service and udev rule. Updates revoke
+render helper, dedicated tmpfs mount, service and udev rule. A drop-in for
+`polkit.service` sets `SYSTEMD_BYPASS_USERDB=io.systemd.NamespaceResource`,
+so that polkitd's group lookups for each delegation call skip
+systemd-nsresourced: they used up its workers, which then started cold for
+every launch (see [The systemd backend](../README.md#the-systemd-backend)). polkitd then
+no longer resolves the sandboxes' transient users, which only makes its rules
+stricter for them; install and uninstall restart polkit. Updates revoke
 old render aliases before replacing the helper or allowlist. Details of the
 GPU grants and their revocation limits are in [render-devices.md](render-devices.md).
 

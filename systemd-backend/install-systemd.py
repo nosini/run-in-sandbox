@@ -26,6 +26,13 @@ LEGACY_UNITDIR = Path('/usr/local/lib/systemd/system')
 HELPER = Path('/usr/local/libexec/sandbox-game/systemd-render-devices')
 RULE = Path('/etc/udev/rules.d/99-sandbox-game-render.rules')
 DROPIN = Path('/etc/systemd/system/systemd-nsresourced.service.d/50-sandbox-game-overlay.conf')
+# polkitd checks every delegation call and resolves the caller's groups to
+# do it; through nss-systemd those lookups reached nsresourced's workers too,
+# 13 per call for a user in seven groups, and a worker exits after 64
+# requests: each launch met cold workers (see README.md, launch time). The
+# variable is the one nsresourced sets for its own lookups.
+POLKIT = 'polkit.service'
+POLKIT_DROPIN = Path('/etc/systemd/system/polkit.service.d/50-sandbox-game-userdb.conf')
 MODULE = 'sandbox_game_systemd'
 REGISTRY = Path('/run/systemd/nsresource/registry')
 SOCKETS = ('systemd-nsresourced.socket', 'systemd-mountfsd.socket')
@@ -33,7 +40,7 @@ SERVICES = ('systemd-nsresourced.service', 'systemd-mountfsd.service')
 RENDER = 'sandbox-game-render-devices.service'
 MOUNT = 'run-sandboxgame-render.mount'
 LEGACY_FILES = (LEGACY_UNITDIR / RENDER, LEGACY_UNITDIR / MOUNT)
-FILES = (HELPER, RULE, DROPIN, UNITDIR / RENDER, UNITDIR / MOUNT, *LEGACY_FILES)
+FILES = (HELPER, RULE, DROPIN, POLKIT_DROPIN, UNITDIR / RENDER, UNITDIR / MOUNT, *LEGACY_FILES)
 
 
 def require(condition, message):
@@ -219,11 +226,13 @@ def install(values):
         path.unlink(missing_ok=True)
     write(USERS, ''.join(f'{value}\n' for value in allowed).encode())
     write(DROPIN, b'[Unit]\nRequires=modprobe@overlay.service\nAfter=modprobe@overlay.service\n')
+    write(POLKIT_DROPIN, b'[Service]\nEnvironment=SYSTEMD_BYPASS_USERDB=io.systemd.NamespaceResource\n')
     if selinux:
         run('restorecon', str(HELPER), str(RULE), str(USERS), str(STATE), str(DROPIN),
-            str(UNITDIR / RENDER), str(UNITDIR / MOUNT))
+            str(POLKIT_DROPIN), str(UNITDIR / RENDER), str(UNITDIR / MOUNT))
     run('modprobe', 'overlay')
     run('systemctl', 'daemon-reload')
+    run('systemctl', 'try-restart', POLKIT)
     run('udevadm', 'verify', str(RULE))
     run('udevadm', 'control', '--reload')
     run('systemctl', 'enable', '--now', *SOCKETS)
@@ -264,6 +273,7 @@ def uninstall():
         path.unlink(missing_ok=True)
     STATE.unlink()
     run('systemctl', 'daemon-reload')
+    run('systemctl', 'try-restart', POLKIT)
     print('Systemd backend administrator setup removed; render aliases revoked.')
     print(f'Kept {USERS}, per-user installs, settings and captures.')
 

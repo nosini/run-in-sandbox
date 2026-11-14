@@ -1715,18 +1715,37 @@ write to a file whose group the mapping lacks. Other layouts are refused
 before changing a capture, naming the folders to regroup; see
 [The account's group](systemd-backend/README.md#the-accounts-group).
 
-Expect a launch to take a few seconds longer than under the other backends,
-most of the time. systemd-nsresourced serves requests from a pool of five
-worker processes, and each worker loads its BPF write restriction afresh the
-first time it registers a namespace or a mount, about a second of CPU apiece.
-A launch makes one such request for the namespace and one for each folder it
-delegates, which reaches every worker; the workers are replaced at least every
-five minutes. On a Ryzen 7 3800X VM with systemd 261.4, a game that exits at
-once took 5.1 s to launch more than five minutes after the last launch,
-0.4 s right after one, and 0.2 s under the default backend. The cost is in
-systemd and cannot be avoided from here: nsresourced loads the restriction
-while holding its registry lock, so requests made side by side still wait for
-each other.
+Expect a launch to take a little longer than under the other backends, by up
+to a few seconds for the first one in a while. systemd-nsresourced serves
+requests from a pool of worker processes, and each worker loads its BPF write
+restriction afresh the first time it registers a namespace or a mount, a
+second or two of CPU apiece. A launch makes one such request for the namespace
+and one for each folder it delegates, which spread over the workers, and a
+worker is replaced after five minutes or 64 requests. Those requests include
+user lookups: polkitd checks each of a launch's requests and looks up the
+caller's groups to do it, and through nss-systemd that reached nsresourced too
+— 13 lookups per request for a user in seven groups, so that every launch met
+fresh, cold workers. The administrator setup keeps polkitd's lookups away from
+nsresourced (see [systemd-backend/README.md](systemd-backend/README.md)). On a
+desktop with systemd 261.4, a namespace and ten folders then took 0.04 s per
+request once the workers were warm, where two or three of them had met a cold
+worker at 2.4 s each in every launch before. When workers are cold,
+`sandbox-uid` limits the cost: as soon as it meets a cold one — the allocation
+or a folder taking long — it holds idle connections to nsresourced's socket,
+one for each other waiting worker (counted by their process titles), so that
+the remaining registrations go to the worker just warmed, and a launch meets
+one cold worker at most. On a Ryzen 7 3800X VM, a launch delegating ten
+folders took 6.8 s cold without that and 1.2 to 1.4 s with it. Holding
+connections makes nsresourced start more workers, so it is done only when a
+cold worker is met, and it depends on systemd's implementation details — the
+pool, the workers' titles and the order they accept connections in; if they
+change, it only stops helping. Launches take turns with nsresourced, since one
+holding connections would leave another's allocation without a free worker,
+and an allocation that times out is retried: eight launches started together
+all succeeded, where five of them failed after 25 s before. To see where a
+launch spends its time, start it (or the manager) with `SANDBOX_GAME_TRACE=1`:
+every step of `sandbox-game` and the systemd backend's phases are written,
+timed, to standard error — the manager's `lastrun.log`.
 
 ## Preferences file format
 

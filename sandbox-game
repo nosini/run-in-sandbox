@@ -148,6 +148,13 @@
 #   sandbox-game --proton=GE-Proton11 ~/Games/Foo /game/bin/foo.exe -windowed
 #   sandbox-game --mkxp /mnt/General-HDD/Games/games/SomeVXAceGame
 set -euo pipefail
+# SANDBOX_GAME_TRACE=1: every command, timestamped, on standard error (the
+# manager's lastrun.log), to find where a launch spends its time. Not a file
+# of its own: the game would inherit the descriptor.
+if [ -n "${SANDBOX_GAME_TRACE:-}" ]; then
+    PS4='+ ${EPOCHREALTIME} ${LINENO}: '
+    set -x
+fi
 
 # Helpers -- sandbox-seccomp, sandbox-landlock, sandbox-game-lib -- are looked
 # for beside this script (a checkout of the repo), then where install.sh puts
@@ -2652,6 +2659,11 @@ cleanup() {
     if [ -n "$PLAY_START" ] && [ "$SEPARATE_UID" = 1 ]; then
         "$UIDHELPER" share "$CAP" || true
     fi
+    # The systemd backend's record describes a launch that is running; --stop
+    # and sandbox-attach have found theirs by the time this one is over.
+    if [ "$SEPARATE_UID" = systemd ]; then
+        rm -f "$CAP/.managed-userns"
+    fi
     # One line per launch -- start, seconds played -- for --list. Here rather
     # than after the game, so a crash or a --stop still counts.
     if [ -n "$PLAY_START" ]; then
@@ -3229,7 +3241,9 @@ elif [ "$SEPARATE_UID" = systemd ]; then
         NET_ARGS=( "${NET_ARGS[@]}" )
         rm -f "$PASTA_PID"; PASTA_PID=""
     fi
-    UID_WRAP=( "$(command -v python3)" -I "$UIDHELPER" managed-launch "$CAP" "${MANAGED_NET[@]}" -- )
+    # Through env -i: the phases of managed-launch, timed (see SANDBOX_GAME_TRACE).
+    UID_WRAP=( ${SANDBOX_GAME_TRACE:+SANDBOX_GAME_TRACE=1}
+               "$(command -v python3)" -I "$UIDHELPER" managed-launch "$CAP" "${MANAGED_NET[@]}" -- )
 fi
 
 # Of /sys only what describes devices -- drivers, Mesa, udev, SDL and Wine find

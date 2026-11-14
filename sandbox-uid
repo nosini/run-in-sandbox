@@ -76,6 +76,7 @@ Commands:
                                    as the game's uid
 """
 import array
+import contextlib
 import ctypes
 import errno
 import fcntl
@@ -112,6 +113,15 @@ CLIENTS_OUTER, RENDER_OUTER = 4000000000, 4000000001
 def fail(msg):
     sys.stderr.write(f"sandbox-uid: {msg}\n")
     sys.exit(1)
+
+
+TRACE_START = time.monotonic()
+
+
+def trace(what):
+    """With SANDBOX_GAME_TRACE set: where a launch spends its time."""
+    if os.environ.get("SANDBOX_GAME_TRACE"):
+        sys.stderr.write(f"sandbox-uid: {time.monotonic() - TRACE_START:7.3f} s {what}\n")
 
 
 def subordinate(path, need):
@@ -901,6 +911,15 @@ def inside_launch(cap, argv):
 # every launch gets a range of its own, gone with its namespace.
 NSRESOURCE = "/run/systemd/io.systemd.NamespaceResource"
 MOUNTFS = "/run/systemd/io.systemd.MountFileSystem"
+# nsresourced serves NSRESOURCE from a pool of workers (five, and more while
+# all are busy), cold until each registers something: holding all idle ones
+# but one steers the registrations back to the worker that is already warm.
+# HELD_CONNECTIONS: how many where their number cannot be told; HELD_MAX, at
+# most. A call slower than COLD_ALLOCATION seconds was a cold worker's (warm:
+# ~0.01).
+HELD_CONNECTIONS, HELD_MAX, HELD_TIMEOUT, COLD_ALLOCATION = 4, 32, 20, 0.3
+NSRESOURCE_WAITING = b"systemd-nsresourcework: waiting"
+NSRESOURCE_TRIES = 3
 SYS_MOVE_MOUNT, SYS_FSOPEN, SYS_FSCONFIG, SYS_FSMOUNT = 429, 430, 431, 432
 MOVE_MOUNT_F_EMPTY_PATH, FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING = 4, 0, 1
 FSCONFIG_CMD_CREATE, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV = 6, 2, 4
@@ -908,45 +927,67 @@ PR_SET_DUMPABLE = 4
 
 
 class VarlinkError(Exception):
-    pass
+    """A service's error reply, with its name and parameters: some callers
+    have to tell one case from the others (see nsresourced_timed_out())."""
+
+    def __init__(self, message, error=None, parameters=None):
+        super().__init__(message)
+        self.error = error
+        self.parameters = parameters or {}
 
 
-def varlink(path, method, parameters, fds=()):
-    """One Varlink call, descriptors going both ways: (parameters, fds)."""
-    received = []
+def varlink_connect(path):
+    """A connection to PATH's service, for calls in turn on it."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC) as s:
-            s.settimeout(30)
-            s.connect(path)
-            request = json.dumps({"method": method, "parameters": parameters}).encode() + b"\0"
-            sent = s.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                                          array.array("i", fds))] if fds else [])
-            s.sendall(request[sent:])
-            reply = b""
-            while b"\0" not in reply:
-                data, ancillary, flags, _ = s.recvmsg(
-                    65536, socket.CMSG_SPACE(16 * array.array("i").itemsize),
-                    socket.MSG_CMSG_CLOEXEC)
-                for level, kind, value in ancillary:
-                    if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
-                        ids = array.array("i")
-                        ids.frombytes(value[:len(value) - len(value) % ids.itemsize])
-                        received += ids
-                if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
-                    raise VarlinkError("truncated reply")
-                if not data:
-                    raise VarlinkError("no reply")
-                reply += data
-                if len(reply) > 1 << 20:
-                    raise VarlinkError("reply too long")
+        s.settimeout(30)
+        s.connect(path)
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def varlink(path, method, parameters, fds=(), sock=None):
+    """One Varlink call, descriptors going both ways: (parameters, fds).
+    On SOCK, a connection kept for more calls, when given."""
+    received = []
+    s = sock if sock is not None else varlink_connect(path)
+    try:
+        request = json.dumps({"method": method, "parameters": parameters}).encode() + b"\0"
+        sent = s.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                      array.array("i", fds))] if fds else [])
+        s.sendall(request[sent:])
+        reply = b""
+        while b"\0" not in reply:
+            data, ancillary, flags, _ = s.recvmsg(
+                65536, socket.CMSG_SPACE(16 * array.array("i").itemsize),
+                socket.MSG_CMSG_CLOEXEC)
+            for level, kind, value in ancillary:
+                if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                    ids = array.array("i")
+                    ids.frombytes(value[:len(value) - len(value) % ids.itemsize])
+                    received += ids
+            if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                raise VarlinkError("truncated reply")
+            if not data:
+                raise VarlinkError("no reply")
+            reply += data
+            if len(reply) > 1 << 20:
+                raise VarlinkError("reply too long")
         response = json.loads(reply.split(b"\0", 1)[0])
         if "error" in response:
-            raise VarlinkError(f"{response['error']} {json.dumps(response.get('parameters', {}))}")
+            parameters = response.get("parameters", {})
+            raise VarlinkError(f"{response['error']} {json.dumps(parameters)}",
+                               response["error"], parameters)
         return response.get("parameters", {}), received
     except BaseException:
         for fd in received:
             os.close(fd)
         raise
+    finally:
+        if sock is None:
+            s.close()
 
 
 def managed_version(value):
@@ -1024,16 +1065,17 @@ def managed_available():
     for path, interface in ((NSRESOURCE, "io.systemd.NamespaceResource"),
                             (MOUNTFS, "io.systemd.MountFileSystem")):
         try:
-            info, fds = varlink(path, "org.varlink.service.GetInfo", {})
-            for fd in fds:
-                os.close(fd)
-            value = info.get("version", "")
-            version = managed_version(value)
-            if version is None or version < (261, 4):
-                return f"{path}: unsupported systemd version {value!r}; need stable 261.4 or later"
-            versions.append(value)
-            reply, fds = varlink(path, "org.varlink.service.GetInterfaceDescription",
-                                 {"interface": interface})
+            with varlink_connect(path) as s:
+                info, fds = varlink(path, "org.varlink.service.GetInfo", {}, sock=s)
+                for fd in fds:
+                    os.close(fd)
+                value = info.get("version", "")
+                version = managed_version(value)
+                if version is None or version < (261, 4):
+                    return f"{path}: unsupported systemd version {value!r}; need stable 261.4 or later"
+                versions.append(value)
+                reply, fds = varlink(path, "org.varlink.service.GetInterfaceDescription",
+                                     {"interface": interface}, sock=s)
         except (OSError, VarlinkError) as e:
             return f"{path}: {e}"
         for fd in fds:
@@ -1043,6 +1085,45 @@ def managed_available():
             return "systemd-mountfsd lacks MountDirectory; install matching systemd packages"
     if versions[0] != versions[1]:
         return "systemd delegation workers have different versions; install matching systemd packages"
+    return None
+
+
+def nsresourced_timed_out(e):
+    """Whether E is nsresourced giving up on an allocation: every worker
+    was busy past its timeout."""
+    if not isinstance(e, VarlinkError):
+        return False
+    name, parameters = e.error, e.parameters
+    if name is None:
+        # Made by hand rather than by varlink(): only its message is there.
+        name, _, text = str(e).partition(" ")
+        try:
+            parameters = json.loads(text or "{}")
+        except ValueError:
+            parameters = {}
+    return name == "io.systemd.System" and isinstance(parameters, dict) \
+        and parameters.get("errno") == errno.ETIMEDOUT
+
+
+def nsresourced_lock():
+    """An flock()ed descriptor that makes this user's launches take turns
+    with nsresourced, or None where no runtime folder takes the lock file:
+    while one holds idle connections (see WarmWorker), another's allocation
+    finds no free worker and waits out nsresourced's 25 s timeout."""
+    for folder in (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{os.getuid()}"):
+        if not folder:
+            continue
+        try:
+            fd = os.open(os.path.join(folder, "sandbox-game-nsresourced.lock"),
+                         os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            continue
+        return fd
     return None
 
 
@@ -1070,15 +1151,99 @@ def managed_namespace(name):
     if len(fds) != 1:
         fail("cannot make a user namespace")
     try:
-        _, extra = varlink(NSRESOURCE, "io.systemd.NamespaceResource.AllocateUserRange", {
-            "name": name, "mangleName": True, "size": 65536, "target": 0,
-            "userNamespaceFileDescriptor": 0}, fds)
+        for attempt in range(NSRESOURCE_TRIES):
+            try:
+                _, extra = varlink(NSRESOURCE, "io.systemd.NamespaceResource.AllocateUserRange", {
+                    "name": name, "mangleName": True, "size": 65536, "target": 0,
+                    "userNamespaceFileDescriptor": 0}, fds)
+                break
+            except VarlinkError as e:
+                # Cold launches at once exhaust the workers; one that is
+                # retried after they have caught up may get a range.
+                if not nsresourced_timed_out(e) or attempt + 1 == NSRESOURCE_TRIES:
+                    raise
+                time.sleep(0.5)
     except (OSError, VarlinkError) as e:
         os.close(fds[0])
         fail(f"systemd-nsresourced gave no user namespace: {e}")
     for fd in extra:
         os.close(fd)
     return fds[0]
+
+
+def idle_workers():
+    """How many of nsresourced's workers wait for a connection, by their
+    process titles; None if none can be seen (proc mounted hidepid=)."""
+    seen, idle = 0, 0
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                title = f.read(len(NSRESOURCE_WAITING))
+        except OSError:
+            continue
+        if title.startswith(b"systemd-nsresourcework"):
+            seen += 1
+            idle += title == NSRESOURCE_WAITING
+    return idle if seen else None
+
+
+class WarmWorker:
+    """Held idle connections to nsresourced's socket, while delegations run.
+
+    A worker that served a call is warm. Once one is met cold, connections
+    held here take the other idle workers, counted by their process titles,
+    and the registrations after them reach the warm one. Another cold one
+    met after that -- one the count missed, or one nsresourced started --
+    takes more. The titles and the pool's ways are systemd's
+    implementation: if they change, holding these only stops helping. Connecting is best-effort for the same reason, and an alarm
+    closes them should a delegation stall, so none stays pinned. Not a
+    thread: setns() into a user namespace fails with EINVAL while a second
+    one lives, and a joined Python thread can still be leaving the kernel."""
+
+    def __init__(self, wanted=True):
+        self.wanted = wanted
+        self.sockets = []
+        self.previous = None
+
+    def __enter__(self):
+        if self.wanted:
+            self.hold()
+        return self
+
+    def hold(self):
+        """Take the idle workers but one: the one just warmed, it is hoped."""
+        idle = idle_workers()
+        wanted = HELD_CONNECTIONS if idle is None else idle - 1
+        for _ in range(max(0, min(wanted, HELD_MAX - len(self.sockets)))):
+            s = None
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+                s.connect(NSRESOURCE)
+            except OSError:
+                if s is not None:
+                    s.close()
+                self.close()
+                break
+            self.sockets.append(s)
+        trace(f"{idle} nsresourced workers idle; holding {len(self.sockets)} connections")
+        if self.sockets and self.previous is None:
+            self.previous = signal.signal(signal.SIGALRM, lambda *_: self.close())
+            signal.setitimer(signal.ITIMER_REAL, HELD_TIMEOUT)
+
+    def __exit__(self, *exc):
+        if self.previous is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous)
+            self.previous = None
+        self.close()
+
+    def close(self):
+        """Idempotent: from the alarm or the end of the delegations."""
+        sockets, self.sockets = self.sockets, []
+        for s in sockets:
+            s.close()
 
 
 def delegate(path, ns, read_only):
@@ -1157,35 +1322,68 @@ def delegations(argv, specs, extra=()):
     root: a folder of yours itself, or the folder of yours it is in.
     mountfsd mounts only that folder, without what is mounted below it."""
     me, mounts = os.getuid(), mount_points()
+
+    def shared(path, writable):
+        st = os.stat(path)
+        parent = os.path.dirname(path)
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == me:
+            folder = path
+        elif os.stat(parent).st_uid == me:
+            # A file or socket in a folder of yours takes the whole folder,
+            # idmapped to the managed root: under $XDG_RUNTIME_DIR that is
+            # the runtime folder, where a dedicated one holding only the
+            # socket would be narrower.
+            folder = parent
+        elif reachable(path, 0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
+                       else os.R_OK | (os.W_OK if writable else 0)):
+            folder = True                   # a device or socket: bwrap needs only the way
+        else:
+            folder = None
+        return folder, st.st_mode
+
+    # A -try bind that is not yours and that others cannot reach is dropped,
+    # as bwrap drops one that is missing; the rest of the launch goes on.
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--" or not a.startswith("--"):
+            break
+        n = ARITY.get(a, 0)
+        if a in ("--bind-try", "--ro-bind-try", "--dev-bind-try") \
+           and os.path.lexists(argv[i + 1]) \
+           and shared(argv[i + 1], a == "--bind-try")[0] is None:
+            sys.stderr.write(f"sandbox-uid: skipping {argv[i + 1]}: it is not yours, "
+                             "and the sandbox's user cannot reach it\n")
+            del argv[i:i + 1 + n]
+            continue
+        i += 1 + n
+
     needs = [(p, w) for p, w in sources(argv)] + list(extra)
     for _, lowers, upper, work in specs:
         needs += [(p, False) for p in lowers]
         if upper is not None:
             # One mount for both, or overlayfs cannot rename between them.
             needs.append((os.path.commonpath([upper, work]), True))
-    want = {}
+    want, files = {}, {}
     for path, writable in needs:
-        st = os.stat(path)
-        parent = os.path.dirname(path)
-        if stat.S_ISDIR(st.st_mode) and st.st_uid == me:
-            folder = path
-        elif os.stat(parent).st_uid == me:
-            folder = parent
-        elif reachable(path, 0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
-                       else os.R_OK | (os.W_OK if writable else 0)):
-            continue                        # a device or socket: bwrap needs only the way
-        else:
+        folder, mode = shared(path, writable)
+        if folder is True:
+            continue
+        if folder is None:
             fail(f"the sandbox's user cannot reach {path}, and neither it nor its folder "
                  "is yours to share with it")
         want[folder] = want.get(folder, False) or writable
+        if not stat.S_ISDIR(mode):
+            files.setdefault(folder, []).append(path)
     out = []
     for folder in sorted(want, key=len):
         # One already delegated covers it, unless a mount lies in between.
         cover = next((f for f in reversed(out) if folder.startswith(f[0].rstrip("/") + "/")),
                      None)
         if cover and (cover[1] or not want[folder]) and not any(
-                m == folder or (m.startswith(cover[0].rstrip("/") + "/")
-                                and folder.startswith(m.rstrip("/") + "/"))
+                m == folder or m in files.get(folder, ())
+                or (m.startswith(cover[0].rstrip("/") + "/")
+                    and folder.startswith(m.rstrip("/") + "/"))
                 for m in mounts):
             continue
         out.append((folder, want[folder]))
@@ -1291,11 +1489,11 @@ def managed_network(net):
     # dumpability, and with it left /proc/PID to the host's root.
     check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
     go_r, go = os.pipe()
+    parent = os.getpid()
     keeper = os.fork()
     if keeper == 0:
         try:
             os.close(go)
-            parent = os.getppid()
             libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
             ends = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
             signal.pthread_sigmask(signal.SIG_BLOCK, ends | {signal.SIGCHLD})
@@ -1308,9 +1506,13 @@ def managed_network(net):
             if os.read(go_r, 1) != b"1":
                 os._exit(0)                 # setup failed: nothing to serve
             os.close(go_r)
+            keeper_pid = os.getpid()
             pasta = os.fork()
             if pasta == 0:
                 signal.pthread_sigmask(signal.SIG_SETMASK, set())
+                libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+                if os.getppid() != keeper_pid:
+                    os._exit(0)
                 os.execv(net["pasta"], [
                     net["pasta"], "--quiet", "--foreground", "--config-net", "--netns-only",
                     "--netns", target, "--no-netns-quit",
@@ -1374,11 +1576,25 @@ def managed_launch(cap, argv, net=None):
         at = argv.index("--unshare-all") + 1
         argv[at:at] = ["--share-net"]
     # pasta runs from its folder too: sandbox-game names a copy after the game.
-    wanted = delegations(argv, specs, [(os.path.realpath(net["pasta"]), False)] if net else ())
+    extra = [(os.path.realpath(net["pasta"]), False)] if net else []
+    if specs:
+        # The overlays' mount points, unless a delegated capture already
+        # holds them (delegations() drops one covered by another).
+        extra.append((mounts, True))
+    wanted = delegations(argv, specs, extra)
     # nsresourced prefixes our uid and truncates names to 22 characters.
     # Keep the complete pid even with a ten-digit caller uid; a long prefix
     # discarded its last digits and made concurrent launches collide.
-    ns = managed_namespace(f"sg-{os.getpid():x}")
+    lock = nsresourced_lock()
+    started = time.monotonic()
+    try:
+        trace("lock taken")
+        ns = managed_namespace(f"sg-{os.getpid():x}")
+        trace("namespace allocated")
+    except BaseException:
+        if lock is not None:
+            os.close(lock)
+        raise
     # How sandbox-game --stop and sandbox-attach tell this sandbox's processes
     # from any others (see managed_owns()): the outer bwrap runs in a
     # namespace whose parent is this one. Where the game cannot
@@ -1388,10 +1604,34 @@ def managed_launch(cap, argv, net=None):
     with open(record + ".tmp", "w") as f:
         f.write(f"{st.st_dev} {st.st_ino}\n")
     os.replace(record + ".tmp", record)
-    delegated = [(path, delegate(path, ns, not writable)) for path, writable in wanted]
-    # In there, root: but not yours, so none of your files is ours but
-    # through those mounts. setns leaves the ids unmapped until changed.
-    check(libc.setns(ns, CLONE_NEWUSER), "setns")
+    try:
+        # Held connections only after the allocation: held before it, they made
+        # AllocateUserRange wait for the one warm worker and time out (ETIMEDOUT).
+        try:
+            # Held once a cold worker is met -- a slow allocation or folder --
+            # and not before: held with a warm pool, they only make
+            # nsresourced start cold workers for the next launch to meet.
+            with WarmWorker(time.monotonic() - started > COLD_ALLOCATION) as warm:
+                delegated = []
+                for path, writable in wanted:
+                    started = time.monotonic()
+                    delegated.append((path, delegate(path, ns, not writable)))
+                    # A cold worker met here: the rest go to it, warm now.
+                    if time.monotonic() - started > COLD_ALLOCATION:
+                        warm.hold()
+                    trace(f"delegated {path}")
+        finally:
+            if lock is not None:
+                os.close(lock)
+        # In there, root: but not yours, so none of your files is ours but
+        # through those mounts. setns leaves the ids unmapped until changed.
+        check(libc.setns(ns, CLONE_NEWUSER), "setns")
+    except BaseException:
+        # A failed launch has no namespace for the record to describe, and a
+        # stale one would match nothing -- or, worse, a later launch's parent.
+        with contextlib.suppress(OSError):
+            os.unlink(record)
+        raise
     os.close(ns)
     os.setgroups([])
     os.setresgid(0, 0, 0)
@@ -1401,10 +1641,13 @@ def managed_launch(cap, argv, net=None):
     place(delegated)
     for mp, lowers, upper, work in overlay_points(mounts, specs):
         kernel_overlay(mp, lowers, upper, work)
+    trace("mounts placed")
     if net:
         managed_network(net)
+        trace("network up")
     # What is yours of standard output and error, the game could not reopen.
     relay_output(0)
+    trace("starting bwrap")
     # The game's own namespace inside, its root seen as your uid: what the
     # game always was. Changing to root above cleared dumpability, without
     # which the map files would be the initial namespace's root's.
@@ -1474,9 +1717,24 @@ def managed_adopt(cap):
                 if os.path.lexists(marker):
                     os.unlink(marker)
             for name in whiteouts:
-                # A whiteout fuse-overlayfs could not make as a device.
+                # A whiteout fuse-overlayfs could not make as a device. Make
+                # the device beside it first: unlinking first would lose the
+                # whiteout if mknod then failed, and the old file would show.
+                target = os.path.join(d, name[4:])
+                if os.path.lexists(target):
+                    raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), target)
+                # Not .wh.NAME.tmp: that is the whiteout of NAME.tmp.
+                temporary = os.path.join(d, f".sandbox-uid-adopt-{os.getpid()}")
+                made = False
+                try:
+                    os.mknod(temporary, stat.S_IFCHR | 0o000, 0)
+                    made = True
+                    os.rename(temporary, target)
+                except BaseException:
+                    if made:
+                        os.unlink(temporary)
+                    raise
                 os.unlink(os.path.join(d, name))
-                os.mknod(os.path.join(d, name[4:]), stat.S_IFCHR | 0o000, 0)
     except OSError as e:
         fail(f"cannot switch {cap} to the systemd backend: {e}")
 

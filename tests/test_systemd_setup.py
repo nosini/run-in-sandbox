@@ -3,15 +3,19 @@ import importlib.machinery
 import importlib.util
 import hashlib
 from contextlib import ExitStack
+import errno
+import io
 import json
 import os
 from pathlib import Path
-import socket
 import shutil
+import signal
+import socket
 import subprocess
 import stat
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -74,11 +78,12 @@ class AvailabilityTests(unittest.TestCase):
             self.assertNotEqual(*mangled)
 
     def availability(self, first='261.4 (261.4)', second='261.4 (261.4)', mount=True):
-        def reply(path, method, params):
+        def reply(path, method, params, sock=None):
             if method.endswith('.GetInfo'):
                 return {'version': first if path == uid.NSRESOURCE else second}, []
             return {'description': 'MountDirectory' if mount else 'old interface'}, []
-        with mock.patch.object(uid, 'varlink', side_effect=reply):
+        with mock.patch.object(uid, 'varlink', side_effect=reply), \
+             mock.patch.object(uid, 'varlink_connect', return_value=mock.MagicMock()):
             return uid.managed_available()
 
     def test_supported_matching_workers(self):
@@ -97,8 +102,398 @@ class AvailabilityTests(unittest.TestCase):
         self.assertIn('lacks MountDirectory', self.availability(mount=False))
 
     def test_service_error_is_reported(self):
-        with mock.patch.object(uid, 'varlink', side_effect=uid.VarlinkError('permission denied')):
+        with mock.patch.object(uid, 'varlink', side_effect=uid.VarlinkError('permission denied')), \
+             mock.patch.object(uid, 'varlink_connect', return_value=mock.MagicMock()):
             self.assertIn('permission denied', uid.managed_available())
+
+    def test_each_service_answers_both_questions_on_one_connection(self):
+        class FakeSocket:
+            made = []
+
+            def __init__(self, *args):
+                self.calls = 0
+                FakeSocket.made.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def settimeout(self, timeout):
+                pass
+
+            def connect(self, path):
+                self.path = path
+                info = json.dumps({'parameters': {'version': '261.4 (261.4)'}}).encode() + b'\0'
+                desc = json.dumps({'parameters': {'description': 'MountDirectory'}}).encode() + b'\0'
+                self.replies = [info, desc]
+
+            def sendmsg(self, data, ancillary):
+                self.request = data[0]
+                return len(data[0])
+
+            def sendall(self, data):
+                self.request += data
+                self.calls += 1
+
+            def recvmsg(self, size, space, flags):
+                return self.replies.pop(0), [], 0, None
+
+            def close(self):
+                pass
+        with mock.patch.object(uid.socket, 'socket', FakeSocket):
+            self.assertIsNone(uid.managed_available())
+        self.assertEqual(len(FakeSocket.made), 2)
+        self.assertEqual([s.path for s in FakeSocket.made], [uid.NSRESOURCE, uid.MOUNTFS])
+        self.assertEqual([s.calls for s in FakeSocket.made], [2, 2])
+
+
+class ManagedLaunchTests(unittest.TestCase):
+    def test_overlay_mounts_are_delegated_when_their_capture_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = Path(tmp)
+            seen = []
+
+            def delegations(argv, specs, extra):
+                seen.append(list(extra))
+                raise RuntimeError
+            with mock.patch.object(uid, 'managed_identity_error', return_value=None), \
+                 mock.patch.object(uid, 'group_error', return_value=None), \
+                 mock.patch.object(uid, 'canonical', side_effect=lambda argv: argv), \
+                 mock.patch.object(uid, 'overlays',
+                                   return_value=(['bwrap'], [('/m', [], None, None)])), \
+                 mock.patch.object(uid, 'delegations', side_effect=delegations):
+                with self.assertRaises(RuntimeError):
+                    uid.managed_launch(str(cap), ['bwrap'])
+            self.assertIn((str(cap / '.mounts'), True), seen[0])
+
+    def test_a_failed_launch_removes_the_namespace_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = Path(tmp)
+            ns = os.open(os.devnull, os.O_RDONLY)
+            self.addCleanup(os.close, ns)
+            with mock.patch.object(uid, 'managed_identity_error', return_value=None), \
+                 mock.patch.object(uid, 'group_error', return_value=None), \
+                 mock.patch.object(uid, 'canonical', side_effect=lambda argv: argv), \
+                 mock.patch.object(uid, 'overlays', return_value=(['bwrap'], [])), \
+                 mock.patch.object(uid, 'delegations', return_value=[('/x', False)]), \
+                 mock.patch.object(uid, 'managed_namespace', return_value=ns), \
+                 mock.patch.object(uid, 'delegate', side_effect=SystemExit(1)):
+                with self.assertRaises(SystemExit):
+                    uid.managed_launch(str(cap), ['bwrap'])
+            self.assertFalse((cap / '.managed-userns').exists())
+            self.assertFalse((cap / '.managed-userns.tmp').exists())
+
+
+class DelegationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+
+    def test_a_try_bind_others_cannot_reach_is_skipped(self):
+        private = self.base / 'private'
+        private.mkdir(mode=0o700)
+        source = private / 'file'
+        source.write_text('x')
+        argv = ['bwrap', '--ro-bind-try', str(source), '/x']
+        stderr = mock.MagicMock()
+        with mock.patch.object(uid.os, 'getuid', return_value=os.getuid() + 1), \
+             mock.patch.object(uid.sys, 'stderr', stderr):
+            self.assertEqual(uid.delegations(argv, []), [])
+        self.assertEqual(argv, ['bwrap'])
+        text = ''.join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn(f'sandbox-uid: skipping {source}', text)
+
+    def test_a_missing_try_bind_is_left_for_bwrap_to_skip(self):
+        argv = ['bwrap', '--ro-bind-try', str(self.base / 'missing'), '/x']
+        stderr = mock.MagicMock()
+        with mock.patch.object(uid.sys, 'stderr', stderr):
+            self.assertEqual(uid.delegations(argv, []), [])
+        self.assertEqual(len(argv), 4)
+        stderr.write.assert_not_called()
+
+    def test_a_required_bind_others_cannot_reach_still_fails(self):
+        private = self.base / 'private'
+        private.mkdir(mode=0o700)
+        source = private / 'file'
+        source.write_text('x')
+        argv = ['bwrap', '--ro-bind', str(source), '/x']
+        with mock.patch.object(uid.os, 'getuid', return_value=os.getuid() + 1), \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                uid.delegations(argv, [])
+
+    def test_a_file_source_that_is_a_mount_point_is_not_covered(self):
+        home = self.base / 'home'
+        home.mkdir()
+        save = home / 'save'
+        save.write_text('s')
+        argv = ['bwrap', '--bind', str(self.base), '/base',
+                '--ro-bind', str(save), '/save']
+        with mock.patch.object(uid, 'mount_points', return_value={str(save)}):
+            self.assertEqual(uid.delegations(argv, []),
+                             [(str(self.base), True), (str(home), False)])
+
+    def test_the_overlay_mounts_folder_is_covered_by_its_capture(self):
+        mounts = self.base / '.mounts'
+        mounts.mkdir()
+        argv = ['bwrap', '--bind', str(self.base), '/base']
+        with mock.patch.object(uid, 'mount_points', return_value=set()):
+            self.assertEqual(uid.delegations(argv, [], [(str(mounts), True)]),
+                             [(str(self.base), True)])
+
+
+class WarmWorkerTests(unittest.TestCase):
+    """Idle connections steering the delegations to the warm worker."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cap = Path(tmp.name) / "cap"
+        self.cap.mkdir()
+
+    def launch(self, events, worker=None, lock=None, delegate=None):
+        class Stop(Exception):
+            pass
+
+        def namespace(name):
+            events.append("allocated")
+            fd = os.open(os.devnull, os.O_RDONLY)
+            self.addCleanup(os.close, fd)
+            return fd
+
+        def delegation(path, ns, read_only):
+            events.append("delegate")
+            return 10
+        delegation = delegate or delegation
+
+        patches = [
+            mock.patch.object(uid, "managed_identity_error", return_value=None),
+            mock.patch.object(uid, "canonical", return_value=["bwrap"]),
+            mock.patch.object(uid, "overlays", return_value=(["bwrap"], [])),
+            mock.patch.object(uid, "group_mismatches", return_value=[]),
+            mock.patch.object(uid, "delegations",
+                              return_value=[("/x", True), ("/y", False)]),
+            mock.patch.object(uid, "managed_namespace", side_effect=namespace),
+            mock.patch.object(uid, "delegate", side_effect=delegation),
+            mock.patch.object(uid, "check", side_effect=Stop),
+            mock.patch.object(uid, "nsresourced_lock", side_effect=lock or (lambda: None)),
+        ]
+        if worker is not None:
+            patches.append(mock.patch.object(uid, "WarmWorker", worker))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(Stop):
+                uid.managed_launch(str(self.cap), ["bwrap"])
+
+    def test_connections_open_after_allocation_and_close_after_delegation(self):
+        events = []
+
+        class Worker:
+            def __init__(self, wanted=True):
+                pass
+
+            def __enter__(self):
+                events.append("warm")
+                return self
+
+            def __exit__(self, *exc):
+                events.append("closed")
+
+        self.launch(events, Worker)
+        self.assertEqual(events, ["allocated", "warm", "delegate", "delegate", "closed"])
+
+    def test_the_lock_spans_allocation_and_delegations_only(self):
+        events = []
+
+        def held(fd):
+            try:
+                os.fstat(fd)
+                return True
+            except OSError:
+                return False
+
+        fd = os.open(os.devnull, os.O_RDONLY)
+        self.addCleanup(lambda: held(fd) and os.close(fd))
+
+        class Worker:
+            def __init__(self, wanted=True):
+                pass
+
+            def __enter__(self):
+                events.append(("warm", held(fd)))
+                return self
+
+            def __exit__(self, *exc):
+                events.append(("closed", held(fd)))
+
+        self.launch(events, Worker, lock=lambda: fd)
+        self.assertIn(("warm", True), events)
+        self.assertIn(("closed", True), events)
+        self.assertFalse(held(fd))           # released before setns, not at exec
+
+    def test_a_slow_delegation_holds_the_workers_for_the_rest(self):
+        # A fast allocation, then a cold worker met by the first folder: the
+        # remaining folders must go to it, as after a slow allocation.
+        events, clock = [], [0.0]
+
+        class Worker:
+            def __init__(self, wanted=True):
+                events.append(("wanted", wanted))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                events.append("closed")
+
+            def hold(self):
+                events.append("hold")
+
+        def delegation(path, ns, read_only):
+            events.append(("delegate", path))
+            clock[0] += 1.0 if path == "/x" else 0.01
+            return 10
+
+        with mock.patch.object(uid.time, "monotonic", side_effect=lambda: clock[0]):
+            self.launch(events, Worker, delegate=delegation)
+        self.assertEqual(events[events.index(("wanted", False)):],
+                         [("wanted", False), ("delegate", "/x"), "hold",
+                          ("delegate", "/y"), "closed"])
+
+    def test_idle_workers_are_counted_by_their_titles(self):
+        titles = {"1": b"systemd-nsresourcework: waiting...\0",
+                  "2": b"systemd-nsresourcework: processing...\0",
+                  "3": b"systemd-nsresourcework: waiting...\0",
+                  "4": b"/usr/bin/bash\0"}
+
+        def opened(path, mode="r"):
+            return io.BytesIO(titles[path.split("/")[2]])
+
+        with mock.patch.object(uid.os, "listdir", return_value=[*titles, "self"]), \
+             mock.patch("builtins.open", side_effect=opened):
+            self.assertEqual(uid.idle_workers(), 2)
+        with mock.patch.object(uid.os, "listdir", return_value=["4"]), \
+             mock.patch("builtins.open", side_effect=opened):
+            self.assertIsNone(uid.idle_workers())    # hidepid: none to see
+
+    def test_hold_takes_the_idle_workers_but_one_and_more_when_needed(self):
+        with mock.patch.object(uid.socket, "socket", side_effect=lambda *a: mock.Mock()), \
+             mock.patch.object(uid.signal, "setitimer") as timer, \
+             mock.patch.object(uid, "idle_workers", side_effect=[8, 3, None, 99]):
+            with uid.WarmWorker() as worker:
+                self.assertEqual(len(worker.sockets), 7)
+                worker.hold()                       # a cold one still met
+                self.assertEqual(len(worker.sockets), 9)
+                worker.hold()                       # titles unseen
+                self.assertEqual(len(worker.sockets), 9 + uid.HELD_CONNECTIONS)
+                worker.hold()
+                self.assertEqual(len(worker.sockets), uid.HELD_MAX)
+            timer.assert_any_call(signal.ITIMER_REAL, uid.HELD_TIMEOUT)
+            self.assertEqual(timer.call_count, 2)   # armed once, then disarmed
+            self.assertEqual(worker.sockets, [])
+
+    def test_nothing_is_held_after_a_fast_allocation(self):
+        with mock.patch.object(uid.socket, "socket") as connect, \
+             mock.patch.object(uid.signal, "setitimer") as timer:
+            with uid.WarmWorker(False) as worker:
+                self.assertEqual(worker.sockets, [])
+        connect.assert_not_called()
+        timer.assert_not_called()
+
+    def test_a_connection_that_fails_to_open_does_not_fail_the_launch(self):
+        events = []
+        with mock.patch.object(uid.socket, "socket",
+                               side_effect=OSError("nsresourced is not there")):
+            self.launch(events)
+        self.assertEqual(events, ["allocated", "delegate", "delegate"])
+
+    def test_the_alarm_closes_the_held_connections_without_a_thread(self):
+        opened = []
+
+        def connection(*args):
+            s = mock.Mock()
+            opened.append(s)
+            return s
+
+        before = signal.getsignal(signal.SIGALRM)
+        threads = threading.active_count()
+        with mock.patch.object(uid.socket, "socket", side_effect=connection), \
+             mock.patch.object(uid, "idle_workers", return_value=None), \
+             mock.patch.object(uid.signal, "setitimer") as timer:
+            worker = uid.WarmWorker()
+            with worker:
+                self.assertEqual(len(opened), uid.HELD_CONNECTIONS)
+                # setns() needs this process single-threaded.
+                self.assertEqual(threading.active_count(), threads)
+                timer.assert_called_once_with(signal.ITIMER_REAL, uid.HELD_TIMEOUT)
+                alarm = signal.getsignal(signal.SIGALRM)
+                alarm(signal.SIGALRM, None)
+                for s in opened:
+                    s.close.assert_called_once()
+                self.assertEqual(worker.sockets, [])
+                alarm(signal.SIGALRM, None)    # idempotent
+            timer.assert_called_with(signal.ITIMER_REAL, 0)
+        self.assertIs(signal.getsignal(signal.SIGALRM), before)
+        for s in opened:
+            s.close.assert_called_once()
+
+
+class AllocationTests(unittest.TestCase):
+    """AllocateUserRange retried when its workers time out."""
+
+    def timeout(self):
+        return uid.VarlinkError("io.systemd.System timed out", "io.systemd.System",
+                                {"errno": errno.ETIMEDOUT})
+
+    def allocate(self, outcomes, expect_failure=False):
+        calls, fd = [], 7
+
+        def reply(path, method, parameters, fds=()):
+            outcome = outcomes[len(calls)]
+            calls.append(outcome)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with mock.patch.object(uid.socket, "socketpair",
+                               return_value=(mock.Mock(), mock.Mock())), \
+             mock.patch.object(uid.socket, "recv_fds",
+                               return_value=(b"ns", [fd], 0, None)), \
+             mock.patch.object(uid.os, "fork", return_value=4242), \
+             mock.patch.object(uid.os, "waitpid", return_value=(4242, 0)), \
+             mock.patch.object(uid.os, "close") as close, \
+             mock.patch.object(uid.time, "sleep"), \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError) as fail, \
+             mock.patch.object(uid, "varlink", side_effect=reply):
+            if expect_failure:
+                with self.assertRaises(RuntimeError):
+                    uid.managed_namespace("sg-test")
+                fail.assert_called_once()
+                close.assert_called_with(fd)
+                return calls
+            self.assertEqual(uid.managed_namespace("sg-test"), fd)
+            close.assert_not_called()
+            return calls
+
+    def test_a_timed_out_allocation_is_retried_and_succeeds(self):
+        calls = self.allocate([self.timeout(), self.timeout(), ({}, [])])
+        self.assertEqual(len(calls), 3)
+
+    def test_another_error_is_not_retried(self):
+        calls = self.allocate([uid.VarlinkError("io.systemd.System denied",
+                                                 "io.systemd.System",
+                                                 {"errno": errno.EPERM})],
+                              expect_failure=True)
+        self.assertEqual(len(calls), 1)
+
+    def test_an_allocation_gives_up_after_the_retries(self):
+        calls = self.allocate([self.timeout() for _ in range(uid.NSRESOURCE_TRIES)],
+                              expect_failure=True)
+        self.assertEqual(len(calls), uid.NSRESOURCE_TRIES)
 
 
 def regrouped(paths, gid):
@@ -256,6 +651,53 @@ class CaptureTests(unittest.TestCase):
         st = os.lstat(cap / "rw/gone")
         self.assertTrue(stat.S_ISCHR(st.st_mode))
         self.assertEqual(st.st_rdev, 0)
+
+    def test_a_failed_device_keeps_the_whiteout(self):
+        if os.getgid() != os.getuid():
+            self.skipTest("this account's own files are not grouped as its uid")
+        cap = self.base / "cap"
+        (cap / "rw").mkdir(parents=True)
+        (cap / "rw/.wh.gone").write_text("")
+        with mock.patch.object(uid.os, "mknod", side_effect=OSError("no space")), \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                uid.managed_adopt(str(cap))
+        self.assertTrue((cap / "rw/.wh.gone").is_file())
+        self.assertFalse((cap / "rw/gone").exists())
+        self.assertEqual([p.name for p in (cap / "rw").iterdir()], [".wh.gone"])
+
+    def test_a_device_replaces_the_whiteout_only_after_it_exists(self):
+        if os.getgid() != os.getuid():
+            self.skipTest("this account's own files are not grouped as its uid")
+        cap = self.base / "cap"
+        (cap / "rw").mkdir(parents=True)
+        (cap / "rw/.wh.gone").write_text("")
+
+        def mknod(path, mode, device):
+            self.assertEqual(mode, stat.S_IFCHR | 0o000)
+            self.assertFalse(Path(path).exists())
+            Path(path).write_text("")
+        with mock.patch.object(uid.os, "mknod", side_effect=mknod), \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError):
+            uid.managed_adopt(str(cap))
+        self.assertTrue((cap / "rw/gone").exists())
+        self.assertFalse((cap / "rw/.wh.gone").exists())
+        self.assertEqual({p.name for p in (cap / "rw").iterdir()}, {"gone"})
+
+    def test_an_existing_file_keeps_the_whiteout(self):
+        if os.getgid() != os.getuid():
+            self.skipTest("this account's own files are not grouped as its uid")
+        cap = self.base / "cap"
+        (cap / "rw").mkdir(parents=True)
+        (cap / "rw/.wh.gone").write_text("")
+        (cap / "rw/gone").write_text("kept")
+        with mock.patch.object(uid.os, "mknod") as mknod, \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                uid.managed_adopt(str(cap))
+        mknod.assert_not_called()
+        self.assertTrue((cap / "rw/.wh.gone").is_file())
+        self.assertEqual((cap / "rw/gone").read_text(), "kept")
 
     def test_a_folder_it_cannot_read_stops_adoption_with_a_message(self):
         if os.getuid() == 0:
@@ -452,13 +894,14 @@ class AdministratorLayoutTests(unittest.TestCase):
         self.legacy = self.root / setup.LEGACY_UNITDIR.relative_to('/')
         self.wanted = self.root / 'etc/systemd/system/multi-user.target.wants' / setup.RENDER
         mapped = {key: self.root / getattr(setup, key).relative_to('/') for key in
-                  ('CONFIG', 'STATE', 'USERS', 'UNITDIR', 'LEGACY_UNITDIR', 'HELPER', 'RULE', 'DROPIN')}
+                  ('CONFIG', 'STATE', 'USERS', 'UNITDIR', 'LEGACY_UNITDIR', 'HELPER', 'RULE', 'DROPIN',
+                   'POLKIT_DROPIN')}
         for key, value in mapped.items():
             stack.enter_context(mock.patch.object(setup, key, value))
         legacy_files = (self.legacy / setup.RENDER, self.legacy / setup.MOUNT)
         stack.enter_context(mock.patch.object(setup, 'LEGACY_FILES', legacy_files))
         stack.enter_context(mock.patch.object(setup, 'FILES',
-            (setup.HELPER, setup.RULE, setup.DROPIN,
+            (setup.HELPER, setup.RULE, setup.DROPIN, setup.POLKIT_DROPIN,
              self.unitdir / setup.RENDER, self.unitdir / setup.MOUNT, *legacy_files)))
         # Exercise real file writes/removal, without root or live services.
         stack.enter_context(mock.patch.object(setup, 'trusted'))
@@ -496,7 +939,12 @@ class AdministratorLayoutTests(unittest.TestCase):
         for name in (setup.RENDER, setup.MOUNT):
             self.assertFalse((self.legacy / name).exists())
             self.assertEqual((self.unitdir / name).read_bytes(), (setup.SOURCE / name).read_bytes())
+        self.assertIn(b'SYSTEMD_BYPASS_USERDB=io.systemd.NamespaceResource',
+                      setup.POLKIT_DROPIN.read_bytes())
+        self.commands.assert_any_call('systemctl', 'try-restart', setup.POLKIT)
+        self.commands.reset_mock()
         setup.uninstall()
+        self.commands.assert_any_call('systemctl', 'try-restart', setup.POLKIT)
         self.assertFalse(self.wanted.is_symlink())
         self.assertTrue(all(not path.exists() for path in setup.FILES))
         self.assertFalse(setup.STATE.exists())
