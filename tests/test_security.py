@@ -4,10 +4,12 @@
 Uses real bubblewrap for filesystem/namespace checks and temporary command
 recorders for display policy checks, without opening a game window.
 """
+import contextlib
 import ctypes
 import glob
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import io
 import ipaddress
 import json
 import os
@@ -187,6 +189,39 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                 if whole_lan == "1":
                     self.assertEqual(refused, {"-4": {"0.0.0.0/8"}, "-6": set()})
 
+
+    def test_pasta_names_the_first_ipv4_nameserver_as_its_dns_host(self):
+        helper = (ROOT / "sandbox-game").read_text().split("NET_HELPER <<'EOF'", 1)[1]
+        helper = helper.split("\n", 1)[1].split("\nEOF", 1)[0]
+        real_open = open
+        cases = [("# comment\nsearch lan\nnameserver fe80::1%eth0\nnameserver 2001:db8::53\n"
+                  "nameserver 127.0.0.53\nnameserver 192.0.2.53\n", "127.0.0.53"),
+                 ("nameserver 2001:db8::53\n", None), (None, None)]
+        for resolv, expected in cases:
+            def fake_open(path, *args, **kwargs):
+                if path != "/etc/resolv.conf":
+                    return real_open(path, *args, **kwargs)
+                if resolv is None:
+                    raise FileNotFoundError(path)
+                return io.StringIO(resolv)
+            pasta_args = []
+            def run(args, **kwargs):
+                if args[0] == "pasta":
+                    pasta_args.append(args)
+                return subprocess.CompletedProcess(args, 0, stdout="[]")
+            out = io.StringIO()
+            with self.subTest(resolv=resolv), \
+                    mock.patch.object(sys, "argv", ["helper", "", "169.254.1.1", "", "pasta",
+                                                    "02:00:00:00:00:01", "0", "[]"]), \
+                    mock.patch("shutil.which", return_value="ip"), \
+                    mock.patch("builtins.open", side_effect=fake_open), \
+                    mock.patch("subprocess.run", side_effect=run), \
+                    contextlib.redirect_stdout(out), \
+                    self.assertRaises(SystemExit):
+                exec(compile(helper, "NET_HELPER", "exec"), {})
+            self.assertEqual(json.loads(out.getvalue())["dns"],
+                             ["--dns-forward", "169.254.1.1"]
+                             + (["--dns-host", expected] if expected else []))
 
 class SecurityTests(unittest.TestCase):
     def setUp(self):

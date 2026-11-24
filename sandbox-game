@@ -3035,6 +3035,27 @@ for ver in (4, 6) if not lan else ():
         if net.prefixlen and "gateway" not in r:
             block[ver].append(str(net))
 
+# pasta sends what reaches its --dns-forward address to the first IPv4
+# nameserver of the resolv.conf it starts with, unless --dns-host names one.
+# Naming that same one keeps its choice but puts it on pasta's command line,
+# where a proxy that attributes connections to programs can read it: pasta
+# changes into an empty root after starting, so its resolv.conf can't be.
+dns_host = None
+try:
+    with open("/etc/resolv.conf") as conf:
+        for line in conf:
+            words = line.split()
+            if words[:1] == ["nameserver"] and len(words) > 1:
+                try:
+                    if ipaddress.ip_address(words[1]).version == 4:
+                        dns_host = words[1]
+                        break
+                except ValueError:
+                    pass
+except OSError:
+    pass
+dns_args = ["--dns-forward", dns] + (["--dns-host", dns_host] if dns_host else [])
+
 batches = {}
 for ver, nets in block.items():
     if ver == 6 and not has_v6:
@@ -3065,7 +3086,7 @@ for ver, nets in block.items():
 # No game yet under the systemd backend: sandbox-uid makes the game's network
 # namespace itself, before bwrap, and starts pasta and applies these there.
 if not pid:
-    print(json.dumps({"pasta": pasta, "dns": dns, "mac": mac, "ipv6": has_v6,
+    print(json.dumps({"pasta": pasta, "dns": dns_args, "mac": mac, "ipv6": has_v6,
                       "rules": {str(ver): rules for ver, rules in batches.items()}}))
     sys.exit()
 
@@ -3100,7 +3121,7 @@ subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
                 "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
                 "-t", "none", "-u", "none", "-T", "none", "-U", "none",
                 "--map-host-loopback", "none", "--map-guest-addr", "none",
-                "--dns-forward", dns, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
+                *dns_args, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
                check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
                pass_fds=(user_fd,))
 for ver, rules in batches.items():

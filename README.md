@@ -1219,7 +1219,9 @@ LAN](#letting-a-game-reach-the-lan):
   so HTTPS can be verified.
 - DNS goes to `169.254.1.1`, which `pasta` forwards to the host's usual resolver —
   whether that is `127.0.0.53` or the router. Only DNS gets through to that
-  address.
+  address. That resolver, the first IPv4 nameserver in `/etc/resolv.conf`, is
+  also named on `pasta`'s command line (`--dns-host`), so a proxy that routes
+  by process can tell which game a lookup came from.
 - The sandbox waits for all of that before the game starts, and if any step
   fails the game does not start at all.
 

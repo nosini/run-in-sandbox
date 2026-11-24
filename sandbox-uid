@@ -1518,7 +1518,7 @@ def managed_network(net):
                     "--netns", target, "--no-netns-quit",
                     "-t", "none", "-u", "none", "-T", "none", "-U", "none",
                     "--map-host-loopback", "none", "--map-guest-addr", "none",
-                    "--dns-forward", net["dns"], "--ns-mac-addr", net["mac"],
+                    *net["dns"], "--ns-mac-addr", net["mac"],
                     *([] if net["ipv6"] else ["-4"])])
             while True:
                 sig = signal.sigwait(ends | {signal.SIGCHLD})
