@@ -1364,6 +1364,17 @@ exec_bit() {                          # $1 = the command's /game/... path
     host="$GAMEDIR/$rel"; copy="$CAP/rw/$rel"
     stamp="$CAP/exec-copies/$(printf '%s' "$rel" | sha256sum | cut -c1-32)"
     [ -f "$host" ] && [ ! -L "$host" ] && [[ "$(realpath -- "$host")" == "$GAMEDIR/"* ]] || return 0
+    # rw/ is the game's to write in: a link it put on the way to the copy
+    # would lead every look, chmod and rm below out to a host file. (It is
+    # not running: the lock above is held.)
+    dir="$CAP/rw"
+    if [ "$rel" != "${rel##*/}" ]; then
+        IFS=/ read -r -d "" -a parts < <(printf "%s" "${rel%/*}") || true   # a newline is just another character in a name
+        for part in "${parts[@]}"; do
+            dir="$dir/$part"
+            [ ! -L "$dir" ] || return 0
+        done
+    fi
     if [ -f "$stamp" ] && [ -f "$copy" ] && [ ! -L "$copy" ] \
        && [ "$(stat -c '%s %Y' -- "$copy")" = "$(cat -- "$stamp")" ]; then ours=1; fi
     if [ "$ours" = 1 ]; then
@@ -1401,11 +1412,10 @@ exec_bit() {                          # $1 = the command's /game/... path
         chmod u+x -- "$copy" || true  # the game's own copy, already in rw/
         return 0
     fi
-    # rw/ is the game's to write in: never follow a link it put on the way.
-    # (It is not running: the lock above is held.)
+    # Folders missing on the way to the copy are made; links were refused above.
     dir="$CAP/rw"
     if [ "$rel" != "${rel##*/}" ]; then
-        IFS=/ read -r -a parts <<<"${rel%/*}"
+        IFS=/ read -r -d "" -a parts < <(printf "%s" "${rel%/*}") || true
         for part in "${parts[@]}"; do
             dir="$dir/$part"
             [ ! -L "$dir" ] || return 0

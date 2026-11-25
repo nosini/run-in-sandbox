@@ -4066,6 +4066,28 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.cli("--headless", self.game, "/game/bin/Game", check=False)
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_executable_copy_checks_its_folders_before_touching_the_copy(self):
+        # After a first launch made rw/bin/Game, the game swaps it for a
+        # link to a host folder whose Game matches the stamp: the next launch
+        # must neither delete it nor change its mode.
+        (self.game / "bin").mkdir()
+        binary = self.game / "bin/Game"
+        shutil.copyfile("/bin/true", binary)
+        binary.chmod(0o644)
+        self.assertEqual(self.cli("--headless", self.game, "/game/bin/Game").returncode, 0)
+        rw = self.home / "game-sandboxes/game/rw"
+        self.assertTrue((rw / "bin/Game").stat().st_mode & 0o100)
+        outside = self.base / "outside"
+        shutil.copytree(rw / "bin", outside, copy_function=shutil.copy2)
+        (outside / "Game").chmod(0o644)
+        os.utime(outside / "Game", ns=(binary.stat().st_atime_ns, binary.stat().st_mtime_ns))
+        shutil.rmtree(rw / "bin")
+        (rw / "bin").symlink_to(outside, target_is_directory=True)
+        binary.chmod(0o755)                 # an install with its bit back: the copy is stale
+        self.cli("--headless", self.game, "/game/bin/Game", check=False)
+        self.assertTrue((outside / "Game").exists())
+        self.assertEqual((outside / "Game").stat().st_mode & 0o777, 0o644)
+
     def launch_with(self, recorded, game, prefs):
         """Launch GAME from Nautilus with these per-game preferences; the arguments passed on."""
         config = self.home / ".config" / "sandbox-game" / "games"
