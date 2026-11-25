@@ -505,6 +505,26 @@ class LibraryTests(unittest.TestCase):
             library.open_icon_file(game / "link.png", [game])
         os.close(library.open_icon_file(game / "a.exe", [game]))
 
+    def test_icon_roots_stay_put_when_a_game_swaps_them_for_links(self):
+        entry = self.library.create("game")
+        drive = self.library.capture(entry["name"]) / "compat/pfx/drive_c"
+        folder = drive / "Game"
+        folder.mkdir(parents=True)
+        (folder / "play.exe").write_bytes(b"MZ")
+        (folder / "icon.png").write_bytes(b"icon")
+        entry["program"] = "/compat/pfx/drive_c/Game/play.exe"
+        sources, roots = self.library.icon_files(entry)
+        self.assertIn(folder / "icon.png", sources)
+        outside = self.home / "private"
+        outside.mkdir()
+        (outside / "icon.png").write_bytes(b"private")
+        # The game swaps the folder it can write for a link to a host folder:
+        # the drive below the sandbox folder is the trusted root, not that.
+        shutil.rmtree(folder)
+        folder.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            self.library.open_icon_file(folder / "icon.png", roots)
+
     def test_import_uses_canonical_detection_and_explicit_name_for_old_captures(self):
         game = self.home / "games" / "Native Game"
         game.mkdir(parents=True)

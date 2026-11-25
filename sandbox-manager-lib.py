@@ -395,8 +395,68 @@ class Library:
         """Only the selected executable and nearby files; never search the host."""
         return self.icon_files(entry)[0]
 
+    def icon_roots(self, entry):
+        """The trusted folders icon files may come from, as (folder, parts).
+
+        A game can replace anything it can write to, so a root is a folder it
+        cannot replace, followed by parts walked one at a time without
+        following links: the external game folder, its own write layer, and
+        the Windows drive below the sandbox folder."""
+        capture = self.capture(entry["name"])
+        try:
+            capture = capture.resolve()
+        except OSError:
+            return []
+        roots = []
+        directory = entry.get("directory", "")
+        if directory:
+            try:
+                folder = Path(directory).resolve()
+                if folder.is_dir():
+                    roots.append((folder, ()))
+            except OSError:
+                pass
+        try:
+            upper = (capture / "rw").resolve()
+            if upper.is_dir() and upper.is_relative_to(capture):
+                roots.append((upper, ()))
+        except OSError:
+            pass
+        try:
+            self.windows_drive(entry["name"])
+            roots.append((capture, ("compat", "pfx", "drive_c")))
+        except ValueError:
+            pass
+        return roots
+
+    @staticmethod
+    def icon_root(path, roots):
+        """(folder, parts, relative) for PATH under one of ROOTS, or None.
+
+        ROOTS pairs a trusted folder with the parts below it to walk without
+        following links; a plain folder is trusted from itself."""
+        path = Path(path)
+        if ".." in path.parts:
+            return None
+        for root in roots:
+            anchor, parts = root if isinstance(root, tuple) else (Path(root), ())
+            base = Path(anchor).joinpath(*parts)
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                # A link in a trusted folder's own path, such as a home folder
+                # reached through one, is not the game's to swap; the file's
+                # own name is still opened without following a link.
+                try:
+                    relative = path.parent.resolve().relative_to(base.resolve()) / path.name
+                except (OSError, ValueError):
+                    continue
+            if relative.parts:
+                return Path(anchor), tuple(parts), relative
+        return None
+
     def icon_files(self, entry):
-        """The candidate files, and the folders they must stay inside."""
+        """The candidate files, and the trusted folders they must stay inside."""
         candidates = []
         if entry.get("program"):
             try:
@@ -406,30 +466,35 @@ class Library:
         elif entry.get("selection") and Path(entry["selection"]).is_file():
             candidates.append(Path(entry["selection"]))
         directory = entry.get("directory", "")
-        roots = []
+        folders = []
         for executable in candidates[:]:
-            roots.append(executable.parent)
+            folders.append(executable.parent)
             for suffix in (".ico", ".png"):
                 candidates.append(executable.with_suffix(suffix))
         if directory:
-            roots.append(Path(directory))
-        for root in dict.fromkeys(roots):
+            folders.append(Path(directory))
+        for folder in dict.fromkeys(folders):
             for relative in ("icon.png", "icon.ico", "game.png", "game.ico",
                              "window_icon.png", "game/gui/window_icon.png"):
-                candidates.append(root / relative)
+                candidates.append(folder / relative)
             # An imported folder may not have a selected launcher yet.
             try:
-                candidates.extend(sorted(root.glob("*.exe"))[:12])
-                candidates.extend(sorted(root.glob("*.ico"))[:8])
+                candidates.extend(sorted(folder.glob("*.exe"))[:12])
+                candidates.extend(sorted(folder.glob("*.ico"))[:8])
             except OSError:
                 pass
+        roots = self.icon_roots(entry)
         safe = []
         for path in dict.fromkeys(candidates):
             try:
                 if path.suffix.lower() not in (".exe", ".ico", ".png") or not path.is_file():
                     continue
                 # Games can plant symlinks, including icon.png -> a host file.
-                if not any(path.resolve().is_relative_to(root.resolve()) for root in roots):
+                found = self.icon_root(path, roots)
+                if found is None:
+                    continue
+                anchor, parts, _ = found
+                if not path.resolve().is_relative_to(anchor.joinpath(*parts).resolve()):
                     continue
                 safe.append(path)
             except OSError:
@@ -438,19 +503,33 @@ class Library:
 
     @staticmethod
     def open_icon_file(path, roots):
-        """Open PATH, without following a link, only if what was opened lies inside ROOTS.
+        """Open PATH, without following a link on the way, only if it lies inside ROOTS.
 
-        Checked on the open descriptor: a game that swaps the file for a link
-        after it was listed can no longer change what the decoder reads."""
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        ROOTS are the trusted folders icon_roots() found, and each file is
+        reached from its folder one component at a time, so a game that swaps
+        a folder or the file for a link after it was listed cannot change what
+        the decoder reads."""
+        found = Library.icon_root(path, roots)
+        if found is None:
+            raise OSError(f"{path} is not a file inside the game")
+        anchor, parts, relative = found
+        fd = os.open(anchor, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            opened = Path(os.readlink(f"/proc/self/fd/{fd}"))
-            if not stat.S_ISREG(os.fstat(fd).st_mode) or \
-                    not any(opened.is_relative_to(root.resolve()) for root in roots):
-                raise OSError(f"{path} is not a file inside the game")
-            return fd
-        except BaseException:
+            for part in (*parts, *relative.parts[:-1]):
+                next_fd = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                  dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            opened = os.open(relative.parts[-1],
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+        finally:
             os.close(fd)
+        try:
+            if not stat.S_ISREG(os.fstat(opened).st_mode):
+                raise OSError(f"{path} is not a file inside the game")
+            return opened
+        except BaseException:
+            os.close(opened)
             raise
 
     NO_ICON = 3  # sandbox-game-icon's status for a file without a usable icon
