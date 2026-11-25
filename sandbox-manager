@@ -79,7 +79,10 @@ def launch(name):
     # The file-manager launcher reports its own failures; a Windows sandbox's
     # program is started directly, so its failure is shown here.
     if code and entry["kind"] == "windows":
-        log = library.read_log(name).splitlines()[-80:]
+        try:
+            log = library.read_log(name).splitlines()[-80:]
+        except OSError as error:
+            log = [f"Cannot read the launch log: {error}"]
         show("log", f"sandbox-game failed ({title})", "\n".join(
             [f"exit code: {code}", f"log: {library.log_path(name)}", "", *log]) + "\n")
     return code
@@ -619,6 +622,7 @@ def main():
             args = Gtk.Entry(text=entry.get("arguments", ""), placeholder_text="Launch arguments (optional)")
             args_row = self.control(launch, "Launch arguments (optional)", args)
             args_row.set_visible(entry["kind"] == "windows")
+            self.overview_editor = (entry["name"], name, args)
             def save(*_):
                 # Only what was edited, over the entry as saved now: a search
                 # may have reconnected the game since this page was built. A
@@ -950,6 +954,15 @@ def main():
                 # for a link while the manager opens it.
                 self.locate_button.set_sensitive(entry["kind"] != "windows" or not busy)
 
+        def overview_edited(self):
+            """Whether Overview holds edits that rebuilding it would discard."""
+            editor = getattr(self, "overview_editor", None)
+            if editor is None or not self.selected or editor[0] != self.selected["name"]:
+                return False
+            _, title, arguments = editor
+            return (title.get_text().strip() != self.selected["title"]
+                    or arguments.get_text() != self.selected.get("arguments", ""))
+
         def poll(self, force=False):
             if self.closed:
                 return False
@@ -977,7 +990,8 @@ def main():
                         if installed:
                             self.program_lists.pop(name, None)
                         if self.selected and self.selected["name"] == name:
-                            self.build_overview(self.selected)
+                            if not self.overview_edited():
+                                self.build_overview(self.selected)
                             if installed:
                                 self.scan_programs(self.selected)
                 for name in finished:
@@ -1255,9 +1269,11 @@ def main():
             self.label(form, "Proton runner", "title-4")
             runners = Gtk.DropDown.new_from_strings(["Newest installed (auto)"])
             runner_paths = ["auto"]
+            runner_chosen = [False]
             form.append(runners)
             def set_runners(paths, error):
-                if error:
+                # A runner the user chose or added meanwhile is theirs to keep.
+                if error or runner_chosen[0]:
                     return
                 runner_paths[:] = ["auto", *paths]
                 runners.set_model(Gtk.StringList.new(["Newest installed (auto)", *[Path(p).name for p in paths]]))
@@ -1266,9 +1282,11 @@ def main():
                 if not (path / "proton").is_file() or not os.access(path / "proton", os.X_OK):
                     self.toast("Choose a Proton folder containing an executable proton script")
                     return
+                runner_chosen[0] = True
                 runner_paths.append(str(path))
                 runners.get_model().append(path.name)
                 runners.set_selected(len(runner_paths) - 1)
+            runners.connect("notify::selected", lambda *_: runner_chosen.__setitem__(0, True))
             self.button(form, "Choose another Proton folder…", lambda *_: self.choose_file(
                 "Choose Proton folder", custom_runner, folder=True))
             installer = [None]

@@ -126,8 +126,10 @@ def desktop_exec_argument(text):
         return text
     for char in ('\\', '"', '`', '$'):
         text = text.replace(char, '\\' + char)
-    # The string parser undoes one level of backslashes before Exec is split.
-    return '"' + text.replace('\\', '\\\\') + '"'
+    # The string parser undoes one level of backslashes before Exec is split,
+    # so escape the quoted argument as a string value: that also turns raw
+    # newlines, tabs and carriage returns into the only forms Exec can hold.
+    return desktop_string('"' + text + '"')
 
 
 class Library:
@@ -856,7 +858,8 @@ PY
         return read_settings(self.config / "defaults" if defaults else self.config / "games" / name)
 
     def update_settings(self, name, changes, defaults=False):
-        self.capture(name)
+        if not defaults:
+            self.capture(name)
         path = self.config / "defaults" if defaults else self.config / "games" / name
         values = read_settings(path)
         for key, value in changes.items():
@@ -912,14 +915,13 @@ PY
     def user_dirs(self):
         """{"DESKTOP": path, ...} as set in user-dirs.dirs."""
         try:
-            text = (Path(os.environ.get("XDG_CONFIG_HOME") or self.home / ".config") / "user-dirs.dirs") \
-                .read_text(encoding="utf-8", errors="replace")
+            text = (self.config.parent / "user-dirs.dirs").read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
         folders = {}
         for match in re.finditer(r'^\s*XDG_([A-Z]+)_DIR="([^"\n]*)"', text, re.M):
             value = match[2]
-            if value.startswith("$HOME"):
+            if value == "$HOME" or value.startswith("$HOME/"):
                 home = safe_resolve(self.home)
                 value = str(home if home is not None else self.home) + value[len("$HOME"):]
             if value.startswith("/"):
@@ -1011,13 +1013,20 @@ PY
         if entry.get("kind") == "windows" or entry.get("engine") == "proton" \
                 or self.settings(entry["name"]).get("launch_with") == "proton":
             return True
-        # Older captures may have no saved engine. Settings detects it only
-        # in memory; shortcuts also need Automatic's detection after a reload.
+        # A saved engine already says this is not Proton. Only older captures
+        # without one need detection, and what it finds is remembered so
+        # shortcuts do not run it again on every refresh.
+        if entry.get("engine"):
+            return False
         selection = entry.get("selection", "")
         try:
             if selection and Path(selection).exists():
-                return self.describe(selection, entry["name"]).get("engine") == "proton"
-        except (OSError, ValueError, subprocess.SubprocessError):
+                engine = self.describe(selection, entry["name"]).get("engine", "")
+                if engine:
+                    with self.lock:
+                        self.update_entry(entry["name"], engine=engine)
+                return engine == "proton"
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             # An unavailable game or failed detection must not block shortcuts.
             pass
         return False
@@ -1164,7 +1173,7 @@ PY
             # These entries are entirely generated; visible shortcuts keep their
             # hand-written fields through write_shortcut's merge instead.
             text += "NoDisplay=true\n" + self.HIDDEN_KEY + "\n"
-            if path.is_file() and path.read_text(encoding="utf-8") == text:
+            if path.is_file() and path.read_text(encoding="utf-8", errors="replace") == text:
                 return
             atomic_write(path, text, mode=0o644)
 
@@ -1197,6 +1206,14 @@ PY
     def installer_binds(self, installer):
         """Read-only installer media, never a whole home or downloads folder."""
         folder = installer.parent
+        # Anyone may drop a file beside an installer in /tmp or another
+        # world-writable folder, so there only the chosen file is mounted.
+        try:
+            world_writable = bool(folder.stat().st_mode & stat.S_IWOTH)
+        except OSError:
+            world_writable = True
+        if world_writable or folder in (Path("/tmp"), Path("/var/tmp")):
+            return ["--ro", str(installer), "/installer/" + installer.name]
         if not self.shared_folder(folder):
             return ["--ro", str(folder), "/installer"]
         # Only the installer and the files installers are known to need beside
@@ -1215,7 +1232,11 @@ PY
     def command(self, entry, installer=None, tool=None, program=None):
         if entry["kind"] == "existing" and not installer and not tool and not program:
             selection = Path(entry["selection"])
-            if not entry["selection"] or not selection.exists():
+            if not entry["selection"]:
+                raise ValueError("The game folder is missing. Use Locate game to reconnect it.")
+            if any(char in str(selection) for char in "\n\r\0"):
+                raise ValueError("The game folder's name cannot contain line breaks or null characters.")
+            if not selection.exists():
                 raise ValueError("The game folder is missing. Use Locate game to reconnect it.")
             return [str(self.launcher)], {**os.environ,
                 "NAUTILUS_SCRIPT_SELECTED_FILE_PATHS": str(selection),
@@ -1260,17 +1281,34 @@ PY
                 raise ValueError("This sandbox has no Windows drive yet")
         return path
 
+    @staticmethod
+    def upper_hides_parent(upper, relative):
+        """Whether an upper-layer entry replaces a folder above RELATIVE, so
+        nothing from the lower layer below it is visible."""
+        path = upper
+        for part in Path(relative).parts[:-1]:
+            path = path / part
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                return True
+            if not path.exists():
+                return False
+        return False
+
     def program_host(self, entry, program):
         """Translate only files actually exposed as this sandbox's game or C: drive."""
         capture = self.capture(entry["name"])
+        upper = None
         if program.startswith("/compat/pfx/drive_c/"):
             root = self.windows_drive(entry["name"])
             relative = program[len("/compat/pfx/drive_c/"):]
             candidates = [(root, root / relative)]
         elif program.startswith("/game/"):
             relative = program[len("/game/"):]
-            candidates = [(root, root / relative) for root in
-                          (self.upper_layer(entry["name"]), Path(entry["directory"]))]
+            upper = self.upper_layer(entry["name"])
+            roots = [upper]
+            if entry.get("directory"):
+                roots.append(Path(entry["directory"]))
+            candidates = [(root, root / relative) for root in roots]
         else:
             raise ValueError("Select a program inside this sandbox")
         if ".." in Path(relative).parts or Path(relative).is_absolute():
@@ -1281,14 +1319,19 @@ PY
             if path.is_file() and resolved is not None and root_resolved is not None \
                     and resolved.is_relative_to(root_resolved):
                 return path
-            if path.exists():  # a whiteout or directory also hides the lower file
+            # A whiteout, a directory or a dangling link hides the lower file.
+            if path.exists() or path.is_symlink():
+                break
+            if upper is not None and root == upper and self.upper_hides_parent(upper, relative):
                 break
         raise ValueError("The selected program no longer exists in this sandbox")
 
     def programs(self, entry):
         capture = self.capture(entry["name"])
         rw = self.upper_layer(entry["name"])
-        roots = [(Path(entry["directory"]), "/game"), (rw, "/game")]
+        roots = [(rw, "/game")]
+        if entry.get("directory"):
+            roots.insert(0, (Path(entry["directory"]), "/game"))
         try:
             roots.insert(0, (self.windows_drive(entry["name"]), "/compat/pfx/drive_c"))
         except ValueError:

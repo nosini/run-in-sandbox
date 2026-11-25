@@ -706,6 +706,12 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(env["SANDBOX_BACKEND"], str(ROOT / "sandbox-game"))
         self.assertEqual(env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"], str(game))
 
+    def test_a_game_folder_with_line_breaks_is_not_passed_as_several_paths(self):
+        game = self.native_game(self.home / "Game\nOther")
+        entry = self.library.add_existing(game, "line-break-game")
+        with self.assertRaisesRegex(ValueError, "line breaks"):
+            self.library.command(entry)
+
     def test_native_binary_exports_can_be_imported_and_automatically_located(self):
         root = self.home / "Games"
         for filename, name in (("Game.x86_64", "godot-export"), ("Game", "native-export")):
@@ -987,6 +993,45 @@ class LibraryTests(unittest.TestCase):
                 self.library.program_host(entry, target)
         self.assertEqual(self.library.programs(entry), [])
 
+    def test_an_entry_without_a_directory_never_scans_the_current_folder(self):
+        capture = self.library.root / "empty"
+        (capture / "overlay/rw").mkdir(parents=True)
+        self.library.save_entry(dict(name="empty", title="Empty", kind="existing",
+                                     selection="", directory="", program="", arguments=""))
+        current = self.home / "current"
+        current.mkdir()
+        (current / "play.exe").write_text("game")
+        previous = os.getcwd()
+        os.chdir(current)
+        self.addCleanup(os.chdir, previous)
+        entry = self.library.entry("empty")
+        self.assertEqual(self.library.programs(entry), [])
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/play.exe")
+
+    def test_dangling_upper_layer_link_hides_the_original_program(self):
+        entry = self.library.create("game")
+        lower = Path(entry["directory"]) / "play.exe"
+        lower.write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / "play.exe"
+        upper.parent.mkdir(parents=True)
+        upper.symlink_to(self.home / "missing.exe")
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
+    def test_upper_layer_link_on_the_way_hides_the_original_program(self):
+        entry = self.library.create("game")
+        lower = Path(entry["directory"]) / "sub"
+        lower.mkdir()
+        (lower / "play.exe").write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / "sub"
+        upper.parent.mkdir(parents=True)
+        upper.symlink_to(self.home / "missing")
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/sub/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
     def test_upper_layer_program_overrides_the_original(self):
         entry = self.library.create("game")
         lower = Path(entry["directory"]) / "play.exe"
@@ -1039,6 +1084,12 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.library.capture("linked")
         self.assertEqual(len(self.library.entries()), 1)
+
+    def test_default_settings_need_no_sandbox_name(self):
+        self.library.update_settings(None, {"net": "0"}, defaults=True)
+        self.assertEqual(self.library.scope_settings("unused", True)["net"], "0")
+        self.library.update_settings("", {"net": "1"}, defaults=True)
+        self.assertEqual(self.library.scope_settings("unused", True)["net"], "1")
 
     def test_x11_display_keeps_its_gamescope_resolution_and_fullscreen(self):
         entry = self.library.create("game")
@@ -1220,30 +1271,52 @@ class LibraryTests(unittest.TestCase):
         menu = library.shortcut_path(name, "menu")
         expected = f"StartupWMClass=steam_app_{name}\n"
         for selection in (game, executable):
-            for engine in (None, "native"):
-                with self.subTest(selection=selection.name, engine=engine):
-                    metadata = {"kind": "existing", "selection": str(selection)}
-                    if engine is not None:
-                        metadata["engine"] = engine
-                    core.atomic_write(capture / "manager.json", json.dumps(metadata))
-                    self.assertEqual(library.describe(selection, name)["engine"], "proton")
-                    library.update_settings(name, {"launch_with": "auto"})
-                    library.set_shortcut(name, "menu", True)
-                    self.assertIn(expected, menu.read_text())
-                    library.update_settings(name, {"launch_with": "proton"})
-                    library.set_shortcut(name, "menu", True)
-                    self.assertIn(expected, menu.read_text())
-                    library.update_settings(name, {"launch_with": "auto"})
-                    library.refresh_shortcuts(library.entry(name))
-                    self.assertIn(expected, menu.read_text())
-                    library.set_shortcut(name, "menu", False)
-                    library.set_shortcut(name, "menu", True)
-                    self.assertIn(expected, menu.read_text())
-                    menu.write_text(menu.read_text().replace(expected, "StartupWMClass=custom.exe\n"))
-                    library.refresh_shortcuts(library.entry(name))
-                    self.assertIn("StartupWMClass=custom.exe\n", menu.read_text())
-                    self.assertEqual(menu.read_text().count("StartupWMClass="), 1)
-                    library.set_shortcut(name, "menu", False)
+            with self.subTest(selection=selection.name):
+                metadata = {"kind": "existing", "selection": str(selection)}
+                core.atomic_write(capture / "manager.json", json.dumps(metadata))
+                self.assertEqual(library.describe(selection, name)["engine"], "proton")
+                library.update_settings(name, {"launch_with": "auto"})
+                library.set_shortcut(name, "menu", True)
+                self.assertIn(expected, menu.read_text())
+                library.update_settings(name, {"launch_with": "proton"})
+                library.set_shortcut(name, "menu", True)
+                self.assertIn(expected, menu.read_text())
+                library.update_settings(name, {"launch_with": "auto"})
+                library.refresh_shortcuts(library.entry(name))
+                self.assertIn(expected, menu.read_text())
+                library.set_shortcut(name, "menu", False)
+                library.set_shortcut(name, "menu", True)
+                self.assertIn(expected, menu.read_text())
+                menu.write_text(menu.read_text().replace(expected, "StartupWMClass=custom.exe\n"))
+                library.refresh_shortcuts(library.entry(name))
+                self.assertIn("StartupWMClass=custom.exe\n", menu.read_text())
+                self.assertEqual(menu.read_text().count("StartupWMClass="), 1)
+                library.set_shortcut(name, "menu", False)
+
+    def test_saved_engines_keep_shortcuts_from_redetecting_every_time(self):
+        library = self.library
+        entry = library.add_existing(self.native_game(self.home / "Native Game"))
+        self.assertEqual(entry["engine"], "native")
+        with patch.object(library, "describe", side_effect=AssertionError("must not detect")):
+            self.assertFalse(library.uses_proton(entry))
+            library.set_shortcut(entry["name"], "menu", True)
+        self.assertNotIn("StartupWMClass", library.shortcut_path(entry["name"], "menu").read_text())
+
+    def test_detected_engine_is_remembered_for_later_shortcuts(self):
+        library = self.shortcut_library()
+        game = self.home / "Legacy Game"
+        game.mkdir()
+        (game / "Game.exe").write_text("game")
+        capture = library.capture("legacy")
+        capture.mkdir(parents=True)
+        library.save_entry(dict(name="legacy", title="Legacy", kind="existing", selection=str(game),
+                                directory=str(game), program="", arguments=""))
+        with patch.object(library, "describe", return_value={"engine": "proton"}) as describe:
+            self.assertTrue(library.uses_proton(library.entry("legacy")))
+        self.assertEqual(describe.call_count, 1)
+        self.assertEqual(library.entry("legacy")["engine"], "proton")
+        with patch.object(library, "describe", side_effect=AssertionError("must not detect again")):
+            self.assertTrue(library.uses_proton(library.entry("legacy")))
 
     def test_shortcuts_survive_unavailable_automatic_detection(self):
         library = self.library
@@ -1270,6 +1343,23 @@ class LibraryTests(unittest.TestCase):
                       (self.home / f"data/applications/sandbox-game-{entry['name']}.desktop").read_text())
         self.assertEqual(core.desktop_exec_argument("/opt/a b"), '"/opt/a b"')
         self.assertEqual(core.desktop_exec_argument("/opt/100%"), "/opt/100%%")
+
+    def test_desktop_exec_arguments_escape_control_characters(self):
+        for character, escaped in (("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
+            with self.subTest(character=repr(character)):
+                argument = core.desktop_exec_argument("/opt/a" + character + "b")
+                self.assertEqual(argument, '"/opt/a' + escaped + 'b"')
+                self.assertNotIn(character, argument)
+
+    def test_hidden_taskbar_entry_with_invalid_utf8_is_replaced(self):
+        library = self.shortcut_library()
+        entry = library.create("Train")
+        path = library.taskbar_path(entry["name"])
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"[Desktop Entry]\nName=\xff\n" + library.HIDDEN_KEY.encode() + b"\n")
+        library.refresh_shortcuts(entry)
+        self.assertIn("Name=Train\n", path.read_text())
+        self.assertIn(library.HIDDEN_KEY + "\n", path.read_text())
 
     def test_hidden_taskbar_entry_follows_library_without_visible_shortcuts(self):
         library = self.shortcut_library()
@@ -1449,24 +1539,41 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.library.log_path(entry["name"]).read_bytes(), b"")
 
     def test_desktop_shortcuts_need_a_desktop_folder_other_than_home(self):
-        library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
-                               config=self.home / "config", data=self.home / "data")
-        entry = library.create("game")
         config = self.home / "xdg-config"
-        config.mkdir()
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config)}):
-            self.assertIsNone(library.desktop_folder())  # ~/Desktop is not there
-            (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/"\n')
-            # What user-dirs.dirs sets to turn the desktop folder off.
-            self.assertIsNone(library.desktop_folder())
-            with self.assertRaisesRegex(ValueError, "desktop folder"):
-                library.set_shortcut(entry["name"], "desktop", True)
-            self.assertFalse(any(self.home.glob("*.desktop")))
-            (self.home / "Schreibtisch").mkdir()
-            (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Schreibtisch"\n')
-            self.assertEqual(library.desktop_folder(), self.home.resolve() / "Schreibtisch")
+        library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
+                               config=config / "sandbox-game", data=self.home / "data")
+        entry = library.create("game")
+        config.mkdir(exist_ok=True)
+        self.assertIsNone(library.desktop_folder())  # ~/Desktop is not there
+        (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/"\n')
+        # What user-dirs.dirs sets to turn the desktop folder off.
+        self.assertIsNone(library.desktop_folder())
+        with self.assertRaisesRegex(ValueError, "desktop folder"):
+            library.set_shortcut(entry["name"], "desktop", True)
+        self.assertFalse(any(self.home.glob("*.desktop")))
+        (self.home / "Schreibtisch").mkdir()
+        (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Schreibtisch"\n')
+        self.assertEqual(library.desktop_folder(), self.home.resolve() / "Schreibtisch")
         with self.assertRaises(ValueError):
             library.set_shortcut("../game", "menu", True)
+
+    def test_user_dirs_follow_the_library_config_and_never_home_prefixes(self):
+        config = self.home / "config-root"
+        library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
+                               config=config / "sandbox-game")
+        config.mkdir()
+        (config / "user-dirs.dirs").write_text(
+            'XDG_DESKTOP_DIR="$HOME/Custom Desktop"\n'
+            'XDG_DOCUMENTS_DIR="$HOME_EXTRA/Documents"\n'
+            'XDG_MUSIC_DIR="$HOME/Music"\n')
+        host = self.home / "host-config"
+        host.mkdir()
+        (host / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/Host Desktop"\n')
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(host)}):
+            folders = library.user_dirs()
+        self.assertEqual(folders["DESKTOP"], self.home.resolve() / "Custom Desktop")
+        self.assertEqual(folders["MUSIC"], self.home.resolve() / "Music")
+        self.assertNotIn("DOCUMENTS", folders)
 
     def test_an_unlocated_game_is_not_started_from_the_current_folder(self):
         capture = self.library.root / "old-game"
@@ -1494,6 +1601,34 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(shown[:2], ["error", "--title=Game name"])
         self.assertIn("Programs page", shown[-1])
+
+    def test_launch_reports_an_unreadable_log_without_a_traceback(self):
+        import runpy
+        module = runpy.run_path(str(ROOT / "sandbox-manager"))
+        class Library:
+            def capture(self, name):
+                return self
+            def is_dir(self):
+                return True
+            def entry(self, name):
+                return {"name": name, "title": "Game", "kind": "windows", "program": "/game/play.exe"}
+            def start(self, entry):
+                return self
+            def wait(self):
+                return 1
+            def read_log(self, name):
+                raise OSError("unreadable")
+            def log_path(self, name):
+                return self.home / "log"
+        library = Library()
+        library.home = self.home
+        globals_ = module["launch"].__globals__
+        globals_["make_library"] = lambda: library
+        shown = []
+        globals_["show"] = lambda *args: shown.append(args)
+        self.assertEqual(module["launch"]("game"), 1)
+        self.assertEqual(shown[0][0], "log")
+        self.assertIn("Cannot read the launch log: unreadable", shown[0][2])
 
     def test_environment_editor_writes_only_the_chosen_files_own_list(self):
         entry = self.library.create("game")
@@ -1657,6 +1792,21 @@ python3 -c 'import os,json; print(json.dumps([os.environ.get(k) for k in
         (dedicated / "setup.exe").write_text("installer")
         command, _ = self.library.command(entry, installer=dedicated / "setup.exe")
         self.assertEqual(command[command.index("--ro") + 1:command.index("--ro") + 3], [str(dedicated), "/installer"])
+
+    def test_installers_in_world_writable_folders_mount_only_the_chosen_file(self):
+        entry = self.library.create("game")
+        folder = self.home / "shared"
+        folder.mkdir()
+        folder.chmod(0o777)
+        installer = folder / "setup_game.exe"
+        installer.write_text("installer")
+        (folder / "setup_game-1.bin").write_text("data")
+        (folder / "Data1.cab").write_text("cabinet")
+        command, _ = self.library.command(entry, installer=installer)
+        self.assertNotIn(str(folder), command)
+        binds = [command[i + 1:i + 3] for i, word in enumerate(command[:command.index("--")])
+                 if word == "--ro"]
+        self.assertEqual(binds, [[str(installer), "/installer/setup_game.exe"]])
 
     def test_windows_drive_must_be_a_real_folder_in_the_sandbox(self):
         entry = self.library.create("game")

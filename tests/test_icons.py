@@ -117,6 +117,16 @@ class IconTests(unittest.TestCase):
         self.assertEqual(kind, "ico")
         self.assertEqual([icons.dimensions(kind, data) for data in images], [(256, 256), (1, 1), (1, 1)])
 
+    def test_header_bytes_are_counted_once_against_the_read_limit(self):
+        for data in (png_header(1, 1), ico((1, PNG))):
+            with self.subTest(size=len(data)):
+                with patch.object(icons, "MAX_BYTES", len(data)):
+                    kind, images = self.extract(data)
+                self.assertTrue(images)
+        with patch.object(icons, "MAX_BYTES", len(png_header(1, 1)) - 1):
+            with self.assertRaises(ValueError):
+                self.extract(png_header(1, 1))
+
     def helper(self, data):
         path = self.base / "input"
         path.write_bytes(data)
