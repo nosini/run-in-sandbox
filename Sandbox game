@@ -41,23 +41,26 @@ set -uo pipefail
 
 SANDBOX="${SANDBOX_BACKEND:-$HOME/.local/bin/sandbox-game}"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
-msg() { notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+msg() { notify-send -- "sandbox-game" "$1" 2>/dev/null || true; }
 die() {
-    printf '%b\n' "$1" >&2
+    printf '%s\n' "$1" >&2
     if declare -F dialog >/dev/null; then dialog error --text="$1" 2>/dev/null && exit 1; fi
-    notify-send "sandbox-game" "$1" 2>/dev/null || true
+    notify-send -- "sandbox-game" "$1" 2>/dev/null || true
     exit 1
 }
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
 # Beside sandbox-game when that is a checkout, else where install.sh puts it.
-LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
+SANDBOX="$(realpath -- "$SANDBOX" 2>/dev/null)" \
+    || die "sandbox-game not found in ~/.local/bin or PATH."
+LIB="$(dirname -- "$SANDBOX")/sandbox-game-lib"
 [ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
-. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):\n$LIB"
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):"$'\n'"$LIB"
 
-# NW.js choices from a shell. Nautilus passes no arguments, so its selection
-# still comes from NAUTILUS_SCRIPT_SELECTED_FILE_PATHS or the working directory.
+# NW.js choices from a shell. Nautilus passes the selection as arguments, and
+# still names it in NAUTILUS_SCRIPT_SELECTED_FILE_PATHS for scripts it starts
+# without arguments.
 NWJS_CLI=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -68,10 +71,21 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
-[ -n "$SEL" ] || SEL="$(pwd)"
-SEL="$(realpath "$SEL")"
-[ -e "$SEL" ] || die "Selection not found:\n$SEL"
+# A path argument is taken as it is, newlines and all. The environment
+# variable is newline-separated and ends with a newline: anything left after
+# removing that one separator is more than one selection, which this script
+# cannot guess between.
+[ "$#" -le 1 ] || die "Select one file or folder at a time."
+if [ "$#" -gt 0 ] && [ -n "$1" ]; then
+    SEL=$1
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    SEL=${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS%$'\n'}
+    [[ "$SEL" != *$'\n'* ]] || die "Select one file or folder at a time."
+else
+    SEL="$(pwd)"
+fi
+SEL="$(realpath -- "$SEL")" || die "Selection not found:"$'\n'"$SEL"
+[ -e "$SEL" ] || die "Selection not found:"$'\n'"$SEL"
 
 pick() {                                       # $1 = dir to strip, $@ = paths
     local dir="$1" rel; shift
@@ -91,7 +105,7 @@ GAMEDIR="$R_GAMEDIR"
 NAME_ARGS=()
 [ -z "${SANDBOX_GAME_NAME:-}" ] || NAME_ARGS=( --name "$SANDBOX_GAME_NAME" )
 NAME="$("$SANDBOX" --print-name "${NAME_ARGS[@]}" "$GAMEDIR" 2>/dev/null)" \
-    || die "Cannot derive a sandbox name for:\n$GAMEDIR"
+    || die "Cannot derive a sandbox name for:"$'\n'"$GAMEDIR"
 
 if [ "$(cfg_get launch_with auto)" = proton ]; then
     # A saved override skips NW.js and the native replacement players, even
@@ -103,7 +117,7 @@ if [ "$(cfg_get launch_with auto)" = proton ]; then
     else
         mapfile -t exes < <(find_exes "$GAMEDIR")
         [ "${#exes[@]}" -gt 0 ] \
-            || die "Proton requested, but no Windows .exe was found at:\n$GAMEDIR\n\nChoose Automatic in Sandbox game preferences to use the native launcher."
+            || die "Proton requested, but no Windows .exe was found at:"$'\n'"$GAMEDIR"$'\n\n'"Choose Automatic in Sandbox game preferences to use the native launcher."
         LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
         [ -n "$LAUNCHER" ] || exit 0
     fi
@@ -138,8 +152,19 @@ elif [ -n "$APPDIR" ]; then
     # sound server keys the game's device by -- in a directory of links to
     # the rest of the runtime, where Chromium looks for it beside the binary.
     # Bound there rather than copied: a copy lands in /tmp, which is memory,
-    # some 200 MB of it on every launch.
-    RO=( --ro "$NW_DIR" /nwjs --ro "$NW_DIR/nw" "/tmp/nwrun/$NW_NAME" )
+    # some 200 MB of it on every launch. A game folder whose name is already
+    # a runtime entry (lib, locales, icudtl.dat ...) cannot have both that
+    # entry and the executable under one name; nw then keeps its own name and
+    # the runtime entry stays linked beside it.
+    NW_EXEC="/tmp/nwrun/$NW_NAME"
+    if [ "$NW_NAME" != nw ]; then
+        for f in "$NW_DIR"/*; do
+            [ "${f##*/}" = "$NW_NAME" ] || continue
+            NW_EXEC=/tmp/nwrun/nw
+            break
+        done
+    fi
+    RO=( --ro "$NW_DIR" /nwjs --ro "$NW_DIR/nw" "$NW_EXEC" )
     # Windows ignores case in file names, and so do the games made on it:
     # asking for img/pictures/B.png when the file is b.png leaves an invisible
     # character or a "Failed to load" on Linux. nwjs-casefold.js, run ahead of
@@ -191,9 +216,10 @@ if changed:
     os.replace(path + ".tmp", path)
 EOF
     # Inside the sandbox: fix up package.json, link the rest of the runtime in
-    # beside nw renamed to the game, then exec it against the app. $1=name $2=app-path
-    # $3=the fix above $4=ozone platform, then any further NW.js options,
-    # appended below once the display preferences are known.
+    # beside nw, then exec it against the app. $1=name $2=app-path $3=the fix
+    # above $4=the executable's path in /tmp/nwrun $5=ozone platform, then any
+    # further NW.js options, appended below once the display preferences are
+    # known.
     # Chromium tells the sound server it is "Chromium", like every Chromium
     # browser, so a router such as pulsemeeter sends the game wherever the
     # browsers go. PULSE_PROP_OVERRIDE renames the client to the game; plain
@@ -210,11 +236,11 @@ EOF
         [ ! -f "$2/package.json" ] || python3 -I -c "$3" "$2/package.json" "$1" "$casefold" || true
         d=/tmp/nwrun
         for f in /nwjs/*; do
-            b=${f##*/}; [ "$b" = nw ] || [ "$b" = "$1" ] || ln -sf "$f" "$d/$b"
+            b=${f##*/}; [ "$b" = nw ] || ln -sf "$f" "$d/$b"
         done
-        name=$1 app=$2 ozone=$4; shift 4
-        exec "$d/$name" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
-    ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" )
+        name=$1 app=$2 exe=$4 ozone=$5; shift 5
+        exec "$exe" "$app" --ozone-platform="$ozone" --no-sandbox "$@"
+    ' _ "$NW_NAME" "$APP_IN" "$NW_FIX_PKG" "$NW_EXEC" )
 else
     # ----- native, else PGMMV/RGSS, else Windows (.exe) via Proton ------------
     # A .sh launcher always wins: Ren'Py and Unity ship both a .sh and a .exe
@@ -238,7 +264,7 @@ else
         else
             mapfile -t exes < <(find_exes "$GAMEDIR")
             [ "${#exes[@]}" -gt 0 ] \
-                || die "Nothing runnable at:\n$GAMEDIR\n\nLooked for an RPGM/NW.js app, a PGMMV or RGSS game, a native Linux launcher and a .exe."
+                || die "Nothing runnable at:"$'\n'"$GAMEDIR"$'\n\n'"Looked for an RPGM/NW.js app, a PGMMV or RGSS game, a native Linux launcher and a .exe."
             LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
             [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
             PROTON=1
@@ -299,46 +325,78 @@ fi
 
 # In the sandbox's folder, where the manager looks for it. The game never
 # sees that folder itself, only what sandbox-game mounts from inside it.
-mkdir -p "$HOME/game-sandboxes/$NAME"
-LOG="$HOME/game-sandboxes/$NAME/lastrun.log"
+CAP="$HOME/game-sandboxes/$NAME"
+mkdir -p "$CAP"
+LOG="$CAP/lastrun.log"
 rm -f -- "$HOME/game-sandboxes/${NAME}-lastrun.log"   # where it used to be
+
+# This launch writes to a log of its own until sandbox-game holds the sandbox
+# lock and records the pre-launch log offset before starting bwrap. A second
+# launch of a running game therefore fails without touching lastrun.log, and
+# lines printed by the game past that offset never become notifications.
+LAUNCH_DIR="$(mktemp -d "$CAP/.launch.XXXXXX")" || die "Cannot make a launch log in:"$'\n'"$CAP"
+trap 'rm -rf -- "$LAUNCH_DIR"' EXIT
+NEWLOG="$LAUNCH_DIR/log"
+BOUNDARY="$LAUNCH_DIR/boundary"
 
 # Withholding --mangohud is not enough to keep the overlay away from NW.js:
 # sandbox-game also opts in from an inherited MANGOHUD=1, and that variable
 # would reach the game regardless and switch on MangoHud's Vulkan layer. Drop
 # it outright for the engines that cannot survive it.
-RUN=( "$SANDBOX" )
-[ "$ALLOW_MANGOHUD" = 1 ] || RUN=( env -u MANGOHUD "$SANDBOX" )
+RUN=( env "SANDBOX_WARNING_BOUNDARY=$BOUNDARY" "$SANDBOX" )
+[ "$ALLOW_MANGOHUD" = 1 ] || RUN=( env -u MANGOHUD "SANDBOX_WARNING_BOUNDARY=$BOUNDARY" "$SANDBOX" )
 
 msg "Launching ${BASE}…"
-"${RUN[@]}" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$LOG" 2>&1 &
+"${RUN[@]}" "${FLAG[@]}" "${RO[@]}" "$GAMEDIR" "${CMD[@]}" >"$NEWLOG" 2>&1 &
 GAME=$!
+while kill -0 "$GAME" 2>/dev/null; do
+    [ -s "$BOUNDARY" ] && break
+    sleep 0.05
+done
+LAUNCH_LOG=$NEWLOG
+if [ -s "$BOUNDARY" ]; then
+    mv -f -- "$NEWLOG" "$LOG"
+    LAUNCH_LOG=$LOG
+fi
 # sandbox-game's own warnings and notes (no sound restriction, no limits, a
 # display it had to change) come before the game starts, and the log only
 # reaches a window when the launch fails. So show them once the game is under
 # way -- not when it has already died, which gets the failure window instead.
-# Its lines, and sandbox-landlock's, say whose they are -- "sandbox-game:
-# warning: " -- so a game's own "warning: " lines stay out of it; indented
-# lines continue one. The title names the tool, so the lines go without.
-(
-    sleep 3
-    kill -0 "$GAME" 2>/dev/null || exit 0
-    w="$(awk '/^sandbox-(game|landlock): (warning|note): / { p = 1; sub(/^sandbox-[a-z]+: /, ""); print; next }
-              p && /^ / { sub(/^ +/, "  "); print; next } { p = 0 }' "$LOG")"
-    [ -n "$w" ] || exit 0
-    notify-send "sandbox-game: ${BASE}" "$w" 2>/dev/null || true
-) </dev/null >/dev/null 2>&1 &
-NOTE=$!
+# Only the bytes before the pre-launch boundary are read: the game cannot add
+# to them, whatever it prints. Indented lines continue one.
+NOTE=""
+if [ -s "$BOUNDARY" ]; then
+    (
+        sleep 3
+        kill -0 "$GAME" 2>/dev/null || exit 0
+        size="$(tail -n1 "$BOUNDARY" 2>/dev/null)"
+        [[ "$size" =~ ^[0-9]+$ ]] || exit 0
+        w="$(head -c "$size" "$LAUNCH_LOG" 2>/dev/null \
+             | awk '/^sandbox-(game|landlock): (warning|note): / { p = 1; sub(/^sandbox-[a-z]+: /, ""); print; next }
+                    p && /^ / { sub(/^ +/, "  "); print; next } { p = 0 }')"
+        [ -n "$w" ] || exit 0
+        notify-send -- "sandbox-game: ${BASE}" "$w" 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 &
+    NOTE=$!
+fi
 if wait "$GAME"; then
-    kill "$NOTE" 2>/dev/null
+    [ -z "$NOTE" ] || { kill "$NOTE" 2>/dev/null; wait "$NOTE" 2>/dev/null; }
+    if [ "$LAUNCH_LOG" = "$NEWLOG" ] && [ ! -e "$LOG" ]; then
+        mv -f -- "$NEWLOG" "$LOG"
+        LAUNCH_LOG=$LOG
+    fi
     exit 0
 else
     rc=$?
-    kill "$NOTE" 2>/dev/null
+    [ -z "$NOTE" ] || { kill "$NOTE" 2>/dev/null; wait "$NOTE" 2>/dev/null; }
+    if [ "$LAUNCH_LOG" = "$NEWLOG" ] && [ ! -e "$LOG" ]; then
+        mv -f -- "$NEWLOG" "$LOG"
+        LAUNCH_LOG=$LOG
+    fi
     # A .NET program's starter, finding no runtime it can use, says so in
     # these words and exits 131; the answer is in the preferences.
     HINT=""
-    if grep -qE 'You must install (or update )?\.NET' "$LOG" 2>/dev/null; then
+    if grep -qE 'You must install (or update )?\.NET' "$LAUNCH_LOG" 2>/dev/null; then
         if [[ " ${FLAG[*]} " == *" --dotnet "* ]]; then
             HINT="The sandbox gave this .NET program your .NET runtime, but not a version it accepts. Install the version the log below asks for."
         elif [ "$DOTNET_APP" = 1 ]; then
@@ -348,9 +406,9 @@ else
         fi
     fi
     if ! { [ -z "$HINT" ] || printf '%s\n\n' "$HINT"
-           echo "exit code: $rc"; echo "log: $LOG"; echo; tail -n 80 "$LOG"; } \
+           echo "exit code: $rc"; echo "log: $LAUNCH_LOG"; echo; tail -n 80 "$LAUNCH_LOG"; } \
         | dialog log --title="sandbox-game failed (${BASE})"; then
-        notify-send "sandbox-game failed (${BASE})" "exit $rc — see $LOG" 2>/dev/null
+        notify-send -- "sandbox-game failed (${BASE})" "exit $rc — see $LAUNCH_LOG" 2>/dev/null
     fi
     exit "$rc"
 fi

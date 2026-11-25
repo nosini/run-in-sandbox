@@ -12,31 +12,44 @@ set -uo pipefail
 
 SANDBOX="$HOME/.local/bin/sandbox-game"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
-msg() { dialog info --text="$1" 2>/dev/null || notify-send "sandbox-game" "$1" 2>/dev/null || true; }
+msg() { dialog info --text="$1" 2>/dev/null || notify-send -- "sandbox-game" "$1" 2>/dev/null || true; }
 die() {
-    printf '%b\n' "$1" >&2
+    printf '%s\n' "$1" >&2
     if declare -F dialog >/dev/null; then dialog error --text="$1" 2>/dev/null && exit 1; fi
-    notify-send "sandbox-game" "$1" 2>/dev/null || true
+    notify-send -- "sandbox-game" "$1" 2>/dev/null || true
     exit 1
 }
 [ -n "$SANDBOX" ] || die "sandbox-game not found in ~/.local/bin or PATH."
 
 # Beside sandbox-game when that is a checkout, else where install.sh puts it.
-LIB="$(dirname "$(realpath "$SANDBOX")")/sandbox-game-lib"
+SANDBOX="$(realpath -- "$SANDBOX" 2>/dev/null)" \
+    || die "sandbox-game not found in ~/.local/bin or PATH."
+LIB="$(dirname -- "$SANDBOX")/sandbox-game-lib"
 [ -f "$LIB" ] || LIB="$HOME/.local/lib/sandbox-game/sandbox-game-lib"
 # shellcheck source=sandbox-game-lib
-. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):\n$LIB"
+. "$LIB" 2>/dev/null || die "sandbox-game-lib not found (run install.sh):"$'\n'"$LIB"
 
-SEL="$(head -n1 <<<"${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}")"
-[ -n "$SEL" ] || SEL="$(pwd)"
-SEL="$(realpath "$SEL")"
-[ -e "$SEL" ] || die "Selection not found:\n$SEL"
+# A path argument is taken as it is, newlines and all. The environment
+# variable is newline-separated and ends with a newline: anything left after
+# removing that one separator is more than one selection, which this script
+# cannot guess between.
+[ "$#" -le 1 ] || die "Select one file or folder at a time."
+if [ "$#" -gt 0 ] && [ -n "$1" ]; then
+    SEL=$1
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    SEL=${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS%$'\n'}
+    [[ "$SEL" != *$'\n'* ]] || die "Select one file or folder at a time."
+else
+    SEL="$(pwd)"
+fi
+SEL="$(realpath -- "$SEL")" || die "Selection not found:"$'\n'"$SEL"
+[ -e "$SEL" ] || die "Selection not found:"$'\n'"$SEL"
 # Same mapping the launcher uses, so this finds the sandbox it started.
 resolve_selection "$SEL"
 NAME="$("$SANDBOX" --print-name "$R_GAMEDIR")" \
-    || die "sandbox-game could not derive a name for:\n$R_GAMEDIR"
+    || die "sandbox-game could not derive a name for:"$'\n'"$R_GAMEDIR"
 
-if dialog question --title="Stop sandboxed game" --text="Stop $NAME?\n\nAnything not saved is lost."; then :
+if dialog question --title="Stop sandboxed game" --text="Stop $NAME?"$'\n\n'"Anything not saved is lost."; then :
 else
     rc=$?
     [ "$rc" != 1 ] || exit 0
@@ -45,6 +58,6 @@ fi
 if ! OUT="$("$SANDBOX" --stop "$NAME" 2>&1)"; then
     case "$OUT" in
         "no running sandbox"*) msg "$NAME is not running." ;;
-        *) die "Could not stop $NAME:\n$OUT" ;;
+        *) die "Could not stop $NAME:"$'\n'"$OUT" ;;
     esac
 fi

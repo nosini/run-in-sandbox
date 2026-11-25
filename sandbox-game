@@ -3730,6 +3730,13 @@ fi
 # exits, both to unmount fuse-overlayfs and to clear the overlay workdir. The
 # cost is one idle shell for the life of the game, and --die-with-parent
 # already means killing it takes the sandbox with it.
+# Record the log offset before the sandbox starts so a caller such as the
+# file-manager script turns only sandbox-game's own pre-launch warnings into
+# notifications, never lines printed by the game.
+if [ -n "${SANDBOX_WARNING_BOUNDARY:-}" ]; then
+    boundary_size="$(stat -L -c %s /proc/self/fd/3 3>&2 2>/dev/null)" || boundary_size=0
+    printf '%s\n' "${boundary_size:-0}" > "$SANDBOX_WARNING_BOUNDARY" 2>/dev/null || true
+fi
 PLAY_START="$(date +%s)"
 if [ "$NET" = 0 ] || [ "$SEPARATE_UID" = systemd ]; then
     # Backgrounded and waited on so trapped signals (INT, TERM, HUP) interrupt

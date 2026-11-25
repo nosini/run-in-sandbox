@@ -5743,6 +5743,343 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertIn("10.0.0.9 game.example", hosts.read_text())
 
 
+    def test_launcher_does_not_notify_game_printed_warnings(self):
+        game = self.base / "notify-game"
+        game.mkdir()
+        (game / "start.sh").write_text("#!/bin/sh\nexit 0\n")
+        (game / "start.sh").chmod(0o755)
+        bindir = self.base / "notify-bin"
+        bindir.mkdir()
+        wrapper = bindir / "sandbox-game"
+        wrapper.write_text(
+            "#!/bin/bash\n"
+            f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+            "printf 'sandbox-game: warning: LEGIT\\n' >&2\n"
+            '[ -z "${SANDBOX_WARNING_BOUNDARY:-}" ] || '
+            'stat -L -c %s /proc/self/fd/2 > "$SANDBOX_WARNING_BOUNDARY"\n'
+            "printf 'sandbox-game: warning: SPOOFED\\n' >&2\n"
+            "sleep 4\n")
+        wrapper.chmod(0o755)
+        notify = bindir / "notify-send"
+        notify_log = self.base / "notifications"
+        notify.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{notify_log}"\n')
+        notify.chmod(0o755)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        env = {**self.env, "SANDBOX_BACKEND": str(wrapper),
+               "PATH": str(bindir) + ":/usr/bin:/bin",
+               "NAUTILUS_SCRIPT_SELECTED_FILE_PATHS": str(game)}
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(notify_log.is_file(), "no notification was attempted")
+        notifications = notify_log.read_text()
+        self.assertIn("LEGIT", notifications)
+        self.assertNotIn("SPOOFED", notifications)
+        self.assertIn("SPOOFED", (self.home / "game-sandboxes" / "notify-game" /
+                                  "lastrun.log").read_text())
+
+    def test_a_second_launch_keeps_the_running_games_log(self):
+        (self.game / "start.sh").write_text("#!/bin/sh\nexit 0\n")
+        (self.game / "start.sh").chmod(0o755)
+        name = self.cli("--print-name", self.game).stdout.strip()
+        capture = self.home / "game-sandboxes" / name
+        capture.mkdir(parents=True)
+        log = capture / "lastrun.log"
+        log.write_text("the running game's log\n")
+        bindir = self.base / "busy-bin"
+        bindir.mkdir()
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        'echo "\'game\' is already running" >&2\n'
+                        'exit 1\n')
+        stub.chmod(0o755)
+        notify = bindir / "notify-send"
+        notify.write_text("#!/bin/sh\nexit 0\n")
+        notify.chmod(0o755)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True, exist_ok=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        env = {**self.env, "SANDBOX_BACKEND": str(stub),
+               "PATH": str(bindir) + ":/usr/bin:/bin",
+               "NAUTILUS_SCRIPT_SELECTED_FILE_PATHS": str(self.game),
+               "SANDBOX_DIALOG": str(ROOT / "tests" / "dialog_recorder.py"),
+               "DIALOG_RECORD": str(self.base / "failure.json"),
+               "DIALOG_EXIT": "1"}
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(log.read_text(), "the running game's log\n")
+        self.assertIn("already running", (self.base / "failure.json").read_text())
+
+    def test_nautilus_selection_keeps_newlines_and_refuses_multiple_paths(self):
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        (helpers / "sandbox-game-lib").symlink_to(ROOT / "sandbox-game-lib")
+        recorded = self.base / "stopped-args"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\n" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        weird = self.base / "odd\nname"
+        weird.mkdir()
+        self.prepare_dialog([])
+        self.env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+        self.env["DIALOG_EXIT"] = "0"
+        result = subprocess.run([str(ROOT / "Stop sandboxed game"), str(weird)],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded.read_text().splitlines()[0], "--stop")
+        recorded.unlink()
+        self.env.pop("DIALOG_EXIT")
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = f"{weird}\n{self.game}\n"
+        result = subprocess.run([str(ROOT / "Stop sandboxed game")],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Select one file or folder", result.stderr)
+        self.assertFalse(recorded.exists())
+
+    def test_nwjs_runtime_entry_named_like_the_game_is_not_lost(self):
+        game = self.base / "games" / "lib"
+        (game / "www").mkdir(parents=True)
+        (game / "www" / "index.html").write_text("")
+        (game / "package.json").write_text('{"name": "", "main": "www/index.html"}')
+        nwjs = self.base / "nwjs"
+        (nwjs / "lib").mkdir(parents=True)
+        (nwjs / "lib" / "runtime").write_text("")
+        (nwjs / "nw").write_text('#!/bin/sh\n[ -d "${0%/*}/lib" ] && echo runtime-linked\n'
+                                 '[ "$0" -ef /nwjs/nw ] && echo same\n')
+        (nwjs / "nw").chmod(0o755)
+        self.env["NWJS_DIR"] = str(nwjs)
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        helpers = self.home / ".local" / "lib" / "sandbox-game"
+        helpers.mkdir(parents=True)
+        for helper in ("sandbox-game-lib", "nwjs-casefold.js"):
+            (helpers / helper).symlink_to(ROOT / helper)
+        recorded = self.base / "launched"
+        stub = bindir / "sandbox-game"
+        stub.write_text('#!/bin/sh\n'
+                        f'[ "$1" = --print-name ] && exec "{ROOT / "sandbox-game"}" "$@"\n'
+                        f'printf "%s\\0" "$@" > "{recorded}"\n')
+        stub.chmod(0o755)
+        self.env["PATH"] = "/usr/bin:/bin"
+        self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(game)
+        result = subprocess.run([str(ROOT / "Sandbox game")], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = recorded.read_text().split("\0")[:-1]
+        mounts = [args[i:i + 3] for i, word in enumerate(args) if word == "--ro"]
+        self.assertIn(["--ro", str(nwjs / "nw"), "/tmp/nwrun/nw"], mounts)
+        command = args[args.index(str(game)) + 1:]
+        self.assertEqual(command[command.index("_") + 4], "/tmp/nwrun/nw")
+
+    def test_nwjs_casefold_handles_paths_cache_writes_and_url_edges(self):
+        runtime = self.base / "casefold-runtime"
+        app = runtime / "app"
+        (app / "Img" / "Pictures").mkdir(parents=True)
+        (app / "Img" / "Pictures" / "b.png").write_text("image")
+        (app / "Save").mkdir()
+        (app / "fonts").mkdir()
+        (app / "fonts" / "font)x.woff").write_text("font")
+        (runtime / "Outside").mkdir()
+        (runtime / "Outside" / "File.txt").write_text("outside")
+        script = r'''
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[2];
+const casefold = process.argv[3];
+const runtime = path.dirname(root);
+class Media {
+    get src() { return this._src; }
+    set src(value) { this._src = value; }
+}
+class FakeRequest {
+    constructor(url, init) {
+        this.url = typeof url === "string" ? url : url.url;
+        if (init && typeof init === "object") {
+            this.method = init.method || "GET";
+        }
+    }
+}
+class FakeElement {
+    setAttribute(name, value) { this.attributes = this.attributes || {}; this.attributes[name] = value; }
+}
+class FakeAudio {
+    constructor(src) { this.src = src; }
+}
+class FakeFontFace {
+    constructor(family, source) { this.source = source; }
+}
+global.Request = FakeRequest;
+global.Element = FakeElement;
+global.Audio = FakeAudio;
+global.FontFace = FakeFontFace;
+global.HTMLImageElement = Media;
+global.HTMLMediaElement = Media;
+global.HTMLSourceElement = Media;
+global.XMLHttpRequest = class { open() {} };
+let fetched = null;
+global.window = {
+    fetch: async (input) => { fetched = input; return input; },
+    FontFace: FakeFontFace, Audio: FakeAudio, Element: FakeElement,
+};
+global.document = { baseURI: "chrome-extension://test/" };
+global.location = { protocol: "chrome-extension:", host: "test" };
+global.nw = { __dirname: root };
+require(casefold);
+
+fs.writeFileSync(path.join(runtime, "cwd.txt"), "cwd");
+process.chdir(runtime);
+// An existing CWD-relative path outside the app stays outside it.
+assert.strictEqual(fs.readFileSync("cwd.txt", "utf8"), "cwd");
+// A relative path that only exists in the app is found there.
+fs.writeFileSync(path.join(root, "root.txt"), "root");
+assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "root");
+// Windows separators are separators on the Linux side too.
+assert.strictEqual(fs.readFileSync(root + "\\img\\pictures\\B.PNG", "utf8"), "image");
+
+// A recursive mkdir below a cached, missing folder is visible at once.
+fs.readdirSync(root);
+fs.mkdirSync(path.join(root, "New", "Deep"), { recursive: true });
+assert(fs.existsSync(path.join(root, "New")));
+assert(fs.existsSync(path.join(root, "new", "deep")));
+fs.mkdirSync(path.join(root, "SAVE", "Sub"), { recursive: true });
+assert(fs.existsSync(path.join(root, "Save", "Sub")));
+assert(!fs.readdirSync(root).includes("SAVE"));
+
+// Renaming and removing a folder drops its old listing and old children.
+fs.mkdirSync(path.join(root, "Old", "Child"), { recursive: true });
+fs.readdirSync(path.join(root, "Old"));
+fs.renameSync(path.join(root, "Old"), path.join(root, "Moved"));
+assert(!fs.existsSync(path.join(root, "Old")));
+assert(fs.existsSync(path.join(root, "Moved", "Child")));
+fs.rmSync(path.join(root, "Moved"), { recursive: true });
+assert(!fs.existsSync(path.join(root, "Moved")));
+fs.mkdirSync(path.join(root, "Moved"));
+assert(fs.existsSync(path.join(root, "Moved")));
+
+// A differently-cased existing file is changed, not duplicated.
+fs.writeFileSync(path.join(root, "Save", "old.sav"), "old");
+fs.writeFileSync(path.join(root, "SAVE", "OLD.SAV"), "new");
+assert.strictEqual(fs.readFileSync(path.join(root, "Save", "old.sav"), "utf8"), "new");
+assert.deepStrictEqual(fs.readdirSync(path.join(root, "Save"))
+                       .filter((name) => /^old\.sav$/i.test(name)), ["old.sav"]);
+const fd = fs.openSync(path.join(root, "SAVE", "OLD.SAV"), "w");
+fs.writeSync(fd, "open");
+fs.closeSync(fd);
+assert.strictEqual(fs.readFileSync(path.join(root, "Save", "old.sav"), "utf8"), "open");
+
+// URLs: repeated slashes fold, while encoded slashes and dot segments do not
+// get past the app folder.
+const image = new Media();
+image.src = "chrome-extension://test//img//pictures/B.PNG";
+assert(image.src.endsWith("/Img/Pictures/b.png"), image.src);
+image.src = "//test/img/pictures/B.PNG";
+assert(image.src.endsWith("/Img/Pictures/b.png"), image.src);
+for (const bad of ["chrome-extension://test/../Outside/File.txt",
+                   "chrome-extension://test/img%2F..%2F..%2FOutside/File.txt",
+                   "chrome-extension://test/%2e%2e/Outside/File.txt"]) {
+    image.src = bad;
+    assert.strictEqual(image.src, bad);
+}
+const element = new Element();
+element.setAttribute("src", "chrome-extension://test/img/pictures/B.PNG");
+assert(element.attributes.src.endsWith("/Img/Pictures/b.png"), element.attributes.src);
+element.setAttribute("href", "https://example.com/Outside");
+assert.strictEqual(element.attributes.href, "https://example.com/Outside");
+const audio = new Audio("chrome-extension://test/img/pictures/B.PNG");
+assert(audio.src.endsWith("/Img/Pictures/b.png"), audio.src);
+const font = new window.FontFace("x", 'url("chrome-extension://test/fonts/FONT)X.WOFF")');
+assert(font.source.includes("/fonts/font)x.woff"), font.source);
+
+async function main() {
+    const request = new Request("chrome-extension://test/img/pictures/B.PNG");
+    await window.fetch(request);
+    assert(fetched instanceof Request);
+    assert(fetched.url.endsWith("/Img/Pictures/b.png"), fetched.url);
+    fs.writeFileSync(path.join(root, "Save", "stream.sav"), "stream");
+    await new Promise((resolve, reject) => {
+        const stream = fs.createWriteStream(path.join(root, "SAVE", "STREAM.SAV"));
+        stream.on("error", reject);
+        stream.on("close", resolve);
+        stream.end("streamed");
+    });
+    assert.strictEqual(fs.readFileSync(path.join(root, "Save", "stream.sav"), "utf8"),
+                       "streamed");
+    assert(!fs.readdirSync(path.join(root, "Save")).includes("STREAM.SAV"));
+    console.log("casefold edges ok");
+}
+main().catch((error) => { console.error(error); process.exit(1); });
+'''
+        result = subprocess.run(["node", "-e", script, "casefold", str(app),
+                                 str(ROOT / "nwjs-casefold.js")],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("casefold edges ok", result.stdout)
+
+    def test_completion_handles_globs_spaces_and_boolean_options(self):
+        bindir = self.base / "completion-bin"
+        bindir.mkdir()
+        fake = bindir / "sandbox-game"
+        fake.write_text('#!/bin/sh\n'
+                        'case "$1" in\n'
+                        '  --list-proton) printf "%s\\n" "Proton - Experimental" "GE-Proton9-1" ;;\n'
+                        '  --list-nwjs) printf "%s\\n" "0.50.0" "0.40.0" ;;\n'
+                        'esac\n')
+        fake.chmod(0o755)
+        gamedir = self.base / "game with space"
+        (gamedir / "spaced dir").mkdir(parents=True)
+        (gamedir / "spaced dir" / "deep file.txt").write_text("")
+        (gamedir / "star*file").write_text("")
+        (gamedir / "starXfile").write_text("")
+        def complete(*words):
+            script = r'''
+                _init_completion() {
+                    cur=${COMP_WORDS[COMP_CWORD]}
+                    prev=${COMP_WORDS[COMP_CWORD-1]}
+                    words=("${COMP_WORDS[@]}")
+                    cword=$COMP_CWORD
+                }
+                _filedir() { COMPREPLY=(/host/); }
+                source "$1"
+                shift
+                COMP_WORDS=("$@")
+                COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+                COMP_LINE="${COMP_WORDS[*]}"; COMP_POINT=${#COMP_LINE}
+                _sandbox_game sandbox-game "${COMP_WORDS[COMP_CWORD]}" \
+                    "${COMP_WORDS[COMP_CWORD-1]}" 2>/dev/null
+                if (( ${#COMPREPLY[@]} )); then printf '%s\n' "${COMPREPLY[@]}"; fi
+            '''
+            env = {**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"}
+            result = subprocess.run(
+                ["bash", "-c", script, "tab", str(ROOT / "completions" / "sandbox-game"), *words],
+                env=env, cwd=self.base, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.splitlines()
+        self.assertEqual(complete("sandbox-game", str(gamedir), "/game/star*file"),
+                         ["/game/star*file"])
+        self.assertEqual(complete("sandbox-game", str(gamedir), "/game/spaced dir/de"),
+                         ["/game/spaced dir/deep file.txt"])
+        self.assertEqual(complete("sandbox-game", "--proton=Pro"),
+                         [r"--proton=Proton\ -\ Experimental"])
+        self.assertEqual(complete("sandbox-game", "--nwjs-version", ""),
+                         ["0.50.0", "0.40.0"])
+        self.assertEqual(complete("sandbox-game", "--nwjs-version=0"),
+                         ["--nwjs-version=0.50.0", "--nwjs-version=0.40.0"])
+        self.assertEqual(complete("sandbox-game", "--gamescope", "--wa"),
+                         ["--wayland", "--wayland-x11"])
+        self.assertEqual(complete("sandbox-game", "--print-name", "--he"),
+                         ["--headless", "--help"])
+        self.assertEqual(complete("sandbox-game", "--x11-exe", "/us"), [])
+
+
 def separate_uid_missing():
     """Why SANDBOX_SEPARATE_UID cannot run here, or None."""
     for tool in ("newuidmap", "newgidmap", "nsenter", "setfacl", "fuse-overlayfs"):
@@ -6659,6 +6996,142 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(),
                          ["1.6.5 no", "1.6.6 yes", "1.6.10 yes", "1.7 yes", "2.0 yes"])
+
+
+    def test_uninstall_selinux_checks_every_ps_label_without_sigpipe(self):
+        self.command("id", "printf '0\\n'")
+        semodule_log = self.base / "semodule.args"
+        self.command("semodule",
+                     'printf "%s\\n" "$*" >> "$SEMODULE_LOG"\n'
+                     'if [ "$1" = -l ]; then printf "sandbox_pasta 1.0\\n"; fi')
+        self.command("ps",
+                     'printf ":sandbox_pasta_t:\\n"\n'
+                     'i=0\n'
+                     'while [ "$i" -lt 20000 ]; do\n'
+                     '  printf "system_u:system_r:init_t:s0\\n"\n'
+                     '  i=$((i + 1))\n'
+                     'done')
+        result = self.run_script(("--uninstall-selinux",),
+                                 {"SEMODULE_LOG": str(semodule_log)})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("still runs in sandbox_pasta_t", result.stderr)
+        self.assertNotIn("-r", semodule_log.read_text().split())
+
+    def test_uninstall_removes_dangling_symlinks_and_rejects_extra_arguments(self):
+        binfile = self.home / ".local" / "bin" / "sandbox-game"
+        binfile.parent.mkdir(parents=True)
+        binfile.symlink_to(self.home / "missing-bin")
+        helper = self.home / ".local" / "lib" / "sandbox-game" / "sandbox-seccomp"
+        helper.parent.mkdir(parents=True)
+        helper.symlink_to(self.home / "missing-helper")
+        result = self.run_script(("--uninstall",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(binfile))
+        self.assertFalse(os.path.lexists(helper))
+        binfile.write_text("")
+        result = self.run_script(("--uninstall", "--restrict-audio"))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertTrue(binfile.is_file(), "uninstall ran before rejecting the argument")
+
+    def test_uninstall_removes_partial_audio_and_restarts_wireplumber(self):
+        conf = self.home / ".config"
+        data = self.home / ".local" / "share"
+        for path in (conf / "pipewire" / "sandbox-pulse.conf",
+                     conf / "wireplumber" / "wireplumber.conf.d" /
+                     "60-sandbox-audio.conf",
+                     data / "wireplumber" / "scripts" / "sandbox-game" /
+                     "sandbox-access.lua",
+                     conf / "sandbox-game" / "audio-restart-pending"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        systemctl_log = self.base / "systemctl.args"
+        self.command("systemctl", 'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"')
+        result = self.run_script(("--uninstall",),
+                                 {"SYSTEMCTL_LOG": str(systemctl_log)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((conf / "pipewire" / "sandbox-pulse.conf").exists())
+        self.assertFalse((conf / "wireplumber" / "wireplumber.conf.d" /
+                          "60-sandbox-audio.conf").exists())
+        self.assertFalse((data / "wireplumber" / "scripts" / "sandbox-game" /
+                          "sandbox-access.lua").exists())
+        self.assertFalse((conf / "sandbox-game" / "audio-restart-pending").exists())
+        calls = systemctl_log.read_text().splitlines()
+        self.assertIn("--user restart wireplumber", calls)
+        self.assertIn("--user daemon-reload", calls)
+
+    def test_restrict_audio_retry_restarts_wireplumber_after_a_failure(self):
+        for tool in ("pw-cli", "pactl", "pipewire"):
+            self.command(tool, "exit 1")
+        systemctl_log = self.base / "systemctl.args"
+        restarted = self.base / "wireplumber-failed-once"
+        self.command("systemctl",
+                     'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n'
+                     'case "$*" in\n'
+                     '  "--user restart wireplumber")\n'
+                     '    [ -e "$RESTARTED" ] || { : > "$RESTARTED"; exit 1; } ;;\n'
+                     'esac')
+        env = {"SYSTEMCTL_LOG": str(systemctl_log), "RESTARTED": str(restarted)}
+        first = subprocess.run(["bash", str(ROOT / "install.sh"), "--restrict-audio"],
+                               text=True, env={**self.env, **env}, cwd=self.base,
+                               capture_output=True, timeout=30)
+        self.assertNotEqual(first.returncode, 0, first.stderr)
+        marker = self.home / ".config" / "sandbox-game" / "audio-restart-pending"
+        self.assertTrue(marker.is_file())
+        second = subprocess.run(["bash", str(ROOT / "install.sh"), "--restrict-audio"],
+                                text=True, env={**self.env, **env}, cwd=self.base,
+                                capture_output=True, timeout=30)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertFalse(marker.exists())
+        calls = systemctl_log.read_text().splitlines()
+        self.assertEqual(calls.count("--user restart wireplumber"), 2)
+        self.assertEqual(calls.count("--user restart sandbox-pulse.service"), 1)
+
+
+class SatelliteScriptTests(unittest.TestCase):
+    def test_cargo_target_dir_is_private_under_work(self):
+        if os.geteuid() == 0:
+            self.skipTest("the checkout build refuses root")
+        temporary = tempfile.TemporaryDirectory(prefix="sandbox-satellite-test-")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        checkout = base / "checkout"
+        checkout.mkdir()
+        shutil.copy2(ROOT / "get-satellite.sh", checkout / "get-satellite.sh")
+        (checkout / "get-satellite.sh").chmod(0o755)
+        bindir = base / "bin"
+        bindir.mkdir()
+        commit = "7fac1ea497ca248c6b0032efcbd55dbd98b47925"
+        def tool(name, body):
+            path = bindir / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o755)
+        tool("git", f'case "$*" in *"rev-parse HEAD"*) printf "{commit}\\n" ;; esac')
+        tool("pkg-config", "exit 0")
+        tool("clang", "exit 0")
+        target_log = base / "cargo.target"
+        tool("cargo",
+             'printf "%s\\n" "$CARGO_TARGET_DIR" > "$CARGO_LOG"\n'
+             'work=${CARGO_TARGET_DIR%/target}\n'
+             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+             'printf "#!/bin/sh\\n" > "$CARGO_TARGET_DIR/release/xwayland-satellite"\n'
+             'chmod 755 "$CARGO_TARGET_DIR/release/xwayland-satellite"\n'
+             'printf license > "$work/LICENSE"')
+        shared = base / "shared"
+        shared.mkdir()
+        result = subprocess.run(
+            [str(checkout / "get-satellite.sh"), "--from-source"], text=True,
+            env={**os.environ, "PATH": str(bindir) + ":/usr/bin:/bin",
+                 "SATELLITE_BUILD_DIR": str(shared), "CARGO_LOG": str(target_log)},
+            cwd=base, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = Path(target_log.read_text().strip())
+        self.assertTrue(target.is_relative_to(shared))
+        self.assertEqual(target.parent.name[:5], "work.")
+        self.assertNotEqual(target, shared / "target")
+        self.assertFalse((shared / "target").exists())
+        self.assertTrue((checkout / "sandbox-xwayland-satellite").is_file())
+        self.assertTrue((checkout / "satellite-LICENSE").is_file())
 
 
 if __name__ == "__main__":

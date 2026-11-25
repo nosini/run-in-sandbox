@@ -85,6 +85,15 @@ each_audio() {
     "$@" 644 deny-restricted-capture.lua "$DATA/wireplumber/scripts/sandbox-game"
     "$@" 644 sandbox-access.lua          "$DATA/wireplumber/scripts/sandbox-game"
 }
+# Set to 1 by mark_audio when any of each_audio's files is installed.
+AUDIO_PRESENT=0
+mark_audio() {
+    if [ -e "$3/$2" ] || [ -L "$3/$2" ]; then AUDIO_PRESENT=1; fi
+}
+# Kept while the audio files and the two restarts are not in step: a failed
+# retry then restarts WirePlumber and sandbox-pulse even when every file
+# already matches its source. Removed only after both restarts have succeeded.
+AUDIO_MARKER="$CONF/sandbox-game/audio-restart-pending"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -101,7 +110,8 @@ ref_is_pinned() {
 }
 
 remove_one() {
-    [ ! -e "$3/$2" ] || { rm -f "$3/$2"; say "removed $3/$2"; }
+    [ -e "$3/$2" ] || [ -L "$3/$2" ] || return 0
+    rm -f "$3/$2"; say "removed $3/$2"
 }
 install_one() {
     install -Dm"$1" "$SRC/$2" "$3/$2"; say "installed $3/$2"
@@ -145,6 +155,7 @@ case "${1:-}" in
         fi ;;
 esac
 AUDIO=0
+UNINSTALL=0
 SYSTEMD_MODE=""
 SELINUX_MODE=""
 case "${1:-}" in
@@ -152,26 +163,31 @@ case "${1:-}" in
     --uninstall-systemd-backend) SYSTEMD_MODE=uninstall; shift ;;
     --selinux) SELINUX_MODE=install; shift ;;
     --uninstall-selinux) SELINUX_MODE=uninstall; shift ;;
-    --uninstall)
-        each remove_one
-        each_old remove_one
-        remove_one - sandbox-xwayland-satellite "$HELPERS"
-        remove_one - satellite-LICENSE "$HELPERS"
-        rmdir "$HELPERS" 2>/dev/null || true
-        each_completion remove_one
-        if [ -e "$CONF/systemd/user/sandbox-pulse.service" ]; then
-            systemctl --user disable --now sandbox-pulse.service 2>/dev/null || true
-            each_audio remove_one
-            systemctl --user daemon-reload 2>/dev/null || true
-            systemctl --user restart wireplumber 2>/dev/null || true
-        fi
-        say "left alone: ~/game-sandboxes, ~/.config/sandbox-game, $TOOLS"
-        exit 0 ;;
+    --uninstall) UNINSTALL=1; shift ;;
     --restrict-audio) AUDIO=1; shift ;;
 esac
 if [ -z "$SYSTEMD_MODE" ] && [ "$#" -ne 0 ]; then
     echo "usage: install.sh [--restrict-audio | --uninstall | --systemd-backend UID... | --uninstall-systemd-backend | --selinux | --uninstall-selinux]" >&2
     exit 1
+fi
+if [ "$UNINSTALL" = 1 ]; then
+    each remove_one
+    each_old remove_one
+    remove_one - sandbox-xwayland-satellite "$HELPERS"
+    remove_one - satellite-LICENSE "$HELPERS"
+    rmdir "$HELPERS" 2>/dev/null || true
+    each_completion remove_one
+    rm -f -- "$AUDIO_MARKER"
+    AUDIO_PRESENT=0
+    each_audio mark_audio
+    if [ "$AUDIO_PRESENT" = 1 ]; then
+        systemctl --user disable --now sandbox-pulse.service 2>/dev/null || true
+        each_audio remove_one
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user restart wireplumber 2>/dev/null || true
+    fi
+    say "left alone: ~/game-sandboxes, ~/.config/sandbox-game, $TOOLS"
+    exit 0
 fi
 if [ -n "$SYSTEMD_MODE" ] && [ "$(id -u)" != 0 ]; then
     echo "the systemd backend administrator setup needs root; rerun this command with sudo" >&2
@@ -246,7 +262,8 @@ elif [ "$SELINUX_MODE" = uninstall ]; then
     if command -v semodule >/dev/null && semodule -l | awk '$1 == "sandbox_pasta" { f = 1 } END { exit !f }'; then
         # A pasta still in the domain would be left with a label the policy
         # no longer has, and lose the network it serves.
-        if ps -eo label= | grep -q ':sandbox_pasta_t:'; then
+        labels="$(ps -eo label=)"
+        if [[ "$labels" == *:sandbox_pasta_t:* ]]; then
             echo "a game's pasta still runs in sandbox_pasta_t; stop games started with --net first" >&2
             exit 1
         fi
@@ -266,27 +283,34 @@ if [ -x "$SRC/sandbox-xwayland-satellite" ]; then
         exit 1; }
     SATELLITE=1
 fi
+each_old remove_one
 each install_one
 if [ "$SATELLITE" = 1 ]; then
     install_one 755 sandbox-xwayland-satellite "$HELPERS"
     install -Dm644 "$SRC/satellite-LICENSE" "$HELPERS/satellite-LICENSE"
 fi
-each_old remove_one
 each_completion install_completion
 mkdir -p "$TOOLS"
 say "tools folder: $TOOLS (unpack a portable Cheat Engine here)"
 
 if [ "$AUDIO" = 1 ]; then
+    mkdir -p "$CONF/sandbox-game"
+    audio_retry=0
+    [ ! -e "$AUDIO_MARKER" ] || audio_retry=1
+    : > "$AUDIO_MARKER"
     each_audio install_audio
     # WirePlumber first: its hook has to be in place before a game can connect.
     # A restart re-links every stream, so expect a moment of silence -- and
-    # only when something changed.
+    # only when something changed, or a previous run stopped before both
+    # restarts had succeeded.
     systemctl --user daemon-reload
-    if [ "$AUDIO_CHANGED" = 1 ]; then
+    if [ "$AUDIO_CHANGED" = 1 ] || [ "$audio_retry" = 1 ]; then
         systemctl --user restart wireplumber
         systemctl --user enable sandbox-pulse.service
         systemctl --user restart sandbox-pulse.service
+        rm -f -- "$AUDIO_MARKER"
     else
+        rm -f -- "$AUDIO_MARKER"
         systemctl --user enable --now sandbox-pulse.service
     fi
     for _ in $(seq 20); do

@@ -82,6 +82,24 @@ _sandbox_game_matches()
     done
 }
 
+# Like _sandbox_game_matches, for an option value: the word being completed
+# may be only the value, or the whole --option=value. A Proton install name can
+# hold spaces, so it is shell-escaped before it goes into COMPREPLY.
+_sandbox_game_value_matches()
+{
+    local prefix=$1 match=$2 escape=$3 cand word
+    shift 3
+    COMPREPLY=()
+    for cand in "$@"; do
+        [[ $cand == "$match"* ]] || continue
+        word=$prefix$cand
+        if [[ $escape == 1 ]]; then
+            printf -v word '%q' "$word"
+        fi
+        COMPREPLY+=("$word")
+    done
+}
+
 # The command, as the sandbox sees it: /game/... is the game folder, and so is
 # a relative path, the sandbox starting out in /game. $1 = the game folder as
 # typed. Anything else absolute is the host's /usr and the like.
@@ -104,8 +122,10 @@ _sandbox_game_inside()
         base=$root/$cur prefix=
     fi
     local IFS=$'\n'
+    local -a matches
+    mapfile -t matches < <(compgen -f -- "$base")
     COMPREPLY=()
-    for m in $(compgen -f -- "$base"); do
+    for m in "${matches[@]}"; do
         [[ -d $m ]] && m+=/
         r=${m#"$root"}
         COMPREPLY+=("${prefix:-${r#/}}${prefix:+$r}")
@@ -126,7 +146,7 @@ _sandbox_game()
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name | --env | --stop | --print-name | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require | --nwjs-version) skip=1 ;;
+            --name | --env | --stop | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require | --nwjs-version) skip=1 ;;
             --ro) skip=2 ;;
             --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
@@ -142,64 +162,81 @@ _sandbox_game()
         return
     fi
 
-    # An option's value. --opt=value arrives split into prev and cur.
-    local split_here=""
-    [[ ${words[cword]} == "$prev="* ]] && split_here=1
-    case $prev in
+    # An option's value. --opt=value arrives as prev=--opt and cur=value, or
+    # as one --opt=value word.
+    local current=${words[cword]} opt=$prev value=$cur prefix="" split_here=0
+    if [[ $current == --*=* ]]; then
+        opt=${current%%=*}
+        value=${current#*=}
+        prefix="${opt}="
+        split_here=1
+    elif [[ $prev == --*=* ]]; then
+        opt=${prev%%=*}
+        value=$cur
+        split_here=1
+    elif [[ $prev == --* ]]; then
+        opt=$prev
+        # bash-completion's -s splitter may leave cur as the value while prev
+        # has lost the "=". The line still says whether it was typed.
+        [[ ${COMP_LINE:0:COMP_POINT} == *"$prev="* ]] && split_here=1
+    fi
+    case $opt in
         --x11-backend)
-            _sandbox_game_matches gamescope satellite
+            _sandbox_game_value_matches "$prefix" "$value" 0 gamescope satellite
             return ;;
         --require)
             # A comma-separated list: complete the word after the last comma.
-            local done=${cur%"${cur##*,}"} cand
+            local done=${value%"${value##*,}"} cand
             COMPREPLY=()
             for cand in landlock scoped private-display limits audio seccomp all; do
-                [[ $cand == "${cur##*,}"* ]] && COMPREPLY+=("$done$cand")
+                [[ $cand == "${value##*,}"* ]] && COMPREPLY+=("$prefix$done$cand")
             done
             compopt -o nospace 2>/dev/null
             return ;;
         --stop)
             local -a running
             mapfile -t running < <(_sandbox_game_running)
-            _sandbox_game_matches ${running[@]+"${running[@]}"}
+            _sandbox_game_value_matches "$prefix" "$value" 0 ${running[@]+"${running[@]}"}
             return ;;
         --name | --delete | --reset-install)
             local -a known
             mapfile -t known < <(_sandbox_game_known)
-            _sandbox_game_matches ${known[@]+"${known[@]}"}
-            return ;;
-        --print-name)
-            _sandbox_game_filedir -d
+            _sandbox_game_value_matches "$prefix" "$value" 0 ${known[@]+"${known[@]}"}
             return ;;
         --ro)
             _sandbox_game_filedir
             return ;;
-        --env | --gamescope | --allow-lan | --add-host)
+        --env | --allow-lan | --add-host | --x11-exe)
+            # Values are free text (or a host path this mode cannot see).
             return ;;
+        --gamescope)
+            # A boolean unless =ARGS is typed; after a space the next word is
+            # GAMEDIR, so options and folders are offered below.
+            ((split_here)) && return ;;
         --proton | --with-proton)
-            if [[ $split_here ]]; then
-                if [[ $cur == [/~.]* ]]; then
+            if ((split_here)); then
+                if [[ $value == [/~.]* && -z $prefix ]]; then
                     _sandbox_game_filedir -d
                 else
                     local -a installs
                     mapfile -t installs < <(sandbox-game --list-proton 2>/dev/null)
-                    _sandbox_game_matches ${installs[@]+"${installs[@]}"}
+                    _sandbox_game_value_matches "$prefix" "$value" 1 \
+                        ${installs[@]+"${installs[@]}"}
                 fi
                 return
             fi ;;
         --nwjs-version)
-            if [[ $split_here ]]; then
-                if [[ $cur == [/~.]* ]]; then
-                    _sandbox_game_filedir -d
-                else
-                    local -a versions
-                    mapfile -t versions < <(sandbox-game --list-nwjs 2>/dev/null)
-                    _sandbox_game_matches ${versions[@]+"${versions[@]}"}
-                fi
-                return
-            fi ;;
+            if [[ $value == [/~.]* && -z $prefix ]]; then
+                _sandbox_game_filedir -d
+            else
+                local -a versions
+                mapfile -t versions < <(sandbox-game --list-nwjs 2>/dev/null)
+                _sandbox_game_value_matches "$prefix" "$value" 0 \
+                    ${versions[@]+"${versions[@]}"}
+            fi
+            return ;;
         --mkxp | --pgmmv | --dotnet)
-            [[ $split_here ]] && { _sandbox_game_filedir -d; return; } ;;
+            ((split_here)) && { _sandbox_game_filedir -d; return; } ;;
     esac
     # --ro's second argument is a path inside the sandbox: nothing to offer.
     if ((cword >= 3)) && [[ ${words[cword - 2]} == --ro ]]; then

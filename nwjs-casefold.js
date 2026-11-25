@@ -87,23 +87,38 @@
         return changed ? out : null;
     }
 
+    // Windows games write paths with backslashes. On the Linux side they are
+    // separators too, not characters in a file name.
+    function normalize(p) {
+        return process.platform === "win32" ? p : p.replace(/\\/g, "/");
+    }
+
+    function withinRoot(full) {
+        return full === root || full.startsWith(root + path.sep);
+    }
+
     // An absolute path inside the app folder, or null for anything else. A
     // relative one is taken from the working directory, or from the app folder
-    // when the working directory is somewhere else.
+    // when nothing exists there under that name.
     function insidePath(p) {
         if (typeof p !== "string") return null;
+        p = normalize(p);
         let full;
         try {
             full = path.resolve(p);
-            if (full !== root && !full.startsWith(root + path.sep) && !path.isAbsolute(p)) {
-                const under = path.resolve(root, p);
-                if (under === root || under.startsWith(root + path.sep)) full = under;
+            if (!withinRoot(full) && !path.isAbsolute(p)) {
+                // A CWD-relative path that exists outside the app stays there.
+                try {
+                    if (exists(full)) return null;
+                } catch (_) {
+                    return null;
+                }
+                full = path.resolve(root, p);
             }
         } catch (_) {
             return null;
         }
-        if (full !== root && !full.startsWith(root + path.sep)) return null;
-        return full;
+        return withinRoot(full) ? full : null;
     }
 
     function inside(p) {
@@ -112,39 +127,86 @@
         return full === root ? [] : path.relative(root, full).split(path.sep);
     }
 
+    function foldChild(dir, name) {
+        const e = entries(dir);
+        if (!e) return null;
+        if (e.names.has(name)) return name;
+        const folded = e.lower.get(name.toLowerCase());
+        return folded === undefined ? null : folded;
+    }
+
+    // The path segments as they are on disk, or null when they already are,
+    // or when not even case-blind matching finds them.
+    function fold(parts) {
+        let dir = root, changed = false;
+        const out = [];
+        for (const p of parts) {
+            const n = foldChild(dir, p);
+            if (n === null) return null;
+            if (n !== p) changed = true;
+            out.push(n);
+            dir = path.join(dir, n);
+        }
+        return changed ? out : null;
+    }
+
+    // For a path whose final folders may not exist yet: fold every segment
+    // that is there and keep the missing ones as written, so a recursive
+    // mkdir below an existing Save still lands in Save.
+    function foldPrefix(parts) {
+        let dir = root, changed = false, missing = false;
+        const out = [];
+        for (const p of parts) {
+            let n = p;
+            if (!missing) {
+                n = foldChild(dir, p);
+                if (n === null) {
+                    missing = true;
+                    n = p;
+                } else if (n !== p) {
+                    changed = true;
+                }
+            }
+            out.push(n);
+            dir = path.join(dir, n);
+        }
+        return changed ? out : null;
+    }
+
     // A read path that is missing as written, but names a file or folder once
     // case is ignored. Everything else, including descriptors, Buffers and
     // URLs, is handed back as it was.
     function fixPath(p) {
         const full = insidePath(p);
         if (full === null || full === root) return p;
+        const cwd = path.resolve(normalize(p));
         try {
-            if (exists(full)) return p;
+            if (exists(full)) return full === cwd ? p : full;
         } catch (_) {
             return p;
         }
         const found = fold(path.relative(root, full).split(path.sep));
-        return found ? path.join(root, ...found) : p;
+        if (found) return path.join(root, ...found);
+        return full === cwd ? p : full;
     }
 
-    // For a write, only the folders above the final name are resolved, so the
-    // name on disk is exactly what the game asked to write.
-    function fixParent(p) {
+    // A write path. Existing folders and an existing file under another case
+    // are reused, so a save written as SAVE/OLD.SAV changes Save/old.sav
+    // instead of making a second file that readdir may return either way.
+    function fixWrite(p) {
         const full = insidePath(p);
         if (full === null || full === root) return p;
-        const parent = path.dirname(full);
-        try {
-            if (parent === root || exists(parent)) return p;
-        } catch (_) {
-            return p;
+        const cwd = path.resolve(normalize(p));
+        const parts = path.relative(root, full).split(path.sep);
+        const name = parts.pop();
+        const found = foldPrefix(parts);
+        const parentParts = found || parts;
+        const parent = parentParts.length ? path.join(root, ...parentParts) : root;
+        const existing = foldChild(parent, name);
+        if (found || existing !== null || full !== cwd) {
+            return path.join(parent, existing === null ? name : existing);
         }
-        const found = fold(path.relative(root, parent).split(path.sep));
-        return found ? path.join(root, ...found, path.basename(full)) : p;
-    }
-
-    function parentOf(p) {
-        const full = insidePath(p);
-        return full === null ? null : path.dirname(full);
+        return p;
     }
 
     // chrome-extension://<id>/ is the app folder.
@@ -152,10 +214,18 @@
         if (typeof url !== "string" && !(url instanceof URL)) return url;
         let u, parts;
         try {
-            u = new URL(url, document.baseURI);
+            const value = typeof url === "string" ? normalize(url) : url;
+            u = new URL(value, document.baseURI);
             if (u.protocol !== location.protocol || u.host !== location.host) return url;
-            parts = u.pathname.split("/").slice(1).map(decodeURIComponent);
-            if (exists(path.join(root, ...parts))) return url;
+            parts = u.pathname.split("/").slice(1).filter((part) => part !== "");
+            parts = parts.map(decodeURIComponent);
+            // An encoded slash or dot segment would otherwise become a real
+            // separator here, taking the lookup outside the app folder.
+            if (parts.some((p) => p === "." || p === ".." || p.includes("/")
+                                  || p.includes("\\") || p.includes("\0"))) return url;
+            const target = path.join(root, ...parts);
+            if (!withinRoot(target)) return url;
+            if (exists(target)) return url;
         } catch (_) {
             return url;
         }
@@ -165,9 +235,37 @@
         return u.href;
     }
 
-    // Drop the folders a wrapped call changed from the cache.
+    // Drop folders a wrapped call changed from the cache, and every folder
+    // below a renamed or removed one.
     function forgetDirs(drop) {
-        for (const dir of drop) dirs.delete(dir);
+        for (const item of drop) {
+            if (typeof item === "string") {
+                dirs.delete(item);
+            } else if (item.tree) {
+                const prefix = item.path.endsWith(path.sep) ? item.path : item.path + path.sep;
+                for (const key of Array.from(dirs.keys())) {
+                    if (key === item.path || key.startsWith(prefix)) dirs.delete(key);
+                }
+            } else {
+                dirs.delete(item.path);
+            }
+        }
+    }
+
+    // The changed path itself, and every folder above it up to the app root:
+    // creating a deep folder also changes the listing of each parent that was
+    // cached as missing before it.
+    function changedDir(full, tree = true) {
+        const drop = [];
+        if (full === null || !withinRoot(full)) return drop;
+        drop.push({ path: full, tree });
+        let dir = path.dirname(full);
+        while (withinRoot(dir)) {
+            drop.push({ path: dir });
+            if (dir === root) break;
+            dir = path.dirname(dir);
+        }
+        return drop;
     }
 
     // Finish a wrapped call: drop the folders it changed once it has worked,
@@ -225,15 +323,14 @@
         const original = target && target[name];
         if (typeof original !== "function") return;
         target[name] = function (...args) {
-            const drop = [];
+            let full = null;
             if (typeof args[0] === "string") {
                 try {
-                    args[0] = fixParent(args[0]);
-                    const dir = parentOf(args[0]);
-                    if (dir !== null) drop.push(dir);
+                    args[0] = fixWrite(args[0]);
+                    full = insidePath(args[0]);
                 } catch (_) {}
             }
-            return finish(name, original, args, this, drop);
+            return finish(name, original, args, this, changedDir(full));
         };
     }
 
@@ -243,15 +340,14 @@
         const original = target && target[name];
         if (typeof original !== "function") return;
         target[name] = function (...args) {
-            const drop = [];
+            let full = null;
             if (typeof args[0] === "string") {
                 try {
                     args[0] = fixPath(args[0]);
-                    const dir = parentOf(args[0]);
-                    if (dir !== null) drop.push(dir);
+                    full = insidePath(args[0]);
                 } catch (_) {}
             }
-            return finish(name, original, args, this, drop);
+            return finish(name, original, args, this, changedDir(full));
         };
     }
 
@@ -264,9 +360,8 @@
             const drop = [];
             if (typeof args[0] === "string") {
                 try {
-                    args[0] = fixParent(args[0]);
-                    const dir = parentOf(args[0]);
-                    if (dir !== null) drop.push(dir);
+                    args[0] = fixWrite(args[0]);
+                    drop.push(...changedDir(insidePath(args[0])));
                 } catch (_) {}
             }
             const stream = original.apply(this, args);
@@ -294,15 +389,15 @@
                     args[0] = fixPath(args[0]);
                 } catch (_) {}
             }
-            if (dropSource) {
-                const dir = parentOf(args[0]);
-                if (dir !== null) drop.push(dir);
+            if (dropSource && typeof args[0] === "string") {
+                try {
+                    drop.push(...changedDir(insidePath(args[0])));
+                } catch (_) {}
             }
             if (typeof args[1] === "string") {
                 try {
-                    args[1] = fixParent(args[1]);
-                    const dir = parentOf(args[1]);
-                    if (dir !== null) drop.push(dir);
+                    args[1] = fixWrite(args[1]);
+                    drop.push(...changedDir(insidePath(args[1])));
                 } catch (_) {}
             }
             return finish(name, original, args, this, drop);
@@ -310,8 +405,8 @@
     }
 
     // open() may create or only change an existing file. Flags that can create
-    // resolve the parent folders so a new file keeps the name the game wrote;
-    // the rest resolve the whole path, since the file must already be there.
+    // resolve an existing file under another case and the folders above a new
+    // one; the rest resolve the whole path, since it must already be there.
     const WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_RDWR
                       | fs.constants.O_CREAT | fs.constants.O_TRUNC
                       | fs.constants.O_APPEND;
@@ -327,18 +422,15 @@
         const original = target && target[name];
         if (typeof original !== "function") return;
         target[name] = function (...args) {
-            const drop = [];
+            let full = null;
             if (typeof args[0] === "string") {
                 try {
                     const flags = openFlags(args[1]);
-                    args[0] = flags.create ? fixParent(args[0]) : fixPath(args[0]);
-                    if (flags.write) {
-                        const dir = parentOf(args[0]);
-                        if (dir !== null) drop.push(dir);
-                    }
+                    args[0] = flags.create ? fixWrite(args[0]) : fixPath(args[0]);
+                    if (flags.write) full = insidePath(args[0]);
                 } catch (_) {}
             }
-            return finish(name, original, args, this, drop);
+            return finish(name, original, args, this, changedDir(full));
         };
     }
 
@@ -392,40 +484,96 @@
         state.wrapped = true;
     }
 
+    // A later run on the same page (a reload, another window) must not wrap a
+    // wrapper again.
+    const WRAPPED = Symbol.for("sandbox-game.casefold.wrapped");
+    function mark(fn) {
+        try {
+            Object.defineProperty(fn, WRAPPED, { value: true });
+        } catch (_) {}
+        return fn;
+    }
+    function isWrapped(fn) {
+        return typeof fn === "function" && fn[WRAPPED] === true;
+    }
+
     // Images and sounds (MV's Html5Audio) and videos, through their src.
     for (const proto of [globalThis.HTMLImageElement, globalThis.HTMLMediaElement,
                          globalThis.HTMLSourceElement]) {
         if (!proto) continue;
         const d = Object.getOwnPropertyDescriptor(proto.prototype, "src");
-        if (!d) continue;
-        Object.defineProperty(proto.prototype, "src",
-                              { ...d, set(v) { d.set.call(this, fix(v)); } });
+        if (!d || typeof d.set !== "function" || isWrapped(d.set)) continue;
+        const set = mark(function (v) { d.set.call(this, fix(v)); });
+        Object.defineProperty(proto.prototype, "src", { ...d, set });
     }
     // Data, WebAudio and every encrypted file (.rpgmvp, .png_ ...).
     if (globalThis.XMLHttpRequest) {
         const open = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-            return open.call(this, method, fix(url), ...rest);
-        };
+        if (!isWrapped(open)) {
+            XMLHttpRequest.prototype.open = mark(function (method, url, ...rest) {
+                return open.call(this, method, fix(url), ...rest);
+            });
+        }
     }
-    // MZ streams its audio with fetch.
-    if (globalThis.window && typeof window.fetch === "function") {
+    // MZ streams its audio with fetch, sometimes with a Request object.
+    if (globalThis.window && typeof window.fetch === "function" && !isWrapped(window.fetch)) {
         const fetch = window.fetch;
-        window.fetch = function (input, init) {
-            return fetch.call(window, fix(input), init);
-        };
+        const RequestCtor = globalThis.Request || window.Request;
+        window.fetch = mark(function (input, init) {
+            if (typeof RequestCtor === "function" && input instanceof RequestCtor) {
+                const url = fix(input.url);
+                if (url !== input.url) {
+                    try {
+                        input = new RequestCtor(url, input);
+                    } catch (_) {}
+                }
+            } else {
+                input = fix(input);
+            }
+            return fetch.call(window, input, init);
+        });
+    }
+    // new Audio("sounds/Theme.ogg").
+    const AudioCtor = globalThis.Audio || (globalThis.window && window.Audio);
+    if (typeof AudioCtor === "function" && !isWrapped(AudioCtor)) {
+        const Audio = mark(function (...args) {
+            if (typeof args[0] === "string") args[0] = fix(args[0]);
+            return new AudioCtor(...args);
+        });
+        Audio.prototype = AudioCtor.prototype;
+        globalThis.Audio = Audio;
+        if (globalThis.window) window.Audio = Audio;
+    }
+    // element.setAttribute("src" | "href", ...), which bypasses the property.
+    const ElementCtor = globalThis.Element || (globalThis.window && window.Element);
+    if (ElementCtor && ElementCtor.prototype
+        && typeof ElementCtor.prototype.setAttribute === "function") {
+        const setAttribute = ElementCtor.prototype.setAttribute;
+        if (!isWrapped(setAttribute)) {
+            ElementCtor.prototype.setAttribute = mark(function (name, value, ...rest) {
+                const key = String(name).toLowerCase();
+                if (typeof value === "string" && (key === "src" || key === "href")) {
+                    value = fix(value);
+                }
+                return setAttribute.call(this, name, value, ...rest);
+            });
+        }
     }
     // MZ's FontManager: new FontFace(name, "url(fonts/...)").
-    if (globalThis.window && typeof window.FontFace === "function") {
+    if (globalThis.window && typeof window.FontFace === "function"
+        && !isWrapped(window.FontFace)) {
         const FontFace = window.FontFace;
-        window.FontFace = class extends FontFace {
+        window.FontFace = mark(class extends FontFace {
             constructor(family, source, ...rest) {
                 if (typeof source === "string") {
-                    source = source.replace(/url\((["']?)([^"')]*)\1\)/g,
-                                            (_, q, u) => `url(${q}${fix(u)}${q})`);
+                    source = source.replace(/url\(\s*(?:(["'])([\s\S]*?)\1|([^)]*))\s*\)/g,
+                                            (_, q, quoted, bare) => {
+                        const value = q ? quoted : bare.trim();
+                        return `url(${q || ""}${fix(value)}${q || ""})`;
+                    });
                 }
                 super(family, source, ...rest);
             }
-        };
+        });
     }
 })();

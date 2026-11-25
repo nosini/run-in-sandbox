@@ -48,7 +48,7 @@ if [ "$FROM_SOURCE" = 1 ]; then
     git -C "$WORK" -c advice.detachedHead=false checkout --quiet FETCH_HEAD
     [ "$(git -C "$WORK" rev-parse HEAD)" = "$COMMIT" ] || {
         echo "Fetched source is not commit $COMMIT" >&2; exit 1; }
-    export CARGO_TARGET_DIR="$BUILD_DIR/target"
+    export CARGO_TARGET_DIR="$WORK/target"
     cargo build --manifest-path "$WORK/Cargo.toml" --locked --release
     BIN="$CARGO_TARGET_DIR/release/xwayland-satellite"
     LICENSE="$WORK/LICENSE"
