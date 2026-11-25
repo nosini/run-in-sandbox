@@ -1,4 +1,4 @@
-module sandbox_pasta 1.0;
+module sandbox_pasta 1.1;
 
 # A domain for the pasta that connects a sandbox to the internet under --net:
 # sandbox-game's copy of it, named after the game (see "network" in
@@ -44,6 +44,8 @@ require {
     type sysctl_t;
     type sysctl_net_t;
     type net_conf_t;
+    type NetworkManager_var_run_t;
+    type systemd_resolved_var_run_t;
     type tun_tap_device_t;
     type root_t;
     type tmp_t;
@@ -54,7 +56,7 @@ require {
     class fd use;
     class file { entrypoint execute execute_no_trans read open getattr map ioctl lock write append relabelfrom relabelto create unlink };
     class dir { search getattr mounton };
-    class lnk_file read;
+    class lnk_file { read getattr };
     class fifo_file { getattr read write append ioctl lock };
     class chr_file { getattr read write append ioctl lock open };
     class sock_file write;
@@ -141,6 +143,10 @@ allow sandbox_pasta_t proc_net_t:file { read open getattr };
 allow sandbox_pasta_t { sysctl_t sysctl_net_t }:dir search;
 allow sandbox_pasta_t sysctl_net_t:file { read open getattr };
 allow sandbox_pasta_t net_conf_t:file { read open getattr };
+# /etc/resolv.conf is often a link into /run: netconfig's (net_conf_t),
+# NetworkManager's or systemd-resolved's folder. The files are net_conf_t.
+allow sandbox_pasta_t net_conf_t:lnk_file { read getattr };
+allow sandbox_pasta_t { net_conf_t NetworkManager_var_run_t systemd_resolved_var_run_t }:dir search;
 
 # Then it shuts itself in: a mount namespace of its own whose root is an empty
 # tmpfs.

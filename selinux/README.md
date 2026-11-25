@@ -50,7 +50,8 @@ Each rule is commented in `sandbox_pasta.te`. In short:
   process, capabilities in the user namespace it starts in (`sys_admin`,
   `net_admin`, `setuid`, `setgid`, `sys_ptrace`), `/dev/net/tun`, netlink,
   the host's routes and addresses under `/proc/net` and `/proc/sys/net`, and
-  `/etc/resolv.conf`.
+  `/etc/resolv.conf`, also where it links into netconfig's, NetworkManager's
+  or systemd-resolved's folder under `/run`.
 - **Shutting itself in.** Mounting a `tmpfs` as an empty root in a mount
   namespace of its own.
 - **The game's connections.** Outgoing TCP to any port, and UDP bound to any
@@ -87,6 +88,8 @@ On openSUSE Tumbleweed (selinux-policy 20261116, passt 20261002), enforcing, wit
    denial names only `nosuid_transition` under both backends.
 5. Remove the module, launch (copies remade, `pasta` unconfined), load it
    again, launch (copies relabeled, `pasta` confined).
+6. With `/etc/resolv.conf` a link (`net_conf_t`) into `/run/NetworkManager/`,
+   as on many desktops: the link is followed without a denial.
 
 `tests/test_security.py` checks the domain when the module is loaded
 (`test_network_helper_runs_in_its_selinux_domain`) and that the module builds
