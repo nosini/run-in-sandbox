@@ -349,6 +349,14 @@ relocate_layers() {                   # $1 = capture folder
         return 1
     fi
     mkdir -- "$d/overlay" 2>/dev/null || return 1
+    # A game can leave a layer itself as closed as overlayfs leaves work/:
+    # moving a folder writes its "..", so that folder -- only that one, not
+    # the files the game saved below it -- must be writable first.
+    for p in rw work; do
+        if [ ! -L "$d/$p" ] && [ -d "$d/$p" ]; then
+            chmod u+rwx -- "$d/$p" 2>/dev/null || true
+        fi
+    done
     for p in rw work; do
         [ -e "$d/$p" ] || [ -L "$d/$p" ] || continue
         if ! mv -T -- "$d/$p" "$d/overlay/$p"; then
@@ -956,9 +964,15 @@ requirement_failures() {
                 fi ;;
             audio)
                 # A uid of its own gets no sound at all without that server.
+                # Only the values a launch would take count as one: a launch
+                # refuses an invalid SANDBOX_SEPARATE_UID, so the check fails
+                # on it rather than pass as a separate uid of its own.
                 [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ] \
-                    || [ "${SEPARATE_UID:-${SANDBOX_SEPARATE_UID:-0}}" != 0 ] \
-                    || echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)"
+                    || case "${SEPARATE_UID:-${SANDBOX_SEPARATE_UID:-0}}" in
+                           1|systemd) ;;
+                           0|"") echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)" ;;
+                           *) echo "audio: invalid SANDBOX_SEPARATE_UID='${SEPARATE_UID:-${SANDBOX_SEPARATE_UID:-}}' (use 0, 1 or systemd)" ;;
+                       esac
                 # Before 1.6.6 a game can leave the server's access class.
                 if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ]; then
                     local pw
@@ -1600,7 +1614,8 @@ CHDIR=/game
 # that can create it: the EXIT trap is already active when the runtime sockets,
 # the security context and the fuse overlays are made.
 OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PASTA_BIN=""
-PLAY_START=""; FIFOS=""; BW=""; WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+PLAY_START=""; FIFOS=""; BW=""; CHILD=""; NET_FAILED=""
+WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
 HOSTS_TMP=""; CLEANED=0
 RUNTIME_SOCKETS=""; SOCKET_BIND=""
 
@@ -1644,6 +1659,14 @@ cleanup() {
     [ "$CLEANED" = 0 ] || return 0
     CLEANED=1
     local m p exe n w
+    # The blocked child of --net's two-step start, first of all: while it
+    # waits on the go pipe it has not yet armed --die-with-parent, so killing
+    # the outer bwrap alone would only reparent it, and this shell's exit
+    # closing the pipe would start the game without its network rules.
+    if [ -n "${CHILD:-}" ]; then
+        kill -KILL "$CHILD" 2>/dev/null || true
+        CHILD=""
+    fi
     # A still-running bwrap holds the fuse mounts of the NET path; end it
     # before fusermount, which would otherwise fail with EBUSY.
     if [ -n "$BW" ]; then
@@ -1993,7 +2016,7 @@ find_mkxp() {                         # $1 = auto | path -> install dir
 }
 mkxp_bin() {                          # $1 = install dir -> binary name, if any
     local b
-    b="$(find "$1" -maxdepth 1 -type f -name 'mkxp*' -perm -u+x 2>/dev/null | sort | head -n1 || true)"
+    b="$(find "$(find_root "$1")" -maxdepth 1 -type f -name 'mkxp*' -perm -u+x 2>/dev/null | sort | head -n1 || true)"
     [ -n "$b" ] || return 1
     basename "$b"
 }
@@ -3450,14 +3473,22 @@ def enter(*namespaces):
 # the game's way out. It cannot be handed the user namespace as an fd -- it
 # closes every inherited one first thing. Nor can it watch /proc/PID/ns to
 # notice the game is gone, not from in there; it reports its pid instead, and
-# sandbox-game ends it.
-subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
-                "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
-                "-t", "none", "-u", "none", "-T", "none", "-U", "none",
-                "--map-host-loopback", "none", "--map-guest-addr", "none",
-                *dns_args, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
-               check=True, preexec_fn=enter((user_fd, CLONE_NEWUSER)),
-               pass_fds=(user_fd,))
+# sandbox-game ends it. No terminal of ours either: under the sandbox_pasta_t
+# policy the fds of one are denied (and replaced by /dev/null), so it gets
+# none for stdin and stdout, and what it says on stderr only once daemonizing
+# is read back and said again on ours. pasta daemonizes before the game
+# starts, and its daemon child points its own stdio at /dev/null, so reading
+# that pipe ends with the parent, not with the game.
+pasta_run = subprocess.run([pasta, "--quiet", "--config-net", "--netns-only",
+                            "--netns", f"/proc/{pid}/ns/net", "--no-netns-quit", "-P", pidfile,
+                            "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+                            "--map-host-loopback", "none", "--map-guest-addr", "none",
+                            *dns_args, "--ns-mac-addr", mac] + ([] if has_v6 else ["-4"]),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE,
+                           preexec_fn=enter((user_fd, CLONE_NEWUSER)), pass_fds=(user_fd,))
+sys.stderr.buffer.write(pasta_run.stderr or b"")
+pasta_run.check_returncode()
 for ver, rules in batches.items():
     subprocess.run([ip, f"-{ver}", "-batch", "-"], input="\n".join(rules) + "\n",
                    text=True, check=True, pass_fds=(user_fd, net_fd),
@@ -3788,13 +3819,21 @@ if [ -n "${SANDBOX_WARNING_BOUNDARY:-}" ]; then
     printf '%s\n' "${boundary_size:-0}" > "$SANDBOX_WARNING_BOUNDARY" 2>/dev/null || true
 fi
 PLAY_START="$(date +%s)"
+# Both ways of starting the sandbox background it and wait, so a trapped
+# signal interrupts the wait immediately instead of deferring cleanup until
+# the game exits. And both go through a subshell that execs it: bash hands a
+# job backgrounded in a shell without job control SIGINT and SIGQUIT
+# ignored, and dispositions the shell set itself survive exec, so the
+# sandbox would sit a Ctrl-C out; trap - hands the defaults back before
+# bwrap takes over. The game keeps the launcher's stdin: bash points a
+# background job's stdin at /dev/null unless the job itself redirects it, so
+# the <&0 goes on the subshell -- inside it, it would only copy /dev/null.
+if [ -e /proc/self/fd/0 ]; then STDIN_FD=0; else STDIN_FD=""; fi
 if [ "$NET" = 0 ] || [ "$SEPARATE_UID" = systemd ]; then
-    # Backgrounded and waited on so trapped signals (INT, TERM, HUP) interrupt
-    # wait immediately instead of deferring cleanup until the game exits.
-    if [ -e /proc/self/fd/0 ]; then
-        "${BWRAP[@]}" "$@" <&0 18>&- &
+    if [ -n "$STDIN_FD" ]; then
+        ( trap - INT QUIT; exec "${BWRAP[@]}" "$@" ) <&0 18>&- &
     else
-        "${BWRAP[@]}" "$@" 18>&- &
+        ( trap - INT QUIT; exec "${BWRAP[@]}" "$@" ) 18>&- &
     fi
     BW=$!
     wait "$BW" && rc=0 || rc=$?
@@ -3806,8 +3845,15 @@ else
     # -- the sandbox's pid 1 itself, before the pipe closes: it only arms
     # --die-with-parent after that read, so killing the outer bwrap alone
     # would leave it to wake up and start the game without its network.
+    # A signal that arrives while the network is being set up reaches the
+    # blocked pid 1 through cleanup(), which knows it as $CHILD; the byte is
+    # only sent once the setup has succeeded.
     FIFOS="$(mktemp -d)"; mkfifo "$FIFOS/info" "$FIFOS/go"
-    "${BWRAP[@]}" "$@" 18>&- 10>"$FIFOS/info" 11<"$FIFOS/go" &
+    if [ -n "$STDIN_FD" ]; then
+        ( trap - INT QUIT; exec "${BWRAP[@]}" "$@" ) <&0 18>&- 10>"$FIFOS/info" 11<"$FIFOS/go" &
+    else
+        ( trap - INT QUIT; exec "${BWRAP[@]}" "$@" ) 18>&- 10>"$FIFOS/info" 11<"$FIFOS/go" &
+    fi
     BW=$!
     exec 12<"$FIFOS/info" 13>"$FIFOS/go"
     rm -rf "$FIFOS"; FIFOS=""
@@ -3819,18 +3865,27 @@ else
         # that write: the launcher goes on to its cleanup and exit status.
         if ! ( printf x >&13 ) 2>/dev/null; then
             echo "could not set up the sandbox's network; not starting the game" >&2
-            [ -z "$CHILD" ] || kill -KILL "$CHILD" 2>/dev/null || true
+            kill -KILL "$CHILD" 2>/dev/null || true
             pkill -KILL -P "$BW" 2>/dev/null || true
             kill -KILL "$BW" 2>/dev/null || true
+            NET_FAILED=1
         fi
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
         [ -z "$CHILD" ] || kill -KILL "$CHILD" 2>/dev/null || true
         pkill -KILL -P "$BW" 2>/dev/null || true
         kill -KILL "$BW" 2>/dev/null || true
+        NET_FAILED=1
     fi
+    # The go pipe is closed, so the child either got its byte or was killed:
+    # from here its pid 1 is --die-with-parent's to end, not a stale $CHILD
+    # a later cleanup() could mistake for it.
     exec 13>&-
+    CHILD=""
     wait "$BW" && rc=0 || rc=$?
+    # Whatever the wait says: a launch that said it did not start the game
+    # must not report success, bwrap's own status included.
+    [ "$NET_FAILED" = "" ] || rc=1
     BW=""
 fi
 cleanup; trap - EXIT INT TERM HUP

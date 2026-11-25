@@ -631,5 +631,267 @@ class CompletionTests(ScriptTestCase):
         self.assertEqual(result.stdout.splitlines(), ["mygame"])
 
 
+class SharedLibTests(ScriptTestCase):
+    """sandbox-game-lib, sourced as the scripts that share it source it."""
+
+    def lib(self, body, *args, cwd=None, env=None):
+        script = f'. {shlex.quote(str(ROOT / "sandbox-game-lib"))}\n' + body
+        return subprocess.run(["bash", "-c", script, "lib", *args], cwd=cwd,
+                              env=env or {**os.environ, "HOME": str(self.base)},
+                              capture_output=True, text=True, timeout=30)
+
+    def bound(self, home, *argv):
+        result = subprocess.run(
+            ["bash", "-c", '. "$1"; shift; bound_capture "$@"; printf %s "$BOUND"',
+             "bound", str(ROOT / "sandbox-game-lib"), *argv],
+            env={**os.environ, "HOME": str(home), "PATH": SAFE_PATH},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_bound_capture_stops_where_the_command_starts(self):
+        home = self.base / "home"
+        victim = home / "game-sandboxes" / "victim" / "home"
+        victim.mkdir(parents=True)
+        mine = home / "game-sandboxes" / "mine" / "home"
+        mine.mkdir(parents=True)
+        # A bwrap without -- whose command binds one of our captures is not
+        # one of our sandboxes: from the command on, the arguments are the
+        # game's, and a --bind there may name anything at all.
+        self.assertEqual(self.bound(home, "bwrap", "/usr/bin/tool",
+                                    "--bind", str(victim), "/x"), "")
+        self.assertEqual(self.bound(home, "bwrap", "--ro-bind", "/usr", "/usr",
+                                    "/usr/bin/tool", "--bind", str(victim), "/x"), "")
+        # An option bwrap does not know ends the scan at the word after it,
+        # as sandbox-uid's sources() treats one.
+        self.assertEqual(self.bound(home, "bwrap", "--unknown", "value",
+                                    "--bind", str(victim), "/x"), "")
+        # What bwrap itself binds still names the sandbox, and -- still ends
+        # its options, a "--" an option's value not among them.
+        self.assertEqual(self.bound(home, "bwrap", "--bind", str(mine), "/home"), "mine")
+        self.assertEqual(self.bound(home, "bwrap", "--bind", str(mine), "/home", "--",
+                                    "--bind", str(victim), "/x"), "mine")
+        self.assertEqual(self.bound(home, "bwrap", "--setenv", "KEY", "--",
+                                    "--bind", str(mine), "/x"), "mine")
+
+    def test_find_call_sites_take_folders_named_like_predicates(self):
+        # find's -- ends only its options, never its predicates: a game folder
+        # beginning with "-" (or named "!") used to fail the search silently.
+        for name in ("-MyGame", "!"):
+            with self.subTest(name=name):
+                game = self.base / name
+                arch = game / "lib" / f"linux-{os.uname().machine}"
+                (game / "renpy").mkdir(parents=True)
+                arch.mkdir(parents=True)
+                (game / "Start.sh").write_text("", encoding="utf-8")
+                (game / "Game.rgss3a").write_text("", encoding="utf-8")
+                (game / "Game.exe").write_bytes(b"MZ")
+                (arch / "librenpython.so").write_text(
+                    "SDL X11 video driver", encoding="utf-8")
+                result = self.lib(
+                    'printf "scripts: %s\\n" "$(native_scripts "$1")"\n'
+                    'printf "exes: %s\\n" "$(find_exes "$1" | cut -f2)"\n'
+                    'is_rgss "$1" && echo "rgss: yes"\n'
+                    'has_windows_exe "$1" && echo "exe: yes"\n'
+                    'renpy_without_wayland "$1" && echo "renpy-x11: yes"\n'
+                    'printf "abs: %s\\n" "$(native_scripts "$2")"\n',
+                    name, str(game), cwd=self.base)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [
+                    f"scripts: ./{name}/Start.sh",
+                    f"exes: ./{name}/Game.exe",
+                    "rgss: yes",
+                    "exe: yes",
+                    "renpy-x11: yes",
+                    f"abs: {game}/Start.sh",
+                ])
+
+    def test_uid_helper_is_resolved_when_the_lib_is_sourced_by_file_name(self):
+        # ${BASH_SOURCE%/*} on a slashless name is the file itself; the helper
+        # is beside the real file, not inside a folder named after it.
+        libdir = self.base / "lib"
+        libdir.mkdir()
+        shutil.copy(ROOT / "sandbox-game-lib", libdir / "sandbox-game-lib")
+        helper = self.write_exec(libdir / "sandbox-uid", "#!/bin/sh\nexit 0\n")
+        result = subprocess.run(
+            ["bash", "-c", 'source sandbox-game-lib; printf "%s\\n" "$SANDBOX_UID_HELPER"'],
+            cwd=libdir, env={**os.environ, "PATH": SAFE_PATH},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(helper))
+
+    def test_a_lock_that_cannot_be_taken_is_reported(self):
+        # A failed redirection on the bare exec special builtin ends a
+        # POSIX-mode shell outright; command exec leaves it to the caller,
+        # which says why instead.
+        home = self.base / "home"
+        locks = home / ".config" / "sandbox-game" / ".locks"
+        (locks / "game-game").mkdir(parents=True)   # a lock target that is a folder
+        result = subprocess.run(
+            ["bash", "--posix", "-c",
+             '. "$1"; NAME=game; prefs_save \'{"scope":"game"}\'; echo SURVIVED',
+             "prefs", str(ROOT / "sandbox-game-lib")],
+            env={**os.environ, "HOME": str(home),
+                 "XDG_CONFIG_HOME": str(home / ".config")},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Cannot lock game", result.stderr)
+
+
+class LayerRelocationTests(ScriptTestCase):
+    def test_relocate_layers_moves_a_layer_the_game_left_closed(self):
+        # A game can leave its rw/ at mode 000; moving a folder writes its
+        # "..", so the relocation opens what it moves.
+        cap = self.base / "cap"
+        (cap / "rw").mkdir(parents=True)
+        (cap / "work").mkdir()
+        (cap / "rw" / "save.txt").write_text("", encoding="utf-8")
+        harness = (shell_function("unlock_dirs", "sandbox-game")
+                   + shell_function("relocate_layers", "sandbox-game")
+                   + textwrap.dedent(f"""
+                     chmod 000 {shlex.quote(str(cap / 'rw'))}
+                     relocate_layers {shlex.quote(str(cap))} || exit 1
+                     [ -d {shlex.quote(str(cap / 'overlay' / 'rw'))} ] || {{ echo no-rw; exit 1; }}
+                     [ -f {shlex.quote(str(cap / 'overlay' / 'rw' / 'save.txt'))} ] || {{ echo no-file; exit 1; }}
+                     [ -e {shlex.quote(str(cap / 'work'))} ] && {{ echo work-left; exit 1; }}
+                     echo moved
+                     """))
+        result = subprocess.run(["bash", "-c", harness], capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "moved\n")
+
+
+class FailedLaunchLogTests(ScriptTestCase):
+    """Where "Sandbox game" leaves the log of a launch that never began."""
+
+    def failing_launch(self, home, game, backend, dialog):
+        return subprocess.run(
+            [str(ROOT / "Sandbox game")],
+            env=self.script_env(home, SANDBOX_BACKEND=str(backend),
+                                SANDBOX_DIALOG=str(dialog),
+                                NAUTILUS_SCRIPT_SELECTED_FILE_PATHS=str(game) + "\n"),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def failing_backend(self, rc):
+        # Fails before writing the pre-launch boundary: as a second launch of
+        # a running game would.
+        return self.write_exec(self.base / f"backend-{rc}", f"""#!/bin/bash
+case "$1" in
+    --print-name) printf 'derived\\n'; exit 0 ;;
+esac
+printf 'the game is already running\\n' >&2
+exit {rc}
+""")
+
+    def test_a_failure_before_the_boundary_keeps_lastrun_and_gets_its_own_log(self):
+        home, game = self.game_home()
+        (game / "Start.sh").write_text("", encoding="utf-8")
+        backend = self.failing_backend(23)
+        shown = self.base / "shown"
+        dialog = self.write_exec(self.base / "dialog",
+                                 f"#!/bin/bash\ncat > {shlex.quote(str(shown))}\nexit 0\n")
+        cap = home / "game-sandboxes" / "derived"
+        cap.mkdir(parents=True)
+        (cap / "lastrun.log").write_text("a previous run's log\n", encoding="utf-8")
+
+        result = self.failing_launch(home, game, backend, dialog)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        # lastrun.log may belong to a game still running: not overwritten.
+        self.assertEqual((cap / "lastrun.log").read_text(encoding="utf-8"),
+                         "a previous run's log\n")
+        # The failure has a log of its own, past the EXIT trap's reach.
+        failed = cap / "launch-failed.log"
+        self.assertIn("the game is already running", failed.read_text(encoding="utf-8"))
+        # And the dialog names that one, not the launch folder it just deleted.
+        self.assertIn(f"log: {failed}", shown.read_text(encoding="utf-8"))
+        self.assertEqual(list(cap.glob(".launch.*")), [])
+
+    def test_a_failure_with_no_lastrun_log_takes_the_name_itself(self):
+        home, game = self.game_home()
+        (game / "Start.sh").write_text("", encoding="utf-8")
+        backend = self.failing_backend(1)
+        shown = self.base / "shown"
+        dialog = self.write_exec(self.base / "dialog",
+                                 f"#!/bin/bash\ncat > {shlex.quote(str(shown))}\nexit 0\n")
+        cap = home / "game-sandboxes" / "derived"
+
+        result = self.failing_launch(home, game, backend, dialog)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        log = cap / "lastrun.log"
+        self.assertIn("the game is already running", log.read_text(encoding="utf-8"))
+        self.assertIn(f"log: {log}", shown.read_text(encoding="utf-8"))
+        self.assertFalse((cap / "launch-failed.log").exists())
+
+
+class InstallAdminModeTests(ScriptTestCase):
+    """The administrator modes of install.sh touch neither source nor sound."""
+
+    def stub(self, name, body):
+        return self.write_exec(self.base / "bin" / name, body)
+
+    def sound_server_present(self, home):
+        # A previous --restrict-audio: what used to make every mode check
+        # the running PipeWire's version.
+        service = home / ".config" / "systemd" / "user" / "sandbox-pulse.service"
+        service.parent.mkdir(parents=True)
+        service.write_text("", encoding="utf-8")
+        return service
+
+    def pipewire_probe(self):
+        log = self.base / "pw-cli.log"
+        self.stub("pw-cli", f'printf "%s\\n" "$@" > {shlex.quote(str(log))}\nexit 0\n')
+        return log
+
+    def admin_env(self, home):
+        return {**os.environ, "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "XDG_DATA_HOME": str(home / ".local" / "share"),
+                "PATH": str(self.base / "bin") + os.pathsep + SAFE_PATH}
+
+    def test_piped_uninstall_selinux_needs_no_source_and_asks_no_sound_server(self):
+        # Removing the module from a pipe: nothing is beside the script, so
+        # there is no source to read, and the mode has no business with the
+        # user's sound setup either.
+        home = self.base / "home"
+        home.mkdir()
+        self.sound_server_present(home)
+        self.stub("id", 'printf "0\\n"')          # the administrator's identity
+        self.stub("semodule", "exit 0")           # -l names nothing: not loaded
+        pw_log = self.pipewire_probe()
+        curl_log = self.base / "curl.log"
+        self.stub("curl", f'printf "%s\\n" "$@" > {shlex.quote(str(curl_log))}; exit 1\n')
+        result = subprocess.run(["bash", "-s", "--", "--uninstall-selinux"],
+                                input=read("install.sh"), text=True,
+                                env=self.admin_env(home), cwd=self.base,
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("is not loaded", result.stdout)
+        self.assertFalse(curl_log.exists(), "the removal downloaded a source tree")
+        self.assertFalse(pw_log.exists(),
+                         "the removal asked the sound server for its version")
+
+    def test_selinux_mode_leaves_the_sound_server_alone(self):
+        # From a checkout, so the source is there to be read: the policy mode
+        # still has nothing to do with the user's sound setup.
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        shutil.copy2(ROOT / "install.sh", checkout / "install.sh")
+        shutil.copy2(ROOT / "sandbox-game", checkout / "sandbox-game")
+        shutil.copy2(ROOT / "sandbox-game-lib", checkout / "sandbox-game-lib")
+        home = self.base / "home"
+        home.mkdir()
+        self.sound_server_present(home)
+        self.stub("id", 'printf "0\\n"')
+        self.stub("semodule", "exit 0")
+        pw_log = self.pipewire_probe()
+        result = subprocess.run(["bash", str(checkout / "install.sh"), "--selinux"],
+                                text=True, env=self.admin_env(home), cwd=self.base,
+                                capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(pw_log.exists(),
+                         "the policy mode asked the sound server for its version")
+
+
 if __name__ == "__main__":
     unittest.main()

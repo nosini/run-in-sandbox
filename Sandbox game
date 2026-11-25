@@ -396,9 +396,20 @@ if wait "$GAME"; then
 else
     rc=$?
     [ -z "$NOTE" ] || { kill "$NOTE" 2>/dev/null; wait "$NOTE" 2>/dev/null; }
-    if [ "$LAUNCH_LOG" = "$NEWLOG" ] && [ ! -e "$LOG" ]; then
-        mv -f -- "$NEWLOG" "$LOG"
-        LAUNCH_LOG=$LOG
+    if [ "$LAUNCH_LOG" = "$NEWLOG" ]; then
+        # A launch that failed before it began has its log still in the
+        # launch folder, which the EXIT trap removes -- and a lastrun.log
+        # that is already there may belong to a game still running, so it
+        # is not overwritten. The failure is kept apart instead, replacing
+        # an earlier one, so the dialog and the notification can name a
+        # file that is still there afterwards.
+        if [ -e "$LOG" ]; then
+            mv -f -- "$NEWLOG" "$CAP/launch-failed.log"
+            LAUNCH_LOG="$CAP/launch-failed.log"
+        else
+            mv -f -- "$NEWLOG" "$LOG"
+            LAUNCH_LOG=$LOG
+        fi
     fi
     # A .NET program's starter, finding no runtime it can use, says so in
     # these words and exits 131; the answer is in the preferences.

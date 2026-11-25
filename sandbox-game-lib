@@ -215,7 +215,7 @@ nwjs_installs() {
             ver="$(grep -oE '[0-9]+(\.[0-9]+)+' <<<"$name" | tail -n1 || true)"
             [ -n "$ver" ] || continue
             printf '%s\t%s\n' "$ver" "$d"
-        done < <(find -- "$base" -type d -name 'nwjs-*linux*' 2>/dev/null || true)
+        done < <(find "$base" -type d -name 'nwjs-*linux*' 2>/dev/null || true)
     done | sort -Vr -k1,1
 }
 
@@ -308,13 +308,26 @@ EXE_JUNK='unins|install|setup|vcredist|dxsetup|dxwebsetup|directx|oalinst|dotnet
 # handler and debug symbol files. Never offered on their own.
 NATIVE_JUNK='createdump|crashpad|chrome-sandbox|chrome_sandbox|crashhandler|crashreport|\.debug$|uninstall'
 
+# A starting point find can take. Its own "--" ends only its options
+# (-H, -L, -P), never its predicates, so a game folder named -MyGame or !
+# would be read as a predicate and the search die -- quietly, under the
+# 2>/dev/null every caller here has. Such a name gains ./, which can never
+# be a predicate; any other path is left as it is, and so are the paths
+# find prints from it.
+find_root() {                           # $1 = starting point -> stdout
+    case "$1" in
+        [-\!\(\),]*) printf './%s\n' "$1" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
 find_exes() {                                  # $1 = dir -> best guess first
     local dir="$1" d list="" keep=""
     # Top level first, then deeper -- but only stopping at a level with a
     # candidate that is not junk: an uninstaller alone at the top, with the
     # game in bin/, would otherwise be the one picked, and run.
     for d in 1 5; do
-        list="$(find -- "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null || true)"
+        list="$(find "$(find_root "$dir")" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null || true)"
         keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*$" <<<"$list" || true)"
         [ -n "$keep" ] && break
     done
@@ -323,7 +336,7 @@ find_exes() {                                  # $1 = dir -> best guess first
 
 # A native game's .sh launchers, at the top of its folder.
 native_scripts() {                             # $1 = dir
-    { find -- "$1" -maxdepth 1 -type f -name '*.sh' 2>/dev/null || true; } | sort
+    { find "$(find_root "$1")" -maxdepth 1 -type f -name '*.sh' 2>/dev/null || true; } | sort
 }
 
 # Standalone Linux programs at the top of a game folder (a Godot .x86_64,
@@ -335,16 +348,16 @@ native_scripts() {                             # $1 = dir
 # not turn it into a native game.
 native_binaries() {                            # $1 = dir
     local dir="$1" files=() list stems compat
-    mapfile -d '' files < <(find -- "$dir" -maxdepth 1 -type f ! -name '*.sh' ! -iname '*.exe' \
-        ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null || true)
+    mapfile -d '' files < <(find "$(find_root "$dir")" -maxdepth 1 -type f ! -name '*.sh' \
+        ! -iname '*.exe' ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null || true)
     [ "${#files[@]}" -gt 0 ] || return 0
     for compat in "" --compat; do
         list="$(elf_programs ${compat:+"$compat"} "${files[@]}" | grep -Eiv "/[^/]*(${NATIVE_JUNK})[^/]*$" || true)"
         [ -z "$list" ] || break
     done
     [ -n "$list" ] || return 0
-    if [ -n "$(find -- "$dir" -maxdepth 1 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]; then
-        stems="$(find -- "$dir" -maxdepth 1 -type f \( -iname '*.exe' -o -name '*.runtimeconfig.json' \) \
+    if [ -n "$(find "$(find_root "$dir")" -maxdepth 1 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]; then
+        stems="$(find "$(find_root "$dir")" -maxdepth 1 -type f \( -iname '*.exe' -o -name '*.runtimeconfig.json' \) \
             -printf '%f\n' 2>/dev/null | sed -E 's/(\.runtimeconfig\.json|\.[eE][xX][eE])$//' || true)"
         list="$(awk -F'\t' 'NR == FNR { s[tolower($0)]; next }
             { n = $2; sub(/.*\//, "", n); n = tolower(n); m = n; sub(/\.[^.]*$/, "", m)
@@ -393,7 +406,7 @@ resolve_selection() {                          # $1 = selected path
 # Both exported (including encrypted) games and editor projects have this
 # file. Match case as the Linux player does, without parsing encrypted JSON.
 is_pgmmv() {
-    { find -- "$1" -maxdepth 3 -type f -iname project.json -printf '%P\n' 2>/dev/null || true; } \
+    { find "$(find_root "$1")" -maxdepth 3 -type f -iname project.json -printf '%P\n' 2>/dev/null || true; } \
         | grep -iEx 'data/project[.]json|resources/data/project[.]json' >/dev/null
 }
 
@@ -408,12 +421,12 @@ is_dotnet() {                                  # $1 = game dir
         [ -f "${f%.runtimeconfig.json}" ] \
             && [ -n "$(elf_programs "${f%.runtimeconfig.json}")" ] \
             && grep -qE '"frameworks?"[[:space:]]*:' "$f" && return 0
-    done < <(find -- "$1" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null || true)
+    done < <(find "$(find_root "$1")" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null || true)
     return 1
 }
 
 has_windows_exe() {
-    [ -n "$(find -- "$1" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]
+    [ -n "$(find "$(find_root "$1")" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]
 }
 
 # RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
@@ -422,7 +435,7 @@ has_windows_exe() {
 is_rgss() {
     [ -f "$1/Game.ini" ] &&
         grep -qiE '^[[:space:]]*Library[[:space:]]*=[[:space:]]*RGSS' "$1/Game.ini" && return 0
-    [ -n "$(find -- "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
+    [ -n "$(find "$(find_root "$1")" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
             -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null || true)" ]
 }
 
@@ -469,13 +482,15 @@ game_engine() {                                # $1 = selection, $2 = optional l
 # True where the X11 driver is there and the Wayland one is not. Only when
 # both driver names can be looked for: a layout this does not know is false.
 renpy_without_wayland() {                      # $1 = game dir
-    [ -d "$1/renpy" ] || return 1
-    local libs=( "$1"/lib/*linux-"$(uname -m)" ) sos
+    local dir sos
+    dir="$(find_root "$1")"
+    [ -d "$dir/renpy" ] || return 1
+    local libs=( "$dir"/lib/*linux-"$(uname -m)" )
     [ -d "${libs[0]}" ] || return 1
     # The shared objects only (librenpython.so, or a separate libSDL2): the
     # rest need not be read on every launch.
     # -H: the arch folder itself may be a symlink.
-    mapfile -t sos < <(find -H -- "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null || true)
+    mapfile -t sos < <(find -H "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null || true)
     [ "${#sos[@]}" -gt 0 ] || return 1
     grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
         && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
@@ -630,7 +645,7 @@ PY
     # One writer per target, outside games/ so preference listings do not see it.
     case "${RESULT[scope]}" in all) lock_name=defaults ;; *) lock_name="game-$NAME" ;; esac
     mkdir -p "$CFGDIR/.locks" || { echo "Cannot create $CFGDIR/.locks" >&2; exit 1; }
-    exec 9>"$CFGDIR/.locks/$lock_name" || { echo "Cannot lock $NAME" >&2; exit 1; }
+    command exec 9>"$CFGDIR/.locks/$lock_name" || { echo "Cannot lock $NAME" >&2; exit 1; }
     flock 9 || { echo "Cannot lock $NAME" >&2; exit 1; }
     if [ "${RESULT[scope]}" = clear ]; then
         rm -f -- "$CFGDIR/games/$NAME" || exit 1
@@ -791,7 +806,11 @@ started_by_us() {                     # $1 = PID
 # ours, and the outer bwrap runs as a transient uid of systemd-nsresourced's,
 # in a user namespace whose parent is the one sandbox-uid had allocated for
 # that launch, and recorded in the capture (see managed_owns there).
-SANDBOX_UID_HELPER="${SANDBOX_UID_HELPER:-${BASH_SOURCE[0]%/*}/sandbox-uid}"   # installed beside this
+# dirname, not ${BASH_SOURCE%/*}: a slashless source path (sourced through
+# PATH, or by file name) leaves the file itself as its own "directory", and
+# would look for the helper inside a folder named after the library. As
+# dialog() takes its helper: beside the real file, "." when sourced by name.
+SANDBOX_UID_HELPER="${SANDBOX_UID_HELPER:-$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/sandbox-uid}"   # installed beside this
 if [ ! -x "$SANDBOX_UID_HELPER" ]; then
     if [ -x "$HOME/.local/lib/sandbox-game/sandbox-uid" ]; then
         SANDBOX_UID_HELPER="$HOME/.local/lib/sandbox-game/sandbox-uid"
@@ -816,16 +835,21 @@ sandbox_user() {                      # $1 = PID, $2 = NAME
 # your home, is reached through a link.
 bound_capture() {                     # "$@" = the bwrap's command line
     local -a args=( "$@" )
-    local i=0 a n top
+    local i=1 a n top
     BOUND=""
     [ -n "${SANDBOXES_REAL-}" ] || SANDBOXES_REAL="$(realpath -m -- "$HOME/game-sandboxes")"
     while [ "$i" -lt "${#args[@]}" ]; do
         a="${args[i]}"
-        # A standalone -- ends bwrap's options; anything after it is the
-        # game's, and may name a capture of its own to look like a sandbox.
-        [ "$a" != -- ] || return 0
-        # How many words bwrap takes after this option, so a "--" that is an
-        # option's value is not mistaken for that terminator.
+        # A standalone -- ends bwrap's options, and so does the first word
+        # that is not an option: from either, the sandboxed command's own
+        # arguments follow, and a --bind there may name one of our captures
+        # without that sandbox being ours -- as when a game runs a nested
+        # bwrap of its own. The scan stops at either, as sandbox-uid's
+        # sources() does; an option it does not know is taken to carry no
+        # value, as there, so the scan ends at whatever follows one.
+        [ "$a" != -- ] && [[ "$a" == --* ]] || return 0
+        # How many words bwrap takes after this option, so a "--" that is
+        # an option's value is not mistaken for that terminator.
         case "$a" in
             --bind|--bind-try|--ro-bind|--ro-bind-try|--dev-bind|--dev-bind-try|\
             --setenv|--file|--bind-data|--ro-bind-data|--symlink|--chmod|\

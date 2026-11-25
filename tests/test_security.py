@@ -16,7 +16,9 @@ import os
 import re
 from pathlib import Path
 import shutil
+import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -304,6 +306,32 @@ class HostPythonTests(unittest.TestCase):
 class AttachHelperTests(unittest.TestCase):
     """sandbox-attach's helpers, run here without bwrap's --proc."""
 
+    # A stand-in for the outer bwrap: a process of ours that starts the
+    # child bwrap in a user namespace, then writes over its own command
+    # line. A real outer bwrap holds nothing but options before the command
+    # it runs -- which is where sandbox-game-lib's bound_capture stops
+    # reading -- and no interpreter can be started with a script path that
+    # is not its first argument, so the arguments it was started with are
+    # replaced by the command line a bwrap binding this capture would have.
+    # Python code that turns its own process's command line into an outer
+    # bwrap's, "bwrap --bind CAPTURE HOME", options first as bwrap's always
+    # are; it expects the variables capture and home to be set.
+    AS_OUTER_BWRAP = """import os
+stat = open("/proc/self/stat").read()
+after = stat[stat.rindex(")") + 2:].split()
+start, end = int(after[45]), int(after[46])
+new = b"bwrap\\0--bind\\0" + capture.encode() + b"\\0" + home.encode() + b"\\0"
+with open("/proc/self/mem", "r+b", 0) as mem:
+    mem.seek(start)
+    mem.write(new + b"\\0" * (end - start - len(new)))
+"""
+    FAKE_OUTER = """import os, subprocess, sys, time
+capture, home, *child_argv = sys.argv[1:]
+subprocess.Popen(child_argv)
+""" + AS_OUTER_BWRAP + """while True:
+    time.sleep(1)
+"""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-attach-test-",
                                               dir=os.environ.get("SANDBOX_TEST_TMPDIR"))
@@ -320,10 +348,10 @@ class AttachHelperTests(unittest.TestCase):
             "\nverify_target() {", 1)[1].split("\n}\nscan\n", 1)[0] + "\n}"
 
     def put(self, dest, filename=None, data=b"edited"):
-        dest = Path(dest)
+        raw = os.fspath(dest)                # a trailing "/" must survive
         return subprocess.run(
-            ["/bin/bash", "-c", self.inner, "sandbox-attach", "put", str(dest),
-             dest.name if filename is None else filename],
+            ["/bin/bash", "-c", self.inner, "sandbox-attach", "put", raw,
+             Path(raw).name if filename is None else filename],
             input=data, capture_output=True, timeout=15,
             env={**os.environ, "HOME": str(self.home)})
 
@@ -345,18 +373,11 @@ class AttachHelperTests(unittest.TestCase):
                                 'while [ ! -e "$1" ]; do sleep 0.05; done\n'
                                 'exec sleep 30\n')
         child_script.chmod(0o755)
-        outer_script = self.base / (name + "-outer.sh")
-        outer_script.write_text(
-            '#!/bin/bash\n'
-            'unshare --user /bin/bash -c \'exec -a bwrap /bin/bash "$1" "$2"\' '
-            'sh "$1" "$2" &\n'
-            'wait\n')
-        outer_script.chmod(0o755)
         proc = subprocess.Popen(
-            ["/bin/bash", "-c",
-             'exec -a bwrap /bin/bash "$1" "$2" "$3" --bind "$4" "$5"',
-             "sh", str(outer_script), str(child_script), str(trigger),
-             str(capture), str(self.home)],
+            [sys.executable, "-c", self.FAKE_OUTER, str(capture), str(self.home),
+             "unshare", "--user", "/bin/bash", "-c",
+             'exec -a bwrap /bin/bash "$1" "$2"', "sh",
+             str(child_script), str(trigger)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         child = None
         deadline = time.monotonic() + 10
@@ -4041,10 +4062,28 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                 break
             time.sleep(0.1)
         self.assertTrue(running(), f"no process runs from {names}: {proc.stderr.read() if proc.poll() is not None else ''}")
-        self.cli("--stop", "named-game")
+        # The systemd backend starts pasta before it executes the outer
+        # bwrap, which --stop looks for: until then there is none to stop.
+        for _ in range(50):
+            stopped = self.cli("--stop", "named-game", check=False)
+            if stopped.returncode == 0:
+                break
+            time.sleep(0.1)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
         proc.wait(timeout=10)
         time.sleep(0.3)
         self.assertEqual(running(), [], "pasta outlived the game")
+
+    @staticmethod
+    def pasta_policy_loaded():
+        """Whether selinux/sandbox_pasta.te is loaded: sandbox-game then runs
+        its copy of pasta confined, where a stand-in shell script cannot run."""
+        try:
+            with open("/sys/fs/selinux/context", "w") as f:
+                f.write("system_u:object_r:sandbox_pasta_exec_t:s0")
+            return True
+        except OSError:
+            return False
 
     def test_network_helper_runs_in_its_selinux_domain(self):
         # With selinux/sandbox_pasta.te loaded, the copies are labeled for it
@@ -4174,6 +4213,8 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                   "if sys.argv[1] == 'stuck': signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                   "else: signal.signal(signal.SIGTERM, lambda *_: "
                   "os.execv('/bin/sleep', ['sleep', '60']))\n"
+                  "capture, home = sys.argv[3], sys.argv[4]\n"
+                  + AttachHelperTests.AS_OUTER_BWRAP +
                   "print(flush=True); time.sleep(60)\n")
         procs = {}
         for name in ("stuck", "reused"):
@@ -6288,6 +6329,139 @@ bogus"; then exit 9; fi
         self.assertEqual((copies / "pasta-stale-pasta").read_text(), pasta.read_text())
         self.assertFalse(stale.exists())
 
+    def test_net_setup_failure_ends_with_status_one(self):
+        # "could not set up the sandbox's network; not starting the game" is
+        # a failure whatever status bwrap itself ended with.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        bindir = self.base / "net-bin"
+        bindir.mkdir()
+        ip = bindir / "ip"
+        ip.write_text("#!/bin/sh\nexit 1\n")
+        ip.chmod(0o755)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--net", "--name", "net-fail",
+             str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("could not set up the sandbox's network", result.stderr)
+
+    def test_a_signal_during_net_setup_kills_the_blocked_sandbox(self):
+        # SIGINT while the network is being set up: the sandbox's pid 1 is
+        # blocked on the go pipe, --die-with-parent not armed yet, so the
+        # cleanup has to kill it too -- killing only the outer bwrap would
+        # reparent it, and the pipe closing would start the game orphaned.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        if self.pasta_policy_loaded():
+            self.skipTest("a stand-in pasta cannot run in the sandbox_pasta_t domain")
+        import signal
+        bindir = self.base / "sig-bin"
+        bindir.mkdir()
+        started = self.base / "pasta-started"
+        pasta = bindir / "pasta"
+        pasta.write_text(f"""#!/bin/sh
+: > {started}
+sleep 3
+exit 0
+""")
+        pasta.chmod(0o755)
+        marker = self.home / "game-sandboxes" / "sig-race" / "home" / "ran"
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--net", "--name", "sig-race",
+             str(self.game), "/bin/sh", "-c", 'touch "$HOME/ran"'],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(200):
+            if started.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        self.assertTrue(started.exists(),
+                        "the stub pasta never ran"
+                        + ("" if proc.poll() is None else f"; sandbox-game exited {proc.returncode}"))
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=30)
+        # Cleaned up, then ended by the same signal again (on_signal), or 130
+        # where that re-raise could not end it.
+        self.assertIn(proc.returncode, (-signal.SIGINT, 130))
+        # The interrupted setup still holds the go pipe until its stub pasta
+        # is done; only after that could a reparented pid 1 wake and run.
+        for _ in range(100):
+            if marker.exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(marker.exists(), "the game started although the launch was interrupted")
+
+    def test_the_sandboxed_bwrap_gets_default_int_and_quit_dispositions(self):
+        # A job backgrounded in a shell without job control inherits SIGINT
+        # and SIGQUIT ignored, and dispositions survive exec; the launch
+        # resets both, so a Ctrl-C reaches the sandbox itself.
+        name = "sig-disposition"
+        proc = subprocess.Popen(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", name,
+             str(self.game), "/bin/sh", "-c", "echo ready; exec sleep 60"],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "ready",
+                         proc.stderr.read() if proc.poll() is not None else "")
+
+        def sigign():
+            for p in Path("/proc").glob("[0-9]*"):
+                try:
+                    argv = (p / "cmdline").read_bytes().split(b"\0")
+                    status = (p / "status").read_text()
+                except OSError:
+                    continue
+                if not argv or os.path.basename(argv[0].decode()) != "bwrap":
+                    continue
+                if f"game-sandboxes/{name}/home".encode() not in b"\0".join(argv):
+                    continue
+                mask = re.search(r"^SigIgn:\s*([0-9a-f]+)$", status, re.M)
+                if mask:
+                    return int(mask.group(1), 16)
+            return None
+
+        mask = sigign()
+        self.assertIsNotNone(mask, "the sandbox's outer bwrap was not found")
+        # SIGINT is bit 1 and SIGQUIT bit 2 of the mask.
+        self.assertEqual(mask & 0x6, 0, hex(mask))
+
+    def test_pasta_runs_without_the_launchers_terminal_and_reports_on_ours(self):
+        # Under the sandbox_pasta_t policy the terminal's fds are denied and
+        # replaced by /dev/null; pasta gets none to begin with, and what it
+        # says on stderr still reaches the launcher's own.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        if self.pasta_policy_loaded():
+            self.skipTest("a stand-in pasta cannot run in the sandbox_pasta_t domain")
+        bindir = self.base / "pasta-bin"
+        bindir.mkdir()
+        records = self.base / "pasta-fds"
+        source = self.base / "launch-input"
+        source.write_text("stdin for pasta\n")
+        pasta = bindir / "pasta"
+        pasta.write_text(f"""#!/bin/sh
+in=$(readlink /proc/$$/fd/0) out=$(readlink /proc/$$/fd/1)
+printf '0=%s\\n1=%s\\n' "$in" "$out" > {records}
+echo stub pasta on stderr >&2
+exit 0
+""")
+        pasta.chmod(0o755)
+        with source.open() as stream:
+            result = subprocess.run(
+                [str(ROOT / "sandbox-game"), "--headless", "--net", "--name", "pasta-stdio",
+                 str(self.game), "/bin/true"],
+                env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+                stdin=stream, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fds = dict(row.split("=", 1) for row in records.read_text().splitlines())
+        self.assertEqual(fds["0"], "/dev/null", "pasta was handed the launcher's stdin")
+        self.assertEqual(fds["1"], "/dev/null", "pasta was handed the launcher's stdout")
+        self.assertIn("stub pasta on stderr", result.stderr)
+
     def test_proton_waits_with_dist_wineserver_as_fallback(self):
         source = (ROOT / "sandbox-game").read_text()
         opening = "set -- /bin/sh -c '"
@@ -6319,6 +6493,16 @@ bogus"; then exit 9; fi
         for value in ("1", "systemd"):
             self.assertRegex(out, rf"ok\s+require\s+uid-audio-{value}: audio")
         self.assertRegex(out, r"!!\s+require\s+uid-audio-0: audio; cannot launch here: audio: no playback-only")
+
+    def test_check_fails_an_audio_requirement_on_an_invalid_uid_setting(self):
+        # A launch refuses an invalid SANDBOX_SEPARATE_UID outright; --check
+        # must not count "false" as a uid of its own that needs no sound
+        # server, but fail the requirement as the launch would.
+        self.save_prefs("uid-audio-invalid", "require=audio\n")
+        self.env["SANDBOX_SEPARATE_UID"] = "false"
+        out = self.cli("--check", check=False).stdout
+        self.assertRegex(out, r"!!\s+require\s+uid-audio-invalid: audio; cannot launch here: "
+                         r"audio: invalid SANDBOX_SEPARATE_UID='false' \(use 0, 1 or systemd\)")
 
 
 def separate_uid_missing():

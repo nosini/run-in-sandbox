@@ -209,8 +209,12 @@ if [ -n "$SELINUX_MODE" ] && [ "$(id -u)" != 0 ]; then
     echo "loading or removing an SELinux policy module needs root; rerun this command with sudo" >&2
     exit 1
 fi
-# Once set up, every install keeps it current.
-[ ! -e "$CONF/systemd/user/sandbox-pulse.service" ] || AUDIO=1
+# Once set up, every install keeps it current. The administrator modes
+# install nothing for this user -- and run as root, with no sound session of
+# the desktop's to ask -- so they leave the choice alone.
+if [ -z "$SYSTEMD_MODE" ] && [ -z "$SELINUX_MODE" ]; then
+    [ ! -e "$CONF/systemd/user/sandbox-pulse.service" ] || AUDIO=1
+fi
 
 # ---- find what to install ---------------------------------------------------
 # Beside this script when it is in a checkout. Piped into bash there is no
@@ -238,7 +242,10 @@ fi
 # Restricted sound relies on the daemon keeping a client to the access class
 # of the socket it came through. Older PipeWire lets a Pulse client overwrite
 # that class, and with it every rule that makes sound playback only.
-if [ "$AUDIO" = 1 ]; then
+# Only the per-user modes come here with audio on, and those have their
+# source; an administrator mode run from a pipe downloads nothing, so an
+# empty source is never read.
+if [ "$AUDIO" = 1 ] && [ -n "$SRC" ]; then
     pw_version="$(. "$SRC/sandbox-game-lib"; pipewire_version)"
     if [ -z "$pw_version" ]; then
         warn "cannot determine the running PipeWire version; restricted sound needs PipeWire 1.6.6 or later, or a game can bypass it (CVE-2026-5674)"
