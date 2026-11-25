@@ -1,0 +1,170 @@
+module sandbox_pasta 1.0;
+
+# A domain for the pasta that connects a sandbox to the internet under --net:
+# sandbox-game's copy of it, named after the game (see "network" in
+# sandbox-game). Without this module that copy runs in the unconfined domain
+# of whoever started the game; passt's own pasta_t does not apply, because the
+# copy carries its folder's label rather than pasta_exec_t. With it,
+# sandbox-game labels the copies sandbox_pasta_exec_t, and pasta can do what
+# it does for a sandbox and no more: join the sandbox's network namespace from
+# the user namespace it is started in, set up the tap device in there, and
+# carry the game's connections out through sockets of its own. No listening
+# sockets, nothing run, no files opened but the ones below.
+#
+# Built without the policy development files: checkmodule, semodule_package
+# and semodule (install.sh --selinux). Each rule below was needed on openSUSE
+# Tumbleweed, under both backends; see README.md here for how it was tested.
+require {
+    type unconfined_t;
+    role unconfined_r;
+    attribute domain;
+    attribute application_domain_type;
+    attribute corenet_unlabeled_type;
+    attribute file_type;
+    attribute non_security_file_type;
+    attribute non_auth_file_type;
+    attribute exec_type;
+    attribute entry_type;
+    attribute application_exec_type;
+    attribute user_home_type;
+    attribute user_tmp_type;
+    attribute port_type;
+    type tmpfs_t;
+    type user_tmp_t;
+    type var_run_t;
+    type user_tty_device_t;
+    type user_devpts_t;
+    type devlog_t;
+    type init_var_run_t;
+    type syslogd_var_run_t;
+    type syslogd_t;
+    type kernel_t;
+    type nsfs_t;
+    type proc_net_t;
+    type sysctl_t;
+    type sysctl_net_t;
+    type net_conf_t;
+    type tun_tap_device_t;
+    type root_t;
+    type tmp_t;
+    type fs_t;
+    type node_t;
+    class process { transition sigchld setcap };
+    class process2 nosuid_transition;
+    class fd use;
+    class file { entrypoint execute execute_no_trans read open getattr map ioctl lock write append relabelfrom relabelto create unlink };
+    class dir { search getattr mounton };
+    class lnk_file read;
+    class fifo_file { getattr read write append ioctl lock };
+    class chr_file { getattr read write append ioctl lock open };
+    class sock_file write;
+    class filesystem { associate mount unmount };
+    class cap_userns { setuid setgid sys_admin sys_ptrace net_admin };
+    class tcp_socket { create connect getattr getopt setopt read write ioctl shutdown bind name_bind node_bind name_connect };
+    class udp_socket { create connect getattr getopt setopt read write ioctl shutdown bind name_bind node_bind };
+    class unix_dgram_socket { create connect getattr setopt write ioctl sendto };
+    class netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
+    class tun_socket create;
+}
+
+type sandbox_pasta_t, domain, application_domain_type, corenet_unlabeled_type;
+type sandbox_pasta_exec_t, file_type, non_security_file_type, non_auth_file_type,
+    exec_type, entry_type, application_exec_type;
+# The pid file pasta writes under the default backend: made by sandbox-game
+# (mktemp) in its folder in the runtime directory, and labeled like the copies.
+type sandbox_pasta_pid_t, file_type, non_security_file_type, non_auth_file_type;
+role unconfined_r types sandbox_pasta_t;
+role object_r types { sandbox_pasta_exec_t sandbox_pasta_pid_t };
+
+# The copies live in /run/user/UID/sandbox-game, a tmpfs.
+allow { sandbox_pasta_exec_t sandbox_pasta_pid_t } tmpfs_t:filesystem associate;
+
+# ---- getting in ------------------------------------------------------------
+# From the user's session, unconfined: sandbox-game, or sandbox-uid under the
+# systemd backend. The runtime directory is mounted nosuid, which keeps the
+# transition from happening -- pasta would quietly stay unconfined -- unless
+# the policy allows it as a nosuid_transition. That only ever leads into this
+# domain, which has less than the one it comes from. Neither launcher sets
+# no_new_privs before pasta starts (pasta sets it itself, later), so no
+# nnp_transition is needed.
+allow unconfined_t sandbox_pasta_exec_t:file { read open getattr map execute ioctl };
+allow unconfined_t sandbox_pasta_t:process transition;
+type_transition unconfined_t sandbox_pasta_exec_t:process sandbox_pasta_t;
+allow unconfined_t sandbox_pasta_t:process2 nosuid_transition;
+allow sandbox_pasta_t sandbox_pasta_exec_t:file entrypoint;
+# pasta runs "<own path>.avx2" where the CPU has AVX2; that copy is labeled
+# the same, and runs in this domain too.
+allow sandbox_pasta_t sandbox_pasta_exec_t:file { read open getattr map execute execute_no_trans ioctl lock };
+
+# What it inherits: the launcher's output, a terminal or the game's log,
+# written to but never opened -- so no other file of the user's. The parent
+# hears it exit.
+allow sandbox_pasta_t unconfined_t:fd use;
+allow sandbox_pasta_t unconfined_t:fifo_file { getattr read write append ioctl lock };
+allow sandbox_pasta_t { user_tty_device_t user_devpts_t }:chr_file { getattr read write append ioctl lock };
+allow sandbox_pasta_t { user_home_type user_tmp_type }:file { getattr write append ioctl lock };
+allow sandbox_pasta_t unconfined_t:process sigchld;
+
+# The pid file, through the runtime directory.
+allow sandbox_pasta_t { var_run_t user_tmp_t }:dir search;
+allow sandbox_pasta_t sandbox_pasta_pid_t:file { open getattr write };
+
+# Its messages after it has gone into the background go to the journal,
+# through /dev/log, a link to /run/systemd/journal/dev-log. The socket's
+# owner is kernel_t where PID 1 made it, syslogd_t where journald did.
+allow sandbox_pasta_t devlog_t:lnk_file read;
+allow sandbox_pasta_t { init_var_run_t syslogd_var_run_t }:dir search;
+allow sandbox_pasta_t devlog_t:sock_file write;
+allow sandbox_pasta_t { kernel_t syslogd_t }:unix_dgram_socket sendto;
+allow sandbox_pasta_t self:unix_dgram_socket { create connect getattr setopt write ioctl };
+
+# ---- the sandbox's network -------------------------------------------------
+# --netns /proc/PID/ns/net: the sandbox's process, unconfined like its
+# launcher. The read on the process is the kernel's read-only ptrace check for
+# that link; nothing else of the process is opened.
+allow sandbox_pasta_t unconfined_t:dir search;
+allow sandbox_pasta_t unconfined_t:lnk_file read;
+allow sandbox_pasta_t unconfined_t:file read;
+allow sandbox_pasta_t nsfs_t:file { read open getattr };
+# It starts in the user namespace that owns the sandbox's network namespace,
+# where it has these capabilities: joining it, making the tap device and
+# setting up its address and routes (--config-net), then dropping them.
+allow sandbox_pasta_t self:cap_userns { setuid setgid sys_admin sys_ptrace net_admin };
+allow sandbox_pasta_t self:process setcap;
+allow sandbox_pasta_t tun_tap_device_t:chr_file { open read write ioctl getattr };
+allow sandbox_pasta_t self:tun_socket create;
+allow sandbox_pasta_t self:netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
+# The host's addresses and routes, which it copies, and the resolver it
+# forwards --dns-forward to when --dns-host names none.
+allow sandbox_pasta_t proc_net_t:lnk_file read;
+allow sandbox_pasta_t proc_net_t:file { read open getattr };
+allow sandbox_pasta_t { sysctl_t sysctl_net_t }:dir search;
+allow sandbox_pasta_t sysctl_net_t:file { read open getattr };
+allow sandbox_pasta_t net_conf_t:file { read open getattr };
+
+# Then it shuts itself in: a mount namespace of its own whose root is an empty
+# tmpfs.
+allow sandbox_pasta_t { root_t tmp_t }:dir mounton;
+allow sandbox_pasta_t tmpfs_t:filesystem mount;
+allow sandbox_pasta_t fs_t:filesystem unmount;
+
+# ---- the game's connections ------------------------------------------------
+# Outgoing TCP to any port, and UDP from the same port the game used -- any
+# the kernel lets it bind, since nothing below 1024 is anyone's without
+# privilege. No listen or accept: -t/-u none forward nothing in.
+allow sandbox_pasta_t self:tcp_socket { create connect getattr getopt setopt read write ioctl shutdown };
+allow sandbox_pasta_t port_type:tcp_socket name_connect;
+allow sandbox_pasta_t self:udp_socket { create connect getattr getopt setopt read write ioctl shutdown bind };
+allow sandbox_pasta_t port_type:udp_socket name_bind;
+allow sandbox_pasta_t node_t:udp_socket node_bind;
+# For each new connection, pasta binds a socket to the destination address to
+# find out whether it is one of this machine's own; a refusal counts as "not
+# local", which is what it should conclude for a sandbox, whose rules forbid
+# this machine's addresses anyway.
+dontaudit sandbox_pasta_t self:tcp_socket bind;
+dontaudit sandbox_pasta_t port_type:tcp_socket name_bind;
+dontaudit sandbox_pasta_t node_t:tcp_socket node_bind;
+
+# ---- labeling the copies ---------------------------------------------------
+# sandbox-game, run by the user, labels the copies and the pid file it makes.
+allow unconfined_t { sandbox_pasta_exec_t sandbox_pasta_pid_t }:file { relabelfrom relabelto getattr read write open create unlink };

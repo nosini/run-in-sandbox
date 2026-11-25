@@ -2195,9 +2195,11 @@ main().catch((error) => { console.error(error); process.exit(1); });
         result = self.cli("--check", check=False)
         lines = result.stdout.splitlines()
         marks = {line.split()[1]: line.split()[0] for line in lines}
+        # pasta's SELinux domain is reported only where SELinux is on.
+        selinux = ["pasta-domain"] if os.access("/sys/fs/selinux/context", os.W_OK) else []
         self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
-                                       "gpu", "gamescope", "wayland", "satellite", "network", "ntsync",
-                                       "32-bit"], result.stdout)
+                                       "gpu", "gamescope", "wayland", "satellite", "network",
+                                       *selinux, "ntsync", "32-bit"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:
         # here at least the playback-only server, the test runtime dir having none.
@@ -3506,6 +3508,59 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         proc.wait(timeout=10)
         time.sleep(0.3)
         self.assertEqual(running(), [], "pasta outlived the game")
+
+    def test_network_helper_runs_in_its_selinux_domain(self):
+        # With selinux/sandbox_pasta.te loaded, the copies are labeled for it
+        # and pasta runs confined; it still connects the game.
+        if not shutil.which("pasta"):
+            self.skipTest("pasta (package passt) is not installed")
+        try:
+            with open("/sys/fs/selinux/context", "w") as f:
+                f.write("system_u:object_r:sandbox_pasta_exec_t:s0")
+        except OSError:
+            self.skipTest("SELinux is off, or the sandbox_pasta module is not loaded "
+                          "(sudo ./install.sh --selinux)")
+        import time
+        names = {"domain-game-pasta", "domain-game-pasta.avx2"}
+        def domains():
+            found = {}
+            for p in Path("/proc").glob("[0-9]*"):
+                try:
+                    if os.path.basename(os.readlink(p / "exe")) in names:
+                        found[p.name] = (p / "attr/current").read_text().strip("\0\n")
+                except OSError:
+                    continue
+            return found
+        proc = subprocess.Popen([str(ROOT / "sandbox-game"), "--headless", "--net",
+                                 "--name", "domain-game", self.game, "sleep", "60"],
+                                env=self.env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.kill)
+        for _ in range(100):
+            if domains() or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        found = domains()
+        self.assertTrue(found, proc.stderr.read() if proc.poll() is not None else "no pasta")
+        for pid, context in found.items():
+            self.assertEqual(context.split(":")[2], "sandbox_pasta_t", (pid, context))
+        for copy in (self.runtime / "sandbox-game").glob("domain-game-pasta*"):
+            if not copy.name.endswith(".new") and ".pid." not in copy.name:
+                self.assertIn(":sandbox_pasta_exec_t:",
+                              os.getxattr(copy, "security.selinux").decode(), copy)
+        self.cli("--stop", "domain-game")
+        proc.wait(timeout=10)
+
+    def test_selinux_policy_module_builds(self):
+        checkmodule = shutil.which("checkmodule")
+        if not checkmodule:
+            self.skipTest("checkmodule (package checkpolicy) is not installed")
+        out = self.base / "sandbox_pasta.mod"
+        result = subprocess.run([checkmodule, "-M", "-m", "-o", str(out),
+                                 str(ROOT / "selinux" / "sandbox_pasta.te")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_network_lets_nothing_in(self):
         # No port of this machine leads into the sandbox: pasta forwards none.

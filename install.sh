@@ -2,12 +2,16 @@
 # install.sh [--restrict-audio | --uninstall]
 # sudo ./install.sh --systemd-backend UID...
 # sudo ./install.sh --uninstall-systemd-backend
+# sudo ./install.sh --selinux | --uninstall-selinux
 #   Install sandbox-game and sandbox-attach into ~/.local/bin, their helpers
 #   (sandbox-seccomp, sandbox-landlock, sandbox-game-lib, nwjs-casefold.js) into
 #   ~/.local/lib/sandbox-game, and the Nautilus scripts, for the current user.
 #   No root needed; nothing outside ~/.local is touched.
 #   The separate --systemd-backend mode installs administrator services and
 #   GPU grants for the given host UIDs; it does not install per-user files.
+#   --selinux loads the SELinux policy module in selinux/, which confines the
+#   pasta that --net starts to a domain of its own; --uninstall-selinux
+#   removes it. Neither touches per-user files either.
 #
 #   --restrict-audio also sets up playback-only sound for the games: a second
 #   Pulse server of their own, and WirePlumber rules and a hook that keep them
@@ -120,9 +124,12 @@ install_audio() {
 
 AUDIO=0
 SYSTEMD_MODE=""
+SELINUX_MODE=""
 case "${1:-}" in
     --systemd-backend) SYSTEMD_MODE=install; shift ;;
     --uninstall-systemd-backend) SYSTEMD_MODE=uninstall; shift ;;
+    --selinux) SELINUX_MODE=install; shift ;;
+    --uninstall-selinux) SELINUX_MODE=uninstall; shift ;;
     --uninstall)
         each remove_one
         each_old remove_one
@@ -141,11 +148,15 @@ case "${1:-}" in
     --restrict-audio) AUDIO=1; shift ;;
 esac
 if [ -z "$SYSTEMD_MODE" ] && [ "$#" -ne 0 ]; then
-    echo "usage: install.sh [--restrict-audio | --uninstall | --systemd-backend UID... | --uninstall-systemd-backend]" >&2
+    echo "usage: install.sh [--restrict-audio | --uninstall | --systemd-backend UID... | --uninstall-systemd-backend | --selinux | --uninstall-selinux]" >&2
     exit 1
 fi
 if [ -n "$SYSTEMD_MODE" ] && [ "$(id -u)" != 0 ]; then
     echo "the systemd backend administrator setup needs root; rerun this command with sudo" >&2
+    exit 1
+fi
+if [ -n "$SELINUX_MODE" ] && [ "$(id -u)" != 0 ]; then
+    echo "loading or removing an SELinux policy module needs root; rerun this command with sudo" >&2
     exit 1
 fi
 # Once set up, every install keeps it current.
@@ -172,6 +183,39 @@ fi
 if [ -n "$SYSTEMD_MODE" ]; then
     python3 -I "$SRC/systemd-backend/install-systemd.py" "$SYSTEMD_MODE" "$@"
     exit
+fi
+# The policy module for --net's pasta (see selinux/sandbox_pasta.te). Built
+# here from its source with the tools semodule comes with, no policy
+# development package needed. sandbox-game labels its pasta copies at the next
+# launch; one already running stays as it is until its game ends.
+if [ "$SELINUX_MODE" = install ]; then
+    [ -e /sys/fs/selinux/enforce ] || {
+        echo "SELinux is not enabled on this system; the policy module is for systems where it is" >&2
+        exit 1; }
+    for c in checkmodule semodule_package semodule; do
+        command -v "$c" >/dev/null || {
+            echo "$c not found (openSUSE: zypper in checkpolicy policycoreutils)" >&2; exit 1; }
+    done
+    BUILD="$(mktemp -d)"; trap 'rm -rf "$BUILD"' EXIT
+    checkmodule -M -m -o "$BUILD/sandbox_pasta.mod" "$SRC/selinux/sandbox_pasta.te"
+    semodule_package -o "$BUILD/sandbox_pasta.pp" -m "$BUILD/sandbox_pasta.mod"
+    semodule -i "$BUILD/sandbox_pasta.pp"
+    say "loaded the SELinux policy module sandbox_pasta: pasta for --net runs as sandbox_pasta_t from each game's next launch"
+    exit 0
+elif [ "$SELINUX_MODE" = uninstall ]; then
+    if command -v semodule >/dev/null && semodule -l | awk '$1 == "sandbox_pasta" { f = 1 } END { exit !f }'; then
+        # A pasta still in the domain would be left with a label the policy
+        # no longer has, and lose the network it serves.
+        if ps -eo label= | grep -q ':sandbox_pasta_t:'; then
+            echo "a game's pasta still runs in sandbox_pasta_t; stop games started with --net first" >&2
+            exit 1
+        fi
+        semodule -r sandbox_pasta
+        say "removed the SELinux policy module sandbox_pasta; pasta for --net runs unconfined again"
+    else
+        say "the SELinux policy module sandbox_pasta is not loaded"
+    fi
+    exit 0
 fi
 # The private satellite build travels with its licence; checked before
 # anything is installed, so a missing one stops nothing halfway.

@@ -267,6 +267,13 @@ stop_sandboxes() {                    # $1 = NAME, empty for all
 SANDBOXES="$HOME/game-sandboxes"
 LOCKS="$SANDBOXES/.locks"
 
+# Whether SELinux is on and its loaded policy has the file type $1: selinuxfs
+# refuses a context naming a type it does not know. No root needed.
+selinux_has_type() {
+    [ -w /sys/fs/selinux/context ] \
+        && printf '%s' "system_u:object_r:$1:s0" 2>/dev/null > /sys/fs/selinux/context
+}
+
 # .locks is where the locks are kept, not a sandbox.
 valid_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$1" != . ] && [ "$1" != .. ] && [ "$1" != .locks ]; }
 
@@ -752,6 +759,11 @@ check_host() {
         _check_line ok network "--net available (pasta)"
     else
         _check_line -- network "--net unavailable: needs pasta (passt) and ip (iproute2)"
+    fi
+    if selinux_has_type sandbox_pasta_exec_t; then
+        _check_line ok pasta-domain "pasta for --net runs confined (SELinux domain sandbox_pasta_t)"
+    elif [ -w /sys/fs/selinux/context ]; then
+        _check_line -- pasta-domain "pasta for --net runs unconfined: sudo ./install.sh --selinux confines it"
     fi
 
     if [ -c /dev/ntsync ] && [ -r /dev/ntsync ] && [ -w /dev/ntsync ]; then
@@ -2817,7 +2829,6 @@ if [ "$NET" = 1 ]; then
     # reachable from in there. Point the game at pasta's forwarder instead --
     # wherever /etc/resolv.conf really lives, which is often under /run.
     exec 6<<<"nameserver $DNS_ADDR"
-    PASTA_PID="$(mktemp)"            # cleanup() ends pasta with the game
     # pasta's interface in here would get a new random MAC address from the
     # kernel at every launch, and Windows programs see it through Wine: a
     # launcher that ties a saved login to its "device" then forgets it each
@@ -2852,16 +2863,40 @@ if [ "$NET" = 1 ]; then
     # only ever replaced when pasta itself changed, and never removed: a
     # running pasta whose file goes away shows up as "... (deleted)", and a
     # rule matching the plain name would quietly stop applying to it.
+    # With SELinux and this project's policy module (selinux/, loaded by
+    # install.sh --selinux), the copies carry sandbox_pasta_exec_t and pasta
+    # runs confined to sandbox_pasta_t; a plain copy would carry its folder's
+    # label and run in the launcher's own unconfined domain. Checked at every
+    # launch, so copies made before the module was loaded get the label too.
+    # A copy left from a module since removed has a label the policy no longer
+    # knows (unlabeled_t), and is made anew.
     PASTA_SRC="$(realpath "$(command -v pasta)")"
     PASTA_BIN="$RT/sandbox-game/$NAME-pasta"
+    PASTA_TYPE=""; selinux_has_type sandbox_pasta_exec_t && PASTA_TYPE=sandbox_pasta_exec_t
     [ -d "$RT/sandbox-game" ] || mkdir -m 0700 "$RT/sandbox-game"
     for suffix in "" .avx2; do
         [ -f "$PASTA_SRC$suffix" ] || continue
-        cmp -s "$PASTA_SRC$suffix" "$PASTA_BIN$suffix" && continue
-        cp "$PASTA_SRC$suffix" "$PASTA_BIN$suffix.new"
-        chmod 0755 "$PASTA_BIN$suffix.new"
-        mv -f "$PASTA_BIN$suffix.new" "$PASTA_BIN$suffix"
+        label="$(stat -c %C "$PASTA_BIN$suffix" 2>/dev/null || true)"
+        if [[ "$label" == *:unlabeled_t:* ]] || ! cmp -s "$PASTA_SRC$suffix" "$PASTA_BIN$suffix"; then
+            cp "$PASTA_SRC$suffix" "$PASTA_BIN$suffix.new"
+            chmod 0755 "$PASTA_BIN$suffix.new"
+            [ -z "$PASTA_TYPE" ] || chcon -t "$PASTA_TYPE" "$PASTA_BIN$suffix.new" 2>/dev/null || true
+            mv -f "$PASTA_BIN$suffix.new" "$PASTA_BIN$suffix"
+            label="$(stat -c %C "$PASTA_BIN$suffix" 2>/dev/null || true)"
+        fi
+        if [ -n "$PASTA_TYPE" ] && [[ "$label" != *:"$PASTA_TYPE":* ]] \
+                && ! chcon -t "$PASTA_TYPE" "$PASTA_BIN$suffix" 2>/dev/null; then
+            echo "sandbox-game: note: could not label $PASTA_BIN$suffix $PASTA_TYPE;" \
+                "its pasta runs unconfined" >&2
+        fi
     done
+    # cleanup() ends pasta with the game, by the pid it writes here; labeled
+    # for pasta's domain, which may write no other file.
+    PASTA_PID="$(mktemp -p "$RT/sandbox-game" "$NAME-pasta.pid.XXXXXX")"
+    if [ -n "$PASTA_TYPE" ] && ! chcon -t sandbox_pasta_pid_t "$PASTA_PID" 2>/dev/null; then
+        echo "sandbox-game: note: could not label $PASTA_PID sandbox_pasta_pid_t;" \
+            "pasta may not be able to write it" >&2
+    fi
     NET_ARGS=( --ro-bind-data 6 /etc/resolv.conf --info-fd 10 --block-fd 11 )
 fi
 # ---- /etc ------------------------------------------------------------------

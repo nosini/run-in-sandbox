@@ -34,7 +34,9 @@ user manager is reachable rather than pass having tested nothing.
 Tests that need something missing skip rather than fail: the subordinate-uid
 backend's tests need `newuidmap` and a range in `/etc/subuid`, the systemd
 backend's tests need its [administrator setup](../systemd-backend/README.md),
-and the live audio test needs `./install.sh --restrict-audio`. A test run
+the live audio test needs `./install.sh --restrict-audio`, the check of
+pasta's SELinux domain needs [the policy module](../selinux/README.md)
+loaded, and the module's build test needs `checkmodule`. A test run
 inside a container usually lacks a recent enough bubblewrap and these
 services, so most of the suite needs a real machine or a VM.
 

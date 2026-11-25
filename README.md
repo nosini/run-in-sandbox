@@ -69,6 +69,9 @@ additionally makes games' sound playback only; see [Sound](#sound). It changes
 the user's sound setup, so it is not done unless asked, and once done every later
 install keeps it current. `--uninstall` takes it out again.
 
+On SELinux systems, `sudo ./install.sh --selinux` also loads a policy module that
+confines the `pasta` behind `--net`; see [Network](#network).
+
 What goes where:
 
 | File | Installed to |
@@ -1240,6 +1243,25 @@ rules:
 are left in place between launches, so a rule never meets a running `pasta`
 whose file has gone (`... (deleted)`); they go at logout with the rest of the
 runtime directory.
+
+On a system with SELinux (openSUSE, Fedora), those copies run unconfined,
+like anything else the user starts: passt's own policy for `pasta` applies to
+the packaged program, not to a copy of it. This project's policy module gives
+them a domain of their own, `sandbox_pasta_t`, which allows what `pasta` does
+for a sandbox and nothing else: none of the user's files opened apart from
+its pid file, no programs run, no listening sockets. To load it, from a checkout:
+
+```sh
+sudo ./install.sh --selinux
+```
+
+It needs `checkmodule`, `semodule_package` and `semodule` (openSUSE:
+`checkpolicy` and `policycoreutils`), not the policy development files.
+From then on `sandbox-game` labels each game's copies `sandbox_pasta_exec_t`
+when it launches the game, and `sandbox-game --check` shows the domain on its
+`pasta-domain` line. `sudo ./install.sh --uninstall-selinux` removes the module;
+it refuses while a game started with `--net` is running. See
+[`selinux/`](selinux/README.md) for what the domain allows and why.
 
 The host proxy sees pasta's executable, so these process rules apply to the
 whole sandbox, including launchers and helpers. Socketowner's
