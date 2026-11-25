@@ -98,6 +98,18 @@ AUDIO_MARKER="$CONF/sandbox-game/audio-restart-pending"
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 
+# Temporary trees this run must remove however it ends. One EXIT trap, because
+# a second trap would replace the first and leak the other directory -- and a
+# root install's temporary trees are root-owned.
+CLEANUP_DIRS=()
+cleanup_tmp() {
+    local dir
+    for dir in "${CLEANUP_DIRS[@]}"; do
+        [ -z "$dir" ] || rm -rf -- "$dir"
+    done
+}
+trap cleanup_tmp EXIT
+
 # Root piped installs must fetch an immutable source: a branch such as main
 # can change between a review and the download. A release tag or full commit
 # hash names the same tree every time.
@@ -216,7 +228,7 @@ if [ -z "$SRC" ] && [ "$SELINUX_MODE" != uninstall ]; then
         exit 1
     fi
     command -v curl >/dev/null || { echo "curl is needed to download" >&2; exit 1; }
-    TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+    TMP="$(mktemp -d)"; CLEANUP_DIRS+=("$TMP")
     say "downloading $REPO ($REF)"
     curl --proto '=https' --tlsv1.2 -fsSL "$REPO/archive/$REF.tar.gz" \
         | tar xz -C "$TMP" --strip-components=1 --no-same-owner
@@ -252,7 +264,7 @@ if [ "$SELINUX_MODE" = install ]; then
         command -v "$c" >/dev/null || {
             echo "$c not found (openSUSE: zypper in checkpolicy policycoreutils)" >&2; exit 1; }
     done
-    BUILD="$(mktemp -d)"; trap 'rm -rf "$BUILD"' EXIT
+    BUILD="$(mktemp -d)"; CLEANUP_DIRS+=("$BUILD")
     checkmodule -M -m -o "$BUILD/sandbox_pasta.mod" "$SRC/selinux/sandbox_pasta.te"
     semodule_package -o "$BUILD/sandbox_pasta.pp" -m "$BUILD/sandbox_pasta.mod"
     semodule -i "$BUILD/sandbox_pasta.pp"

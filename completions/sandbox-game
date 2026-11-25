@@ -15,7 +15,7 @@ _sandbox_game_init()
     if declare -F _comp_initialize >/dev/null; then
         _comp_initialize -s -- "$@"
     else
-        _init_completion -s
+        _init_completion -s "$@"
     fi
 }
 _sandbox_game_filedir()
@@ -107,7 +107,18 @@ _sandbox_game_inside()
 {
     local REPLY root base prefix m r
     _sandbox_game_dequote "$1" || return
-    root=$(realpath -- "${REPLY/#\~/$HOME}" 2>/dev/null) || return
+    # Only "~" and "~/..." are this shell's home. Replacing every leading
+    # tilde would turn ~otheruser/game into $HOMEotheruser/game; leave a
+    # ~otheruser to _comp_expand_tilde (or as written) instead.
+    case $REPLY in
+        \~) REPLY=$HOME ;;
+        \~/*) REPLY=$HOME${REPLY#\~} ;;
+        \~*)
+            if declare -F _comp_expand_tilde >/dev/null; then
+                _comp_expand_tilde "$REPLY"
+            fi ;;
+    esac
+    root=$(realpath -- "$REPLY" 2>/dev/null) || return
     if [[ $cur == /game || $cur == /game/* ]]; then
         base=$root${cur#/game} prefix=/game
     elif [[ $cur == /* ]]; then
@@ -139,16 +150,16 @@ _sandbox_game_inside()
 _sandbox_game()
 {
     local cur prev words cword was_split split
-    _sandbox_game_init || return
+    _sandbox_game_init "$@" || return
 
     # Where are we? Options run up to GAMEDIR; everything after it is CMD.
-    local i skip=0 gamedir="" at=-1
+    local i skip=0 gamedir="" at=-1 dashdash=0
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
             --name | --env | --stop | --delete | --reset-install | --allow-lan | --add-host | --x11-backend | --x11-exe | --require | --nwjs-version) skip=1 ;;
             --ro) skip=2 ;;
-            --) gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
+            --) dashdash=1; gamedir=${words[i + 1]-}; at=$((i + 1)); break ;;
             -*) ;;
             *) gamedir=${words[i]}; at=$i; break ;;
         esac
@@ -159,6 +170,12 @@ _sandbox_game()
         else
             _sandbox_game_filedir      # arguments to the game's own command
         fi
+        return
+    fi
+    if ((dashdash)); then
+        # The word after -- is GAMEDIR even when it starts with a dash; the
+        # command that follows is not this command's options either.
+        _sandbox_game_filedir -d
         return
     fi
 
@@ -198,7 +215,14 @@ _sandbox_game()
             mapfile -t running < <(_sandbox_game_running)
             _sandbox_game_value_matches "$prefix" "$value" 0 ${running[@]+"${running[@]}"}
             return ;;
-        --name | --delete | --reset-install)
+        --name)
+            local -a known
+            mapfile -t known < <(_sandbox_game_known)
+            _sandbox_game_value_matches "$prefix" "$value" 0 ${known[@]+"${known[@]}"}
+            return ;;
+        --delete | --reset-install)
+            # sandbox-game parses these as "--delete NAME", never "--delete=NAME".
+            ((split_here)) && return
             local -a known
             mapfile -t known < <(_sandbox_game_known)
             _sandbox_game_value_matches "$prefix" "$value" 0 ${known[@]+"${known[@]}"}

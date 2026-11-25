@@ -45,16 +45,22 @@ trap 'rm -rf -- "$WORK"' EXIT
 if [ "$FROM_SOURCE" = 1 ]; then
     git -C "$WORK" init --quiet
     git -C "$WORK" fetch --quiet --depth 1 "$REPO.git" "$COMMIT"
-    git -C "$WORK" -c advice.detachedHead=false checkout --quiet FETCH_HEAD
-    [ "$(git -C "$WORK" rev-parse HEAD)" = "$COMMIT" ] || {
+    # FETCH_HEAD is the commit the next checkout would take, and checkout can
+    # run hooks and smudge filters: verify the hash before it gets that far.
+    [ "$(git -C "$WORK" rev-parse FETCH_HEAD)" = "$COMMIT" ] || {
         echo "Fetched source is not commit $COMMIT" >&2; exit 1; }
+    git -C "$WORK" -c advice.detachedHead=false -c core.hooksPath=/dev/null \
+        checkout --quiet FETCH_HEAD
     export CARGO_TARGET_DIR="$WORK/target"
     cargo build --manifest-path "$WORK/Cargo.toml" --locked --release
     BIN="$CARGO_TARGET_DIR/release/xwayland-satellite"
     LICENSE="$WORK/LICENSE"
 else
     curl -fsSL --proto '=https' -o "$WORK/$ASSET" "$REPO/releases/download/$TAG/$ASSET"
-    printf '%s  %s\n' "$SHA256" "$WORK/$ASSET" | sha256sum --check --quiet --status - || {
+    # hashed from stdin: a file name with a newline or backslash makes
+    # sha256sum escape its own output, which "hash  filename" checking trips on.
+    got="$(sha256sum < "$WORK/$ASSET" | awk '{print $1}')"
+    [ "$got" = "$SHA256" ] || {
         echo "Downloaded $ASSET does not match its pinned SHA-256; not installing it" >&2; exit 1; }
     tar -xzf "$WORK/$ASSET" -C "$WORK" --no-same-owner
     [ "$(cat "$WORK/xwayland-satellite/COMMIT")" = "$COMMIT" ] || {

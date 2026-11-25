@@ -18,10 +18,12 @@
 // an existing Save or save folder without being renamed.
 (() => {
     "use strict";
-    let fs, path, root;
+    let fs, path, url, util, root;
     try {
         fs = require("fs");
         path = require("path");
+        url = require("url");
+        util = require("util");
         root = nw.__dirname;
     } catch (e) {
         return;  // Node switched off in package.json: nothing to look with
@@ -97,12 +99,37 @@
         return full === root || full.startsWith(root + path.sep);
     }
 
+    // An fs path argument as a string, with the form it arrived in, or null
+    // for what is not a path (a descriptor, an options object). fs takes
+    // strings, Buffers of bytes and file: URLs; a resolved path goes back in
+    // the same form, so a caller's Buffer stays a Buffer and a URL a URL.
+    function pathArg(p) {
+        if (typeof p === "string") return { value: p, kind: "string" };
+        if (Buffer.isBuffer(p)) return { value: p.toString(), kind: "buffer" };
+        if (p instanceof URL) {
+            if (p.protocol !== "file:") return null;
+            try {
+                return { value: url.fileURLToPath(p), kind: "url" };
+            } catch (_) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    function pathValue(value, kind) {
+        if (kind === "buffer") return Buffer.from(value);
+        if (kind === "url") return url.pathToFileURL(value);
+        return value;
+    }
+
     // An absolute path inside the app folder, or null for anything else. A
     // relative one is taken from the working directory, or from the app folder
     // when nothing exists there under that name.
     function insidePath(p) {
-        if (typeof p !== "string") return null;
-        p = normalize(p);
+        const arg = pathArg(p);
+        if (arg === null) return null;
+        p = normalize(arg.value);
         let full;
         try {
             full = path.resolve(p);
@@ -119,12 +146,6 @@
             return null;
         }
         return withinRoot(full) ? full : null;
-    }
-
-    function inside(p) {
-        const full = insidePath(p);
-        if (full === null) return null;
-        return full === root ? [] : path.relative(root, full).split(path.sep);
     }
 
     function foldChild(dir, name) {
@@ -209,6 +230,23 @@
         return p;
     }
 
+    // fixPath and fixWrite work on the string form. These take any form fs
+    // accepts and hand the result back in the form the caller used, leaving a
+    // path that needed no change exactly as it was.
+    function fixReadArg(p) {
+        const arg = pathArg(p);
+        if (arg === null) return p;
+        const fixed = fixPath(arg.value);
+        return fixed === arg.value ? p : pathValue(fixed, arg.kind);
+    }
+
+    function fixWriteArg(p) {
+        const arg = pathArg(p);
+        if (arg === null) return p;
+        const fixed = fixWrite(arg.value);
+        return fixed === arg.value ? p : pathValue(fixed, arg.kind);
+    }
+
     // chrome-extension://<id>/ is the app folder.
     function fix(url) {
         if (typeof url !== "string" && !(url instanceof URL)) return url;
@@ -274,9 +312,12 @@
         const forget = () => forgetDirs(drop);
         const last = args[args.length - 1];
         if (name.endsWith("Sync")) {
-            const result = original.apply(self, args);
-            forget();
-            return result;
+            try {
+                return original.apply(self, args);
+            } finally {
+                // A throwing call may still have written or changed a folder.
+                forget();
+            }
         }
         if (typeof last === "function") {
             args[args.length - 1] = function (error, ...rest) {
@@ -299,9 +340,9 @@
     // realpath.native are realpath calls too, so they are wrapped as well.
     function readWrapper(original) {
         const wrapper = function (...args) {
-            if (args.length && typeof args[0] === "string") {
+            if (args.length) {
                 try {
-                    args[0] = fixPath(args[0]);
+                    args[0] = fixReadArg(args[0]);
                 } catch (_) {}
             }
             return original.apply(this, args);
@@ -324,9 +365,9 @@
         if (typeof original !== "function") return;
         target[name] = function (...args) {
             let full = null;
-            if (typeof args[0] === "string") {
+            if (args.length) {
                 try {
-                    args[0] = fixWrite(args[0]);
+                    args[0] = fixWriteArg(args[0]);
                     full = insidePath(args[0]);
                 } catch (_) {}
             }
@@ -341,9 +382,9 @@
         if (typeof original !== "function") return;
         target[name] = function (...args) {
             let full = null;
-            if (typeof args[0] === "string") {
+            if (args.length) {
                 try {
-                    args[0] = fixPath(args[0]);
+                    args[0] = fixReadArg(args[0]);
                     full = insidePath(args[0]);
                 } catch (_) {}
             }
@@ -358,9 +399,9 @@
         if (typeof original !== "function") return;
         target[name] = function (...args) {
             const drop = [];
-            if (typeof args[0] === "string") {
+            if (args.length) {
                 try {
-                    args[0] = fixWrite(args[0]);
+                    args[0] = fixWriteArg(args[0]);
                     drop.push(...changedDir(insidePath(args[0])));
                 } catch (_) {}
             }
@@ -384,19 +425,19 @@
         const dropSource = options.dropSource === true;
         target[name] = function (...args) {
             const drop = [];
-            if (foldSource && typeof args[0] === "string") {
+            if (foldSource && args.length) {
                 try {
-                    args[0] = fixPath(args[0]);
+                    args[0] = fixReadArg(args[0]);
                 } catch (_) {}
             }
-            if (dropSource && typeof args[0] === "string") {
+            if (dropSource && args.length) {
                 try {
                     drop.push(...changedDir(insidePath(args[0])));
                 } catch (_) {}
             }
-            if (typeof args[1] === "string") {
+            if (args.length > 1) {
                 try {
-                    args[1] = fixWrite(args[1]);
+                    args[1] = fixWriteArg(args[1]);
                     drop.push(...changedDir(insidePath(args[1])));
                 } catch (_) {}
             }
@@ -423,10 +464,10 @@
         if (typeof original !== "function") return;
         target[name] = function (...args) {
             let full = null;
-            if (typeof args[0] === "string") {
+            if (args.length) {
                 try {
                     const flags = openFlags(args[1]);
-                    args[0] = flags.create ? fixWrite(args[0]) : fixPath(args[0]);
+                    args[0] = flags.create ? fixWriteArg(args[0]) : fixReadArg(args[0]);
                     if (flags.write) full = insidePath(args[0]);
                 } catch (_) {}
             }
@@ -480,6 +521,18 @@
         for (const name of ["symlinkSync", "symlink"]) {
             wrapTwoPath(fs, name, { foldSource: false });
             wrapTwoPath(fs.promises, name, { foldSource: false });
+        }
+        // fs.exists has a [util.promisify.custom] result that resolves to the
+        // boolean. Object.assign above copies plain names and enumerable
+        // symbols, not that non-enumerable one, so copy it by hand: without it
+        // util.promisify(fs.exists) would treat the boolean as an error.
+        if (typeof fs.exists === "function") {
+            const existsWrapped = fs.exists;
+            Object.defineProperty(existsWrapped, util.promisify.custom, {
+                value: function (p) {
+                    return new Promise((resolve) => existsWrapped(p, resolve));
+                },
+            });
         }
         state.wrapped = true;
     }

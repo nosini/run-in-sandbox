@@ -3,7 +3,7 @@
 # Runtime, display, gamescope and engine-specific controls update in place.
 set -uo pipefail
 
-SANDBOX="$HOME/.local/bin/sandbox-game"
+SANDBOX="${SANDBOX_BACKEND:-$HOME/.local/bin/sandbox-game}"
 [ -x "$SANDBOX" ] || SANDBOX="$(command -v sandbox-game || true)"
 die() {
     printf '%s\n' "$1" >&2
@@ -37,7 +37,10 @@ SEL="$(realpath -- "$SEL")" || die "Selection not found:"$'\n'"$SEL"
 resolve_selection "$SEL"
 GAMEDIR="$R_GAMEDIR"
 BASE="$(basename "$GAMEDIR")"
-NAME="$("$SANDBOX" --print-name "$GAMEDIR")" || die "Cannot derive a name for:"$'\n'"$GAMEDIR"
+NAME_ARGS=()
+[ -z "${SANDBOX_GAME_NAME:-}" ] || NAME_ARGS=( --name "$SANDBOX_GAME_NAME" )
+NAME="$("$SANDBOX" --print-name "${NAME_ARGS[@]}" "$GAMEDIR")" \
+    || die "Cannot derive a name for:"$'\n'"$GAMEDIR"
 game_engine "$SEL" auto
 CAN_PROTON=0; RENPY_X11=0
 if has_windows_exe "$GAMEDIR" || [ "$(cfg_get launch_with auto)" = proton ]; then CAN_PROTON=1; fi

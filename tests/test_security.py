@@ -7347,7 +7347,7 @@ class SatelliteScriptTests(unittest.TestCase):
             path = bindir / name
             path.write_text("#!/bin/sh\n" + body + "\n")
             path.chmod(0o755)
-        tool("git", f'case "$*" in *"rev-parse HEAD"*) printf "{commit}\\n" ;; esac')
+        tool("git", f'case "$*" in *"rev-parse FETCH_HEAD"*|*"rev-parse HEAD"*) printf "{commit}\\n" ;; esac')
         tool("pkg-config", "exit 0")
         tool("clang", "exit 0")
         target_log = base / "cargo.target"

@@ -87,12 +87,19 @@ fi
 SEL="$(realpath -- "$SEL")" || die "Selection not found:"$'\n'"$SEL"
 [ -e "$SEL" ] || die "Selection not found:"$'\n'"$SEL"
 
-pick() {                                       # $1 = dir to strip, $@ = paths
-    local dir="$1" rel; shift
-    [ "$#" -eq 1 ] && { printf '%s\n' "$1"; return; }
+pick() {                       # $1 = dir to strip, $@ = paths; sets PICKED
+    local dir="$1" rel rc; shift
+    PICKED=""
+    if [ "$#" -eq 1 ]; then PICKED="$1"; return 0; fi
     rel="$(python3 -I -c 'import json,sys; json.dump({"items": sys.argv[1:]}, sys.stdout)' \
         "${@#"$dir"/}" | dialog pick --title="Pick launcher")"
-    [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
+    rc=$?
+    # 1 is the picker's own cancel; anything else means it could not run.
+    [ "$rc" -ne 1 ] || return 1
+    [ "$rc" -eq 0 ] \
+        || die "Cannot show the launcher picker. Install GTK 4, libadwaita and the Python PyGObject bindings."
+    [ -n "$rel" ] || return 1
+    PICKED="$dir/$rel"
 }
 
 RO=(); CMD=(); GAMEDIR=""; PROTON=0; MKXP=0; PGMMV=0; ALLOW_MANGOHUD=1
@@ -118,8 +125,8 @@ if [ "$(cfg_get launch_with auto)" = proton ]; then
         mapfile -t exes < <(find_exes "$GAMEDIR")
         [ "${#exes[@]}" -gt 0 ] \
             || die "Proton requested, but no Windows .exe was found at:"$'\n'"$GAMEDIR"$'\n\n'"Choose Automatic in Sandbox game preferences to use the native launcher."
-        LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
-        [ -n "$LAUNCHER" ] || exit 0
+        pick "$GAMEDIR" "${exes[@]}" || exit 0
+        LAUNCHER="$PICKED"
     fi
     CMD=( "/game/${LAUNCHER#"$GAMEDIR"/}" )
 elif [ -n "$APPDIR" ]; then
@@ -255,8 +262,8 @@ else
             mapfile -t natives < <(native_binaries "$GAMEDIR")
         fi
         if [ "${#natives[@]}" -gt 0 ]; then
-            LAUNCHER="$(pick "$GAMEDIR" "${natives[@]}")"
-            [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
+            pick "$GAMEDIR" "${natives[@]}" || exit 0       # picker cancelled
+            LAUNCHER="$PICKED"
         elif is_pgmmv "$GAMEDIR"; then
             PGMMV=1
         elif is_rgss "$GAMEDIR"; then
@@ -265,8 +272,8 @@ else
             mapfile -t exes < <(find_exes "$GAMEDIR")
             [ "${#exes[@]}" -gt 0 ] \
                 || die "Nothing runnable at:"$'\n'"$GAMEDIR"$'\n\n'"Looked for an RPGM/NW.js app, a PGMMV or RGSS game, a native Linux launcher and a .exe."
-            LAUNCHER="$(pick "$GAMEDIR" "${exes[@]}")"
-            [ -n "$LAUNCHER" ] || exit 0               # picker cancelled
+            pick "$GAMEDIR" "${exes[@]}" || exit 0         # picker cancelled
+            LAUNCHER="$PICKED"
             PROTON=1
         fi
     else

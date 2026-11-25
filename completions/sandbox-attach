@@ -4,28 +4,57 @@
 # program to run or for --put (host paths in the tools folder or a sandbox's
 # home and overlay/rw/ are translated by sandbox-attach itself).
 
+_sandbox_attach_filedir()
+{
+    if declare -F _comp_compgen_filedir >/dev/null; then
+        _comp_compgen_filedir
+    else
+        _filedir
+    fi
+}
+
 _sandbox_attach()
 {
     local cur prev words cword was_split split
     if declare -F _comp_initialize >/dev/null; then
         _comp_initialize -s -- "$@" || return
     else
-        _init_completion -s || return
+        _init_completion -s "$@" || return
     fi
 
-    if [[ $prev == --name ]]; then
-        COMPREPLY=($(compgen -W "$(sandbox-attach --list 2>/dev/null |
-            awk 'NR > 1 && NF >= 2 { print $1 }')" -- "$cur"))
+    # Options run up to -- or to the program to run. After either, every word
+    # is an argument to that program, this command's options included.
+    local i skip=0 dashdash=0 at=-1
+    for ((i = 1; i < cword; i++)); do
+        if ((skip)); then ((skip--)); continue; fi
+        case ${words[i]} in
+            --name) skip=1 ;;
+            --put) skip=2 ;;
+            --) dashdash=1; break ;;
+            -*) ;;
+            *) at=$i; break ;;
+        esac
+    done
+    if ((dashdash || at >= 0)); then
+        _sandbox_attach_filedir
+        return
+    fi
+
+    if ((skip)) || [[ $prev == --name ]]; then
+        # The current word is the value of an option: sandbox names after
+        # --name (including --name=NAME split by -s), host paths for --put.
+        if [[ $prev == --name ]]; then
+            COMPREPLY=($(compgen -W "$(sandbox-attach --list 2>/dev/null |
+                awk 'NR > 1 && NF >= 2 { print $1 }')" -- "$cur"))
+        else
+            _sandbox_attach_filedir
+        fi
         return
     fi
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W '--name --list --shell --exec --put --help' -- "$cur"))
         return
     fi
-    if declare -F _comp_compgen_filedir >/dev/null; then
-        _comp_compgen_filedir
-    else
-        _filedir
-    fi
+    _sandbox_attach_filedir
 }
 complete -F _sandbox_attach sandbox-attach
