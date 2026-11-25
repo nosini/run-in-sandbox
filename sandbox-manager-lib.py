@@ -3,6 +3,7 @@
 No GTK imports here: every game and installer still runs through sandbox-game.
 Metadata lives outside the writable mounts handed to games.
 """
+import fcntl
 import json
 import hashlib
 import os
@@ -34,9 +35,13 @@ def read_json(path):
         return {}
 
 
-def atomic_write(path, text, mode=None):
-    """Replace PATH with TEXT, a str or bytes, never leaving a partial file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def atomic_write(path, text, mode=None, parents=True):
+    """Replace PATH with TEXT, a str or bytes, never leaving a partial file.
+
+    PARENTS=False writes only inside a folder that already exists, so a folder
+    removed meanwhile, such as a deleted sandbox's capture, is not made again."""
+    if parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
     binary = isinstance(text, bytes)
     temporary = None
     try:
@@ -190,8 +195,12 @@ class Library:
         if not entry["title"].strip():
             raise ValueError("Give the sandbox a name")
         shlex.split(entry.get("arguments", ""))
-        atomic_write(self.capture(entry["name"]) / "manager.json",
-                     json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+        capture = self.capture(entry["name"])
+        with self.lock:
+            if not capture.is_dir():
+                raise ValueError("This sandbox no longer exists")
+            atomic_write(capture / "manager.json",
+                         json.dumps(entry, ensure_ascii=False, indent=2) + "\n", parents=False)
 
     def installation(self, entry):
         """Describe where the installed game lives, independently of its runner."""
@@ -601,13 +610,19 @@ class Library:
             if output.returncode not in (self.NO_ICON, 128 + signal.SIGXCPU, 128 + signal.SIGKILL):
                 definite = False
                 break
-        if result:
-            atomic_write(cached, result)
         if result or definite:
-            atomic_write(capture / "icon.json", json.dumps({"key": key, "found": bool(result)}))
-            for old in cached.parent.glob("*.png"):
-                if old != cached:
-                    old.unlink(missing_ok=True)  # made for files that have changed since
+            with self.lock:
+                capture = self.capture(entry["name"])
+                if not capture.is_dir():
+                    return None  # the sandbox was deleted while its icon was read
+                if result:
+                    cached.parent.mkdir(exist_ok=True)
+                    atomic_write(cached, result, parents=False)
+                atomic_write(capture / "icon.json", json.dumps({"key": key, "found": bool(result)}),
+                             parents=False)
+                for old in cached.parent.glob("*.png"):
+                    if old != cached:
+                        old.unlink(missing_ok=True)  # made for files that have changed since
         return cached if result else None
 
     def create(self, title, proton="auto", internet=False):
@@ -692,6 +707,10 @@ PY
                      program="", arguments="", engine=info["engine"],
                      volume=str(mount_point(info["directory"])))
         entry["title"] = self.display_title(entry)
+        # Importing a new game is what makes its capture, unlike a write that
+        # may find the sandbox deleted meanwhile.
+        with self.lock:
+            capture.mkdir(parents=True, exist_ok=True)
         self.save_entry(entry)
         return entry
 
@@ -934,32 +953,42 @@ PY
         return "".join(line + "\n" for line in lines[:start + 1] + group + lines[end:])
 
     def write_shortcut(self, path, text, where, name):
+        """Write or update the shortcut at PATH; whether it was written."""
         if path.is_file() and not path.is_symlink():
             current = path.read_text(encoding="utf-8", errors="replace")
             text = self.merged_shortcut(current, text, name)
             if current == text:
-                return
-        # Desktops start only executable launchers there, GNOME's only trusted ones too.
+                return False
         atomic_write(path, text, mode=0o755 if where == "desktop" else 0o644)
-        if where == "desktop":
-            try:
-                subprocess.run(["gio", "set", "--", str(path), "metadata::trusted", "true"],
-                               stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
+        return True
+
+    @staticmethod
+    def mark_trusted(path):
+        # Desktops start only executable launchers there, GNOME's only trusted ones too.
+        try:
+            subprocess.run(["gio", "set", "--", str(path), "metadata::trusted", "true"],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     def set_shortcut(self, name, where, enabled, icon=None):
         path = self.shortcut_path(name, where)
+        written = False
         if enabled:
             text = self.shortcut_text(self.entry(name), icon)
             with self.lock:
+                if not self.capture(name).is_dir():
+                    return  # the sandbox was deleted before this refresh
                 # The hidden entry in its place is replaced, not merged into.
                 if where == "menu" and self.hidden_entry(path):
                     path.unlink(missing_ok=True)
-                self.write_shortcut(path, text, where, name)
+                written = self.write_shortcut(path, text, where, name)
         else:
-            path.unlink(missing_ok=True)
+            with self.lock:
+                path.unlink(missing_ok=True)
             text = self.shortcut_text(self.entry(name), icon)
+        if written and where == "desktop":
+            self.mark_trusted(path)
         self.refresh_taskbar_entry(name, text)
 
     # Marks a hidden taskbar entry, which takes the applications-menu
@@ -1016,20 +1045,28 @@ PY
     def refresh_shortcuts(self, entry, icon=None):
         """Update visible shortcuts and maintain the hidden window-matching entry."""
         text = self.shortcut_text(entry, icon)
-        for where, present in self.shortcuts(entry["name"]).items():
-            if present:
-                self.write_shortcut(self.shortcut_path(entry["name"], where),
-                                    text, where, entry["name"])
-        self.refresh_taskbar_entry(entry["name"], text)
+        marked = []
+        with self.lock:
+            if not self.capture(entry["name"]).is_dir():
+                return  # the sandbox was deleted since the icon was requested
+            for where, present in self.shortcuts(entry["name"]).items():
+                if not present:
+                    continue
+                path = self.shortcut_path(entry["name"], where)
+                if self.write_shortcut(path, text, where, entry["name"]) and where == "desktop":
+                    marked.append(path)
+            self.refresh_taskbar_entry(entry["name"], text)
+        for path in marked:
+            self.mark_trusted(path)
 
     def remove_shortcuts(self, name):
         with self.lock:
             self.remove_legacy_taskbar_entry(name)
             if self.hidden_entry(self.taskbar_path(name)):
                 self.taskbar_path(name).unlink(missing_ok=True)
-        for where, present in self.shortcuts(name).items():
-            if present:
-                self.shortcut_path(name, where).unlink(missing_ok=True)
+            for where, present in self.shortcuts(name).items():
+                if present:
+                    self.shortcut_path(name, where).unlink(missing_ok=True)
 
     def installer_binds(self, installer):
         """Read-only installer media, never a whole home or downloads folder."""
@@ -1151,6 +1188,19 @@ PY
             bool(re.search(r"unins|crash|redist|setup|install|helper", pair[1], re.I)),
             pair[1].casefold()))
 
+    def sandbox_lock(self, name):
+        """sandbox-game's lock for NAME, or None while a launch or delete holds it."""
+        self.capture(name)
+        path = self.root / ".locks" / name
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return None
+        return fd
+
     def start(self, entry, **kwargs):
         if entry["name"] in self.running():
             raise ValueError("This sandbox is running. Stop it before starting another program.")
@@ -1164,10 +1214,28 @@ PY
             return subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
         path = self.log_path(entry["name"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as log:
+        # sandbox-game takes this lock itself before creating anything: hold it
+        # only for the log, then let go so the launch can take it next.
+        lock = self.sandbox_lock(entry["name"])
+        if lock is None:
+            raise ValueError("This sandbox is running. Stop it before starting another program.")
+        log = None
+        try:
+            with self.lock:
+                if not path.parent.is_dir():
+                    raise ValueError("This sandbox no longer exists")
+                log = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              0o644)
+                os.ftruncate(log, 0)
+            os.close(lock)
+            lock = None
             return subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        finally:
+            if lock is not None:
+                os.close(lock)
+            if log is not None:
+                os.close(log)
 
     def log_path(self, name):
         return self.capture(name) / "lastrun.log"

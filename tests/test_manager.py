@@ -1,4 +1,5 @@
 """Manager storage and launch contracts; GTK integration runs on a display."""
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -96,6 +97,7 @@ class LibraryTests(unittest.TestCase):
         game = self.native_game(self.home / "Games/Ace")
         entry = dict(name="ace", title="Ace", kind="existing", directory=str(game),
                      selection=str(game), program="", arguments="", engine="mkxp")
+        self.library.capture("ace").mkdir(parents=True)
         self.library.save_entry(entry)
         runtime = self.library.runtime(entry)
         self.assertEqual(runtime, "RPG Maker XP/VX/VX Ace · mkxp-z")
@@ -111,6 +113,7 @@ class LibraryTests(unittest.TestCase):
         game = self.native_game(self.home / "Games/Old")
         entry = dict(name="old", title="Old", kind="existing", directory=str(game),
                      selection=str(game), program="", arguments="")
+        self.library.capture("old").mkdir(parents=True)
         self.library.save_entry(entry)
         with patch.object(self.library, "describe", return_value={"engine": "nwjs"}) as describe:
             self.assertEqual(self.library.runtime(entry), "RPG Maker MV/MZ · NW.js")
@@ -121,6 +124,7 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(self.library.runtime(saved), "RPG Maker MV/MZ · NW.js")
         # A missing game folder shows nothing rather than failing the library.
         gone = dict(entry, name="gone", selection=str(self.home / "Games/Gone"))
+        self.library.capture("gone").mkdir(parents=True)
         self.library.save_entry(gone)
         self.assertEqual(self.library.runtime(gone), "")
 
@@ -184,6 +188,7 @@ class LibraryTests(unittest.TestCase):
         game = self.native_game(self.home / "Games/Original Game")
         entry = dict(name="original-game", title="original-game", kind="existing",
                      directory=str(game), selection=str(game), program="", arguments="")
+        self.library.capture("original-game").mkdir(parents=True)
         self.library.save_entry(entry)
         with patch.object(self.library, "describe", side_effect=AssertionError("Already located")):
             updated, = self.library.refresh()
@@ -524,6 +529,34 @@ class LibraryTests(unittest.TestCase):
         folder.symlink_to(outside, target_is_directory=True)
         with self.assertRaises(OSError):
             self.library.open_icon_file(folder / "icon.png", roots)
+
+    def test_icons_are_not_written_back_for_a_deleted_sandbox(self):
+        library, entry = self.icon_library()
+        capture = library.capture(entry["name"])
+        def delete_then_answer(*args, **kwargs):
+            shutil.rmtree(capture)
+            return self.finished(0, b"png")
+        with patch("subprocess.run", side_effect=delete_then_answer):
+            self.assertIsNone(library.icon(entry))
+        self.assertFalse(capture.exists())
+
+    def test_updates_do_not_recreate_a_deleted_sandbox(self):
+        entry = self.library.create("game")
+        shutil.rmtree(self.library.capture(entry["name"]))
+        with self.assertRaisesRegex(ValueError, "no longer exists"):
+            self.library.update_entry(entry["name"], arguments="--x")
+        self.assertFalse(self.library.capture(entry["name"]).exists())
+
+    def test_runtime_detection_for_a_deleted_sandbox_writes_nothing(self):
+        game = self.native_game(self.home / "Games/Old")
+        entry = dict(name="old", title="Old", kind="existing", directory=str(game),
+                     selection=str(game), program="", arguments="")
+        self.library.capture("old").mkdir(parents=True)
+        self.library.save_entry(entry)
+        shutil.rmtree(self.library.capture("old"))
+        with patch.object(self.library, "describe", return_value={"engine": "nwjs"}):
+            self.assertEqual(self.library.runtime(entry), "RPG Maker MV/MZ · NW.js")
+        self.assertFalse(self.library.capture("old").exists())
 
     def test_import_uses_canonical_detection_and_explicit_name_for_old_captures(self):
         game = self.home / "games" / "Native Game"
@@ -1221,6 +1254,62 @@ class LibraryTests(unittest.TestCase):
                 patch.object(core.subprocess, "Popen", side_effect=spawn) as popen:
             library.start(entry)
         popen.assert_called_once()
+
+    def test_a_deleted_sandbox_gets_no_shortcut_again(self):
+        library = self.shortcut_library()
+        entry = library.create("Train")
+        name = entry["name"]
+        hidden = library.taskbar_path(name)
+        shutil.rmtree(library.capture(name))
+        library.set_shortcut(name, "menu", True)
+        self.assertFalse(hidden.exists())
+        library.refresh_shortcuts(entry)
+        self.assertFalse(hidden.exists())
+
+    def test_start_does_not_recreate_a_deleted_sandbox_or_its_log(self):
+        entry = self.library.create("game")
+        capture = self.library.capture(entry["name"])
+        shutil.rmtree(capture)
+        with patch.object(self.library, "running", return_value=set()), \
+                patch.object(self.library, "command", return_value=(["bash"], {})), \
+                patch.object(self.library, "refresh_shortcuts"), \
+                patch("subprocess.Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "no longer exists"):
+                self.library.start(entry)
+        popen.assert_not_called()
+        self.assertFalse(capture.exists())
+
+    def test_start_takes_the_lock_sandbox_game_uses(self):
+        entry = self.library.create("game")
+        lock = self.library.root / ".locks" / entry["name"]
+        lock.parent.mkdir()
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with patch.object(self.library, "running", return_value=set()), \
+                    patch.object(self.library, "command", return_value=(["bash"], {})), \
+                    patch.object(self.library, "refresh_shortcuts"), \
+                    patch("subprocess.Popen") as popen:
+                with self.assertRaisesRegex(ValueError, "running"):
+                    self.library.start(entry)
+            popen.assert_not_called()
+        finally:
+            os.close(fd)
+
+    def test_start_leaves_the_sandbox_lock_for_the_launch(self):
+        entry = self.library.create("game")
+        with patch.object(self.library, "running", return_value=set()), \
+                patch.object(self.library, "command", return_value=(["bash"], {})), \
+                patch.object(self.library, "refresh_shortcuts"), \
+                patch("subprocess.Popen"):
+            self.library.start(entry)
+        lock = self.library.root / ".locks" / entry["name"]
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.library.log_path(entry["name"]).read_bytes(), b"")
 
     def test_desktop_shortcuts_need_a_desktop_folder_other_than_home(self):
         library = core.Library(ROOT / "sandbox-game", ROOT, ROOT / "Sandbox game", home=self.home,
