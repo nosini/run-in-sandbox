@@ -51,6 +51,11 @@ mkdir -p "$results" || die "cannot make $results"
 results="$(realpath "$results")"
 scratch="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/sandbox-gpu-check.XXXXXX")" \
     || die "cannot make a scratch folder"
+# Also covers a stop at the confirmation below, before the full cleanup exists.
+trap 'rm -rf "$scratch"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 summary="$results/summary.txt"
 : > "$summary"
 note() { printf '%s\n' "$*" | tee -a "$summary"; }
@@ -89,7 +94,7 @@ read -r _
 note "system: $(grep PRETTY_NAME "$results/system.txt" | cut -d= -f2), $(grep -m1 '^systemd [0-9]' "$results/system.txt")"
 
 # The administrator setup, and its removal however this ends.
-installed_before=0 tidy=1
+installed_before=0 tidy=1 temporary_config="" temporary_inside="" watcher=""
 [ -e /etc/sandbox-game/systemd-backend.json ] && installed_before=1
 # What this script installed and could not remove -- its terminal closed,
 # say -- is its own to remove the next time, not a setup of yours.
@@ -107,6 +112,22 @@ pending=()
 remove_setup() {
     # A game cut short is redacted all the same.
     [ "${#pending[@]}" = 0 ] || redact "${pending[@]}"
+    pending=()
+    if [ -n "$watcher" ]; then
+        pkill -P "$watcher" 2>/dev/null
+        kill "$watcher" 2>/dev/null
+        wait "$watcher" 2>/dev/null
+        watcher=""
+    fi
+    if [ -n "$temporary_inside" ]; then
+        rm -f "$temporary_inside"
+        temporary_inside=""
+    fi
+    if [ -n "$temporary_config" ]; then
+        rm -f "$temporary_config"
+        temporary_config=""
+    fi
+    rm -rf "$scratch"
     if [ "$keep" = 0 ] && [ "$installed_before" = 0 ] && [ -e /etc/sandbox-game/systemd-backend.json ]; then
         echo "Removing the administrator setup again..."
         # nsresourced lets go of a game's namespace a moment after the game
@@ -131,7 +152,6 @@ remove_setup() {
             echo "$unit after: $(systemctl is-enabled "$unit" 2>&1) $(systemctl is-active "$unit" 2>&1)"
         done >> "$results/setup.txt"
     fi
-    rm -rf "$scratch"
 }
 trap remove_setup EXIT
 trap 'exit 130' INT
@@ -150,7 +170,7 @@ ls -l "/run/sandboxgame/render/$(id -u)" >> "$results/setup.txt" 2>&1
 
 # Real games, launched as "Sandbox game" launches them.
 game_check() { # LABEL SELECTION NAME
-    local label="$1" sel gamedir real test cfg capture copied=0 watcher status users
+    local label="$1" sel gamedir real test cfg capture copied=0 status users
     shift
     sel="$(realpath "$1")" || { note "game: $1 not found"; return; }
     gamedir="$(. "$checkout/sandbox-game-lib" && resolve_selection "$sel" && printf '%s' "$R_GAMEDIR")"
@@ -163,13 +183,17 @@ game_check() { # LABEL SELECTION NAME
     note "== $label"
     note "preferences: $([ -f "$cfg/$real" ] && echo "the game's own" || echo "defaults (none saved for it)")"
     if [ -f "$cfg/$real" ] && [ ! -e "$cfg/$test" ]; then
-        cp "$cfg/$real" "$cfg/$test" && copied=1
+        if cp "$cfg/$real" "$cfg/$test"; then
+            copied=1
+            temporary_config="$cfg/$test"
+        fi
     fi
     echo "Starting $gamedir under the systemd backend. Play a little, then quit it."
     # Once it is up and drawing: which render node it got, and what of it has
     # one open -- seen from inside, by a program attached to it.
     # Every 5 seconds while it runs; the last look that found the GPU open
     # is kept, else the last one at all.
+    temporary_inside="$results/$label-inside.log.new"
     (
         inside="$results/$label-inside.log"
         for _ in $(seq 720); do
@@ -191,8 +215,11 @@ game_check() { # LABEL SELECTION NAME
         SANDBOX_GAME_NAME="$test" SANDBOX_SEPARATE_UID=systemd "$checkout/Sandbox game"
     status=$?
     pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-    rm -f "$results/$label-inside.log.new"
+    watcher=""
+    rm -f "$temporary_inside"
+    temporary_inside=""
     [ "$copied" = 0 ] || rm -f "$cfg/$test"
+    temporary_config=""
     cp "$capture/lastrun.log" "$results/$label-lastrun.log" 2>/dev/null
     note "exit: $status"
     note "$(grep -m1 '^render node: ' "$results/$label-inside.log" 2>/dev/null \
@@ -216,6 +243,7 @@ game_check() { # LABEL SELECTION NAME
 redact() { # LABEL SELECTION GAMEDIR NAME...
     python3 -I - "$results" "$@" <<'PY'
 import os, re, sys
+from pathlib import Path
 results, label, sel, gamedir, *names = sys.argv[1:]
 # Folder and file names any game might have, which say nothing about it.
 COMMON = {"data", "game", "games", "www", "lib", "lib64", "bin", "save", "saves",
@@ -241,12 +269,18 @@ if not tokens:
 pattern = re.compile("|".join(map(re.escape, tokens)), re.IGNORECASE)
 for name in os.listdir(results):
     path = os.path.join(results, name)
-    with open(path, encoding="utf-8", errors="surrogateescape") as f:
-        text = f.read()
-    new = pattern.sub(f"<{label}>", text)
-    if new != text:
-        with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
-            f.write(new)
+    p = Path(path)
+    try:
+        if not p.is_file() or p.is_symlink():
+            continue
+        with p.open(encoding="utf-8", errors="surrogateescape") as f:
+            text = f.read()
+        new = pattern.sub(f"<{label}>", text)
+        if new != text:
+            with p.open("w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(new)
+    except OSError:
+        continue
 PY
 }
 if [ "${#games[@]}" -gt 0 ]; then
@@ -257,7 +291,7 @@ if [ "${#games[@]}" -gt 0 ]; then
     note "Test captures are kept in ~/game-sandboxes/*-systemd-test for another run;"
     note "remove each with: sandbox-game --delete NAME-systemd-test"
     remove_setup
-    trap - EXIT
+    trap - EXIT INT TERM HUP
     note "Logs: $results"
     echo
     echo "Done. Tell the agent the results are in $results"
@@ -362,7 +396,7 @@ else
 fi
 
 remove_setup
-trap - EXIT
+trap - EXIT INT TERM HUP
 note ""
 note "Logs: $results"
 echo

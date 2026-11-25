@@ -31,6 +31,7 @@ require {
     attribute port_type;
     type tmpfs_t;
     type user_tmp_t;
+    type var_t;
     type var_run_t;
     type user_tty_device_t;
     type user_devpts_t;
@@ -148,8 +149,12 @@ allow sandbox_pasta_t sysctl_net_t:file { read open getattr };
 allow sandbox_pasta_t net_conf_t:file { read open getattr };
 # /etc/resolv.conf is often a link into /run: netconfig's (net_conf_t),
 # NetworkManager's or systemd-resolved's folder. The files are net_conf_t.
+# Where it links through /var/run, that is a link to /run, so following it
+# also needs /var (var_t) searchable and the var_run_t link readable.
 allow sandbox_pasta_t net_conf_t:lnk_file { read getattr };
 allow sandbox_pasta_t { net_conf_t NetworkManager_var_run_t systemd_resolved_var_run_t }:dir search;
+allow sandbox_pasta_t var_t:dir search;
+allow sandbox_pasta_t var_run_t:lnk_file read;
 
 # Then it shuts itself in: a mount namespace of its own whose root is an empty
 # tmpfs.

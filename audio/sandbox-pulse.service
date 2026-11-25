@@ -2,11 +2,12 @@
 # See sandbox-pulse.conf for what this is and why it is separate.
 [Unit]
 Description=Playback-only PulseAudio server for run-in-sandbox games
-Requires=pipewire.socket
+Requires=pipewire.socket wireplumber.service
 After=pipewire.socket pipewire.service wireplumber.service
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
 Environment=PULSE_RUNTIME_PATH=%t/sandbox-pulse
 ExecStartPre=/usr/bin/mkdir -p %t/sandbox-pulse
 ExecStartPre=/usr/bin/chmod 0700 %t/sandbox-pulse

@@ -70,6 +70,55 @@ first() { # UNIT PATTERN
 before_in_boot() { # SECONDS SECONDS
     [ -n "$1" ] && [ -n "$2" ] && awk -v a="$1" -v b="$2" 'BEGIN { exit !(a <= b) }'
 }
+render_copy_owned() {
+    local file found=0
+    for file in "/run/sandboxgame/render/$(id -u)"/renderD*; do
+        [ -e "$file" ] || continue
+        found=1
+        stat -c '%u %g %a' "$file" | grep -qx "$(id -u) $(id -u) 600" || return 1
+    done
+    [ "$found" = 1 ]
+}
+render_copy_matches_device() {
+    local file name found=0 copies=0 devices=0
+    for file in "/run/sandboxgame/render/$(id -u)"/renderD*; do
+        [ -e "$file" ] || continue
+        found=1
+        copies=$((copies + 1))
+        name="${file##*/}"
+        [ -e "/dev/dri/$name" ] || return 1
+        [ "$(stat -c '%t:%T' "$file")" = "$(stat -c '%t:%T' "/dev/dri/$name")" ] \
+            || return 1
+    done
+    for file in /dev/dri/renderD*; do
+        [ -e "$file" ] || continue
+        devices=$((devices + 1))
+    done
+    [ "$found" = 1 ] && [ "$copies" = "$devices" ]
+}
+launch_file_changed_and_saved() {
+    grep -qx changed "$results/launch.log" \
+        && [ -f "$scratch/home/game-sandboxes/boot-check/home/save" ]
+}
+capture_is_ours() {
+    local capture="$scratch/home/game-sandboxes/boot-check"
+    [ -d "$capture" ] \
+        && [ -z "$(find "$capture" \( ! -user "$(id -u)" -o ! -group "$(id -u)" \) -print -quit)" ]
+}
+nsresourced_waits_for_overlay() {
+    local property value
+    for property in After Requires; do
+        value="$(systemctl show systemd-nsresourced.service -p "$property" --value)" \
+            || return 1
+        case " $value " in
+            *" modprobe@overlay.service "*) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+policy_loaded() {
+    sudo semodule -l | grep -qw sandbox_game_systemd
+}
 
 note "boot: $(date -d "@$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) ))" '+%F %T'), $(grep PRETTY_NAME /etc/os-release | cut -d= -f2), $(systemctl --version | head -1)"
 check "a new boot since 'before'" test "$before_id" != "$(cat /proc/sys/kernel/random/boot_id)"
@@ -90,10 +139,8 @@ check "the render store is a tmpfs of its own ($fs)" test "${fs%% *}" = tmpfs
 check "that tmpfs allows device nodes" allows_devices "$fs"
 alias="$(ls -ln "/run/sandboxgame/render/$(id -u)"/renderD* 2>&1)"
 note "render copy: $alias"
-check "your render node copy is yours alone" eval \
-    "stat -c '%u %g %a' /run/sandboxgame/render/$(id -u)/renderD* | grep -qx '$(id -u) $(id -u) 600'"
-check "it is the GPU's render node" eval \
-    "[ \"\$(stat -c '%t:%T' /run/sandboxgame/render/$(id -u)/renderD* | sort)\" = \"\$(stat -c '%t:%T' /dev/dri/renderD* | sort)\" ]"
+check "your render node copy is yours alone" render_copy_owned
+check "it is the GPU's render node" render_copy_matches_device
 copies="$(sudo ls /run/sandboxgame/render 2>/dev/null | grep -E '^[0-9]+$' | tr '\n' ' ')"
 allowed="$(sudo cat "$render_users" 2>/dev/null | tr '\n' ' ')"
 note "render copies for: ${copies:-none }(allowed: $allowed)"
@@ -112,14 +159,11 @@ env HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home/.config" \
     < /dev/null > "$results/launch.log" 2>&1
 status=$?
 check "a game launches under the backend (exit $status)" test "$status" = 0
-check "it changed its game file and saved" eval \
-    "grep -qx changed '$results/launch.log' && [ -f '$scratch/home/game-sandboxes/boot-check/home/save' ]"
-check "its capture stays yours on disk" eval \
-    "[ -z \"\$(find '$scratch/home/game-sandboxes/boot-check' \\( ! -user $(id -u) -o ! -group $(id -u) \\) -print -quit)\" ]"
+check "it changed its game file and saved" launch_file_changed_and_saved
+check "its capture stays yours on disk" capture_is_ours
 
 check "overlayfs is loaded" test -d /sys/module/overlay
-check "systemd-nsresourced waits for overlayfs" eval \
-    "systemctl show systemd-nsresourced.service -p After -p Requires --value | grep -q modprobe@overlay.service"
+check "systemd-nsresourced waits for overlayfs" nsresourced_waits_for_overlay
 overlay_at="$(first modprobe@overlay.service 'Finished|Deactivated')"
 nsresourced_at="$(first systemd-nsresourced.service 'Starting|Started')"
 check "this boot, overlayfs was loaded (${overlay_at:-?}s) before systemd-nsresourced first started (${nsresourced_at:-?}s)" \
@@ -127,7 +171,7 @@ check "this boot, overlayfs was loaded (${overlay_at:-?}s) before systemd-nsreso
 
 if [ -e /sys/fs/selinux/enforce ]; then
     check "SELinux is enforcing" grep -qx 1 /sys/fs/selinux/enforce
-    check "the service policy is loaded" eval "sudo semodule -l | grep -qw sandbox_game_systemd"
+    check "the service policy is loaded" policy_loaded
     # Only the kernel's and the audit's messages: sudo logs this very
     # command line, pattern and all.
     { sudo journalctl -b --no-pager _TRANSPORT=kernel _TRANSPORT=audit 2>/dev/null

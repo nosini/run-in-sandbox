@@ -41,6 +41,15 @@ uid = load('setup_test_uid', ROOT / 'sandbox-uid')
 setup = load('setup_test_installer', ROOT / 'systemd-backend/install-systemd.py')
 
 
+def shell_function(path, name):
+    text = Path(path).read_text()
+    match = re.search(rf'^{re.escape(name)}\(\) \{{\n.*?^\}}', text,
+                      re.MULTILINE | re.DOTALL)
+    if match is None:
+        raise AssertionError(f'{name} is not defined in {path}')
+    return match.group(0)
+
+
 class AvailabilityTests(unittest.TestCase):
     def test_direct_launch_rejects_different_gid_before_any_setup(self):
         with mock.patch.object(uid.os, 'getuid', return_value=1000), \
@@ -1501,6 +1510,152 @@ class RenderDevicePolicyTests(unittest.TestCase):
             self.assertEqual(pwrite.call_args.args[1:], (b'1\n', 0))
             truncate.assert_not_called()
 
+    def test_render_helper_needs_no_sockets_and_keeps_device_capabilities(self):
+        text = (ROOT / 'systemd-backend/sandbox-game-render-devices.service').read_text()
+        lines = {line.strip() for line in text.splitlines()}
+        self.assertIn('RestrictAddressFamilies=none', lines)
+        self.assertNotIn('RestrictAddressFamilies=AF_UNIX', lines)
+        self.assertIn('CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE',
+                      lines)
+        self.assertNotIn('PrivateDevices=yes', lines)
+        for directive in ('PrivateNetwork=yes', 'ProtectKernelTunables=yes',
+                          'ProtectKernelModules=yes', 'ProtectKernelLogs=yes',
+                          'ProtectControlGroups=yes', 'ProtectClock=yes',
+                          'ProtectHostname=yes', 'LockPersonality=yes',
+                          'MemoryDenyWriteExecute=yes', 'RestrictRealtime=yes',
+                          'RestrictSUIDSGID=yes', 'RestrictNamespaces=yes',
+                          'SystemCallArchitectures=native'):
+            self.assertIn(directive, lines)
+
+    def test_render_helper_does_not_consult_nss_or_open_sockets(self):
+        source = (ROOT / 'systemd-backend/systemd-render-devices').read_text()
+        self.assertNotRegex(source, r'\b(?:getpwnam|getgrnam)\b')
+        self.assertNotRegex(source, r'(?m)^(?:import|from)\s+socket\b')
+        self.assertNotRegex(source, r'\bsocket\.')
+
+
+class DesktopBootCheckScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.path = ROOT / 'systemd-backend/desktop-boot-check.sh'
+
+    def test_checks_do_not_eval_interpolated_paths(self):
+        text = self.path.read_text()
+        self.assertNotRegex(text, r'\beval\b')
+        for name in ('render_copy_owned', 'render_copy_matches_device',
+                     'launch_file_changed_and_saved', 'capture_is_ours',
+                     'nsresourced_waits_for_overlay'):
+            self.assertIn(f'{name}() {{', text)
+
+    def test_render_checks_compare_each_alias_with_its_named_device(self):
+        owned = shell_function(self.path, 'render_copy_owned')
+        matches = shell_function(self.path, 'render_copy_matches_device')
+        render_glob = 'for file in "/run/sandboxgame/render/$(id -u)"/renderD*'
+        self.assertIn(render_glob, owned)
+        self.assertIn(render_glob, matches)
+        self.assertIn('name="${file##*/}"', matches)
+        self.assertIn('[ -e "/dev/dri/$name" ]', matches)
+        self.assertIn('copies', matches)
+        self.assertIn('devices', matches)
+
+    def test_overlay_dependency_needs_an_exact_token_in_after_and_requires(self):
+        function = shell_function(self.path, 'nsresourced_waits_for_overlay')
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / 'systemctl'
+            fake.write_text(
+                '#!/bin/bash\n'
+                'case "$*" in\n'
+                '  *"-p After "*) printf "%s\\n" "$AFTER" ;;\n'
+                '  *"-p Requires "*) printf "%s\\n" "$REQUIRES" ;;\n'
+                'esac\n')
+            fake.chmod(0o755)
+            for after, requires, status in (
+                    ('modprobe@overlay.service', 'modprobe@overlay.service', 0),
+                    ('modprobe@overlay.service', '', 1),
+                    ('', 'modprobe@overlay.service', 1),
+                    ('xmodprobe@overlay.service', 'modprobe@overlay.service', 1),
+                    ('modprobe@overlay.service other.service',
+                     'other.service modprobe@overlay.service', 0)):
+                with self.subTest(after=after, requires=requires):
+                    result = subprocess.run(
+                        ['bash', '-c', function + '\nnsresourced_waits_for_overlay'],
+                        env={**os.environ, 'PATH': f'{tmp}:{os.environ["PATH"]}',
+                             'AFTER': after, 'REQUIRES': requires},
+                        text=True, capture_output=True)
+                    self.assertEqual(result.returncode, status, result.stderr)
+
+
+class DesktopGpuCheckScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.path = ROOT / 'systemd-backend/desktop-gpu-check.sh'
+
+    def test_remove_setup_removes_temporary_config_and_scratch(self):
+        function = shell_function(self.path, 'remove_setup')
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / 'game-config'
+            config.write_text('cfg')
+            inside = base / 'inside.new'
+            inside.write_text('log')
+            scratch = base / 'scratch'
+            scratch.mkdir()
+            (scratch / 'file').write_text('x')
+            script = '\n'.join((
+                'set -u',
+                'pending=()',
+                'keep=0 installed_before=1 tidy=1',
+                'marker=""',
+                'temporary_config="$TEST_CONFIG"',
+                'temporary_inside="$TEST_INSIDE"',
+                'watcher=""',
+                'scratch="$TEST_SCRATCH"',
+                'results="$TEST_BASE"',
+                'checkout="$TEST_CHECKOUT"',
+                'note() { :; }',
+                'redact() { :; }',
+                function,
+                'remove_setup',
+            ))
+            result = subprocess.run(
+                ['bash', '-c', script],
+                env={**os.environ, 'TEST_CONFIG': str(config),
+                     'TEST_INSIDE': str(inside), 'TEST_SCRATCH': str(scratch),
+                     'TEST_BASE': str(base), 'TEST_CHECKOUT': str(ROOT)},
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(config.exists())
+            self.assertFalse(inside.exists())
+            self.assertFalse(scratch.exists())
+
+    def test_redact_skips_directories_links_and_special_files(self):
+        text = self.path.read_text()
+        source = text.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            results = base / 'results'
+            results.mkdir()
+            token = 'SecretGame'
+            regular = results / 'launch.log'
+            regular.write_text(f'playing {token}\n')
+            (results / 'folder').mkdir()
+            target = base / 'target.log'
+            target.write_text(token)
+            link = results / 'link.log'
+            link.symlink_to(target)
+            fifo = results / 'pipe'
+            os.mkfifo(fifo)
+            gamedir = base / 'gamedir'
+            gamedir.mkdir()
+            result = subprocess.run(
+                ['python3', '-I', '-', str(results), 'game1',
+                 str(base / 'selection'), str(gamedir), token],
+                input=source, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(regular.read_text(), 'playing <game1>\n')
+            self.assertTrue((results / 'folder').is_dir())
+            self.assertTrue(link.is_symlink())
+            self.assertTrue(fifo.exists())
+            self.assertEqual(target.read_text(), token)
+
 
 class SandboxPolicyTests(unittest.TestCase):
     def test_systemd_policy_covers_home_directory_and_var_run(self):
@@ -1546,6 +1701,15 @@ class SandboxPolicyTests(unittest.TestCase):
         self.assertNotIn('0x5412', text)
         self.assertNotIn('0x541c', text)
 
+    def test_pasta_resolv_conf_can_follow_a_var_run_link(self):
+        text = (ROOT / 'selinux/sandbox_pasta.te').read_text()
+        require = text.split('require {', 1)[1].split('\n}', 1)[0]
+        self.assertIn('type var_t;', require)
+        self.assertIn('class lnk_file { read getattr };', require)
+        lines = {line.strip() for line in text.splitlines()}
+        self.assertIn('allow sandbox_pasta_t var_t:dir search;', lines)
+        self.assertIn('allow sandbox_pasta_t var_run_t:lnk_file read;', lines)
+
 
 class AudioPolicyTests(unittest.TestCase):
     def test_sandbox_pulse_disables_sample_cache_and_bounds_resources(self):
@@ -1561,3 +1725,23 @@ class AudioPolicyTests(unittest.TestCase):
         body = section.group(1).splitlines()
         self.assertTrue(any(line.startswith('MemoryMax=') for line in body))
         self.assertTrue(any(line.startswith('TasksMax=') for line in body))
+
+    def test_sandbox_pulse_requires_wireplumber_and_drops_privileges(self):
+        service = (ROOT / 'audio/sandbox-pulse.service').read_text()
+        unit, body = service.split('[Service]', 1)
+        requires = [line for line in unit.splitlines() if line.startswith('Requires=')]
+        self.assertTrue(any('wireplumber.service' in line.split() for line in requires))
+        self.assertIn('NoNewPrivileges=yes', body.splitlines())
+
+    def test_access_script_claims_clients_only_after_activation(self):
+        text = (ROOT / 'audio/sandbox-access.lua').read_text()
+        activation = text.index('pm:activate')
+        hook = text.index('SimpleEventHook')
+        self.assertIn('local pm_ready = false', text[:activation])
+        self.assertIn('pm_ready = true', text[activation:hook])
+        execute = text[hook:]
+        self.assertRegex(execute, r'execute = function \(event\)\s+'
+                                  r'if not pm_ready then\s+return\s+end')
+        self.assertIn('{ metadata.name = "default" }', text)
+        self.assertIn('default.audio.sink', text)
+        self.assertIn('deny-restricted-capture.lua', text)

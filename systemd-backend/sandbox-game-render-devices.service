@@ -21,7 +21,20 @@ ProtectSystem=strict
 ReadWritePaths=/run/sandboxgame/render
 ProtectHome=yes
 PrivateTmp=yes
-RestrictAddressFamilies=AF_UNIX
+PrivateNetwork=yes
+RestrictAddressFamilies=none
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

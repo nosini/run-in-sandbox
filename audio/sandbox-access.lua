@@ -33,9 +33,14 @@ local function own_link (client, link)
   return node ~= nil and own (client, node)
 end
 
+-- Only a permission manager that actually activated may take over access.
+local pm_ready = false
 pm = PermissionManager ()
 pm:set_default_permissions (Perm.NONE)
 pm:set_core_permissions (Perm.RX)
+-- PipeWire needs the whole default metadata object below for
+-- pipewire-pulse's default.audio.sink lookup; it also exposes default source
+-- names, while deny-restricted-capture.lua still blocks recording.
 pm:add_rules_match (Json.Raw [[
   [
     {
@@ -60,6 +65,8 @@ end, Interest { type = "link" })
 pm:activate (Features.ALL, function (_, e)
   if e then
     log:warning ("sandbox-game: permission manager failed: " .. tostring (e))
+  else
+    pm_ready = true
   end
 end)
 
@@ -73,6 +80,9 @@ SimpleEventHook {
     },
   },
   execute = function (event)
+    if not pm_ready then
+      return
+    end
     local client = event:get_subject ()
     if cutils.get_client_access (client.properties) ~= "sandbox-game"
         or event:get_data ("permission-manager") ~= nil then
