@@ -532,7 +532,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertTrue(capture.is_dir())
         # Overlayfs leaves workdir/work at mode 0000. Left alone it makes the
         # whole capture folder undeletable in a file manager until chmod-ed.
-        stranded = capture / "work" / "work"
+        stranded = capture / "overlay/work" / "work"
         self.assertTrue(not stranded.exists()
                         or os.access(stranded, os.R_OK | os.X_OK),
                         f"{stranded} left inaccessible")
@@ -583,7 +583,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
                     self.assertEqual(result.stdout, "original")
                     self.assertEqual((game / "asset").read_text(), "original")
                     self.assertTrue((game / "removed").exists())
-                    self.assertEqual((capture / "rw/asset").read_text(), "changed")
+                    self.assertEqual((capture / "overlay/rw/asset").read_text(), "changed")
                     self.assertEqual(self.cli("--headless", "--name", sandbox, *options, game,
                                              "/bin/sh", "-ec", 'test ! -e /game/removed; '
                                              'cat /game/asset').stdout, "changed")
@@ -730,7 +730,7 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         name = self.cli("--print-name", self.game).stdout.strip()
         capture = self.home / "game-sandboxes" / name
         self.assertEqual((capture / "home" / "save").read_text(), "save")
-        self.assertEqual((capture / "rw" / "original").read_text(), "changed")
+        self.assertEqual((capture / "overlay/rw" / "original").read_text(), "changed")
 
     def test_guest_is_filtered_and_cannot_nest_user_namespaces(self):
         # unshare -U is refused twice over, by --disable-userns and the filter.
@@ -1865,7 +1865,7 @@ main().catch((error) => { console.error(error); process.exit(1); });
         self.cli("--headless", "--pgmmv=" + str(bundle), self.game)
         self.assertFalse((self.game / "action_log.txt").exists())
         capture = self.home / "game-sandboxes" / "game"
-        self.assertEqual((capture / "rw" / "action_log.txt").read_text(), "log")
+        self.assertEqual((capture / "overlay/rw" / "action_log.txt").read_text(), "log")
         self.assertEqual((capture / "home" / ".local" / "share" / "pgmmv-player" /
                           "game" / "save" / "slot1").read_text(), "save")
 
@@ -2595,10 +2595,14 @@ main().catch((error) => { console.error(error); process.exit(1); });
 
     def test_refused_security_context_falls_back_with_a_warning(self):
         self.fake_compositor([(1920, 1080, 0, 0, 0, 1920, 1080)], [], refuse=True)
+        host = str(self.runtime / "wayland-0")
         args = self.recorded_args("--wayland")
-        i = args.index(str(self.runtime / "wayland-0"))
-        self.assertEqual(args[i - 1:i + 2], ["--ro-bind", str(self.runtime / "wayland-0"),
-                                            str(self.runtime / "wayland-0")])
+        source = next(args[i + 1] for i in range(len(args) - 2)
+                      if args[i] == "--ro-bind" and args[i + 2] == host)
+        self.assertNotEqual(source, host)
+        self.assertEqual(Path(source).name, "wayland-0")
+        self.assertEqual(Path(source).parent.parent.name, "sandbox-game-sockets")
+        self.assertFalse(Path(source).parent.exists(), "the socket's folder outlived the launch")
         result = self.cli("--wayland", self.game, "/bin/true")
         self.assertIn("offers a security context but did not make one", result.stderr)
         self.assertEqual(list(self.runtime.glob("sandbox-game-wayland.*")), [])
@@ -3774,7 +3778,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         (secret / "id").write_text("host secret\n")
         # A folder "a<newline>x" holding "id<newline>save": read line by
         # line, the saves would be a, x/id and save -- and x a link of the
-        # game's to that host folder, so its id would move into rw/.
+        # game's to that host folder, so its id would move into overlay/rw/.
         self.run_guest(f"ln -s {secret} /game/x; nl='\n'; mkdir \"/game/a${{nl}}x\"; "
                        "echo odd > \"/game/a${nl}x/id${nl}save\"; touch /game/a /game/save; "
                        "echo changed > /game/other", "--name", "odd")
@@ -3782,11 +3786,25 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         result = self.cli("--reset-install", "odd", check=False)
         self.assertTrue((secret / "id").is_file(), "a host file was moved into the sandbox")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((capture / "rw" / "x").exists())
-        self.assertEqual((capture / "rw" / "a\nx" / "id\nsave").read_text(), "odd\n")
-        self.assertTrue((capture / "rw" / "save").is_file())
-        self.assertFalse((capture / "rw" / "other").exists())
+        self.assertFalse((capture / "overlay/rw" / "x").exists())
+        self.assertEqual((capture / "overlay/rw" / "a\nx" / "id\nsave").read_text(), "odd\n")
+        self.assertTrue((capture / "overlay/rw" / "save").is_file())
+        self.assertFalse((capture / "overlay/rw" / "other").exists())
         self.assertIn("kept: $'a\\nx/id\\nsave'", result.stdout)
+
+    def test_reset_install_moves_an_old_capture_to_the_new_layout(self):
+        capture = self.home / "game-sandboxes" / "old-layout"
+        for d in ("rw", "work", "home"):
+            (capture / d).mkdir(parents=True)
+        (capture / "rw" / "save").write_text("save")
+        (capture / "rw" / "changed").write_text("changed")
+        result = self.cli("--reset-install", "old-layout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((capture / "rw").exists())
+        self.assertFalse((capture / "work").exists())
+        self.assertEqual((capture / "overlay/rw/save").read_text(), "save")
+        self.assertFalse((capture / "overlay/rw/changed").exists())
+        self.assertTrue((capture / "overlay/work").is_dir())
 
     def test_reset_install_moves_nothing_through_a_link(self):
         # find follows no link, and the game is stopped while this runs; a
@@ -3802,10 +3820,11 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         (secret / "saves" / "1").write_text("host secret\n")
         script.write_text(
             f"source <(sed -n '/^reset_install() {{/,/^}}/p' {lib})\n"
-            "stopped_sandbox() { :; }; reclaim() { :; }; confirm() { :; }; unlock_work() { :; }\n"
+            "stopped_sandbox() { :; }; reclaim() { :; }; confirm() { :; }; unlock_work() { :; };\n"
+            "relocate_layers() { :; }\n"
             f"SANDBOXES={capture.parent}\n"
             "find() { command find \"$@\"; local r=$?\n"
-            f"  [ -L {capture}/rw/sub ] || {{ rm -rf {capture}/rw/sub; ln -s {secret} {capture}/rw/sub; }}\n"
+            f"  [ -L {capture}/overlay/rw/sub ] || {{ rm -rf {capture}/overlay/rw/sub; ln -s {secret} {capture}/overlay/rw/sub; }}\n"
             "  return $r; }\n"
             "reset_install linked\n")
         result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
@@ -3842,9 +3861,9 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual((capture / "home" / "config").read_text(), "cfg\n")
         self.assertIn("nothing changed", self.cli("--reset-install", "managed").stdout)
         # A directory the game made and left empty is a change too.
-        (capture / "rw" / "created-dir").mkdir()
+        (capture / "overlay/rw" / "created-dir").mkdir()
         self.assertIn("created-dir", self.cli("--reset-install", "managed").stdout)
-        self.assertFalse((capture / "rw" / "created-dir").exists())
+        self.assertFalse((capture / "overlay/rw" / "created-dir").exists())
 
         # Never while it runs, and only ever a name under ~/game-sandboxes.
         import time
@@ -4095,10 +4114,10 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         # The backend repairs it, whoever starts it.
         self.assertEqual(self.cli("--headless", self.game, *command).returncode, 0)
         self.assertEqual(binary.stat().st_mode & 0o111, 0)
-        captured = self.home / "game-sandboxes/game/rw" / binary.name
+        captured = self.home / "game-sandboxes/game/overlay/rw" / binary.name
         self.assertTrue(captured.stat().st_mode & 0o100)
         self.assertFalse((self.game / "unexpected").exists())
-        self.assertFalse((self.home / "game-sandboxes/game/rw/unexpected").exists())
+        self.assertFalse((self.home / "game-sandboxes/game/overlay/rw/unexpected").exists())
         # An update replaces the copy rather than hiding behind it.
         update = self.base / "update"
         shutil.copyfile("/bin/false", update)
@@ -4118,7 +4137,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         result = self.cli("--headless", self.game, "/game/readme.txt", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("SCRIPT-RAN", result.stdout)
-        self.assertFalse((self.home / "game-sandboxes/game/rw/readme.txt").exists())
+        self.assertFalse((self.home / "game-sandboxes/game/overlay/rw/readme.txt").exists())
         recorded = self.stub_launcher()
         self.env["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"] = str(data)
         subprocess.run([str(ROOT / "Sandbox game")], env=self.env, capture_output=True, timeout=15)
@@ -4129,21 +4148,21 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
             with self.subTest(script=script):
                 result = self.cli("--headless", self.game, "/game/" + script)
                 self.assertTrue(result.stdout.endswith(f" /game/{script}\n"), result.stdout)
-                self.assertFalse((self.home / "game-sandboxes/game/rw" / script).exists())
+                self.assertFalse((self.home / "game-sandboxes/game/overlay/rw" / script).exists())
 
     def test_executable_copy_never_follows_links_the_game_left_in_rw(self):
         (self.game / "bin").mkdir()
         shutil.copyfile("/bin/true", self.game / "bin/Game")
         outside = self.base / "outside"
         outside.mkdir()
-        rw = self.home / "game-sandboxes/game/rw"
+        rw = self.home / "game-sandboxes/game/overlay/rw"
         rw.mkdir(parents=True)
         (rw / "bin").symlink_to(outside, target_is_directory=True)
         self.cli("--headless", self.game, "/game/bin/Game", check=False)
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_executable_copy_checks_its_folders_before_touching_the_copy(self):
-        # After a first launch made rw/bin/Game, the game swaps it for a
+        # After a first launch made overlay/rw/bin/Game, the game swaps it for a
         # link to a host folder whose Game matches the stamp: the next launch
         # must neither delete it nor change its mode.
         (self.game / "bin").mkdir()
@@ -4151,7 +4170,7 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         shutil.copyfile("/bin/true", binary)
         binary.chmod(0o644)
         self.assertEqual(self.cli("--headless", self.game, "/game/bin/Game").returncode, 0)
-        rw = self.home / "game-sandboxes/game/rw"
+        rw = self.home / "game-sandboxes/game/overlay/rw"
         self.assertTrue((rw / "bin/Game").stat().st_mode & 0o100)
         outside = self.base / "outside"
         shutil.copytree(rw / "bin", outside, copy_function=shutil.copy2)
@@ -4528,6 +4547,73 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.env["DISPLAY"] = ":123"
         return json.loads(self.cli(*options, self.game, "/bin/true").stdout)
 
+    def test_old_overlay_layers_move_under_overlay_intact(self):
+        capture = self.home / "game-sandboxes" / "game"
+        (capture / "rw" / "bin").mkdir(parents=True)
+        (capture / "rw" / "bin" / "Game").write_text("changed")
+        (capture / "work" / "in flight").mkdir(parents=True)
+        (capture / "work" / "in flight" / "part").write_text("kept")
+        self.recorded_args()
+        self.assertFalse((capture / "rw").exists())
+        self.assertFalse((capture / "work").exists())
+        self.assertEqual((capture / "overlay/rw/bin/Game").read_text(), "changed")
+        self.assertEqual((capture / "overlay/work/in flight/part").read_text(), "kept")
+
+    def test_an_old_layer_beside_overlay_stops_the_launch(self):
+        # Which rw/ holds the game's changes is not for the launch to guess;
+        # going on would hide the old one's files for good.
+        capture = self.home / "game-sandboxes" / "both"
+        (capture / "rw").mkdir(parents=True)
+        (capture / "rw" / "save").write_text("old save")
+        (capture / "overlay" / "rw").mkdir(parents=True)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "both", str(self.game), "/bin/true"],
+            env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("both overlay/ and an old rw/", result.stderr)
+        self.assertEqual((capture / "rw" / "save").read_text(), "old save")
+
+    def test_a_failed_overlay_move_stops_the_launch_without_touching_data(self):
+        capture = self.home / "game-sandboxes" / "old"
+        (capture / "rw").mkdir(parents=True)
+        (capture / "rw" / "save").write_text("save")
+        (capture / "work").mkdir()
+        bindir = self.base / "mv-bin"
+        bindir.mkdir()
+        (bindir / "mv").write_text("#!/bin/sh\nexit 1\n")
+        (bindir / "mv").chmod(0o755)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "old", str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot move", result.stderr)
+        self.assertEqual((capture / "rw" / "save").read_text(), "save")
+        self.assertTrue((capture / "work").is_dir())
+        self.assertFalse((capture / "overlay").exists())
+
+    def test_a_move_that_fails_after_one_layer_puts_the_first_back(self):
+        capture = self.home / "game-sandboxes" / "old"
+        (capture / "rw").mkdir(parents=True)
+        (capture / "rw" / "save").write_text("save")
+        (capture / "work" / "part").mkdir(parents=True)
+        (capture / "work" / "part" / "file").write_text("kept")
+        bindir = self.base / "mv-bin"
+        bindir.mkdir()
+        (bindir / "mv").write_text(
+            '#!/bin/sh\nfor a in "$@"; do last=$a; done\n'
+            'case "$last" in */work) exit 1;; esac\nexec /bin/mv "$@"\n')
+        (bindir / "mv").chmod(0o755)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "old", str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot move", result.stderr)
+        self.assertEqual((capture / "rw" / "save").read_text(), "save")
+        self.assertEqual((capture / "work" / "part" / "file").read_text(), "kept")
+        self.assertFalse((capture / "overlay").exists())
+
     def test_expand_environment_detection_survives_sigpipe(self):
         # The switch is named early in a long help text. Piped into grep -q,
         # which leaves at the first match, systemd-run died of SIGPIPE on its
@@ -4613,13 +4699,18 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertNotIn("GSETTINGS_BACKEND", with_layout("'appmenu:close'", "--headless"))
 
     def test_default_display_is_private(self):
+        import socket
+        pipewire = socket.socket(socket.AF_UNIX)
+        pipewire.bind(str(self.runtime / "pipewire-0"))
+        self.addCleanup(pipewire.close)
         args = self.recorded_args()
         self.assertIn("gamescope", args)
         self.assertNotIn("/tmp/.Xauthority", args)
         self.assertNotIn("DISPLAY", args)
         # Audio is always on: games that find no sound device refuse to start.
         self.assertIn(str(self.runtime / "pulse"), args)
-        self.assertIn(str(self.runtime / "pipewire-0"), args)
+        self.assertTrue([a for a in args if Path(a).name == "pipewire-0"
+                         and Path(a).parent.parent.name == "sandbox-game-sockets"])
         self.assertIn("--dev", args)
         for option in ("--unshare-user", "--disable-userns", "--seccomp"):
             self.assertIn(option, args)
@@ -4631,8 +4722,10 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         # may write -- which is nowhere above that one.
         host, inside = str(self.runtime / "wayland-0"), "/run/host-wayland/wayland-0"
         args = self.recorded_args()
-        i = args.index(host)
-        self.assertEqual(args[i - 1:i + 2], ["--ro-bind", host, inside])
+        source = next(args[i + 1] for i in range(len(args) - 2)
+                      if args[i] == "--ro-bind" and args[i + 2] == inside)
+        self.assertNotEqual(source, host)
+        self.assertEqual(Path(source).parent.parent.name, "sandbox-game-sockets")
         self.assertNotIn("WAYLAND_DISPLAY", args)       # not for the sandbox as a whole
         gs = args.index("gamescope")
         self.assertEqual(args[gs - 2:gs], ["env", "WAYLAND_DISPLAY=" + inside])
@@ -4647,8 +4740,10 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.assertEqual(args[-1], "/bin/true")
         # Native Wayland talks to the desktop directly, as before.
         direct = self.recorded_args("--wayland")
-        i = direct.index(host)
-        self.assertEqual(direct[i + 1], str(self.runtime / "wayland-0"))
+        source = next(direct[i + 1] for i in range(len(direct) - 2)
+                      if direct[i] == "--ro-bind" and direct[i + 2] == host)
+        self.assertNotEqual(source, host)
+        self.assertEqual(Path(source).parent.parent.name, "sandbox-game-sockets")
         self.assertNotIn("--unix-connect-where-writable", direct)
 
     def test_inner_domain_connects_only_where_it_may_write(self):
@@ -5007,9 +5102,9 @@ class SeparateUidTests(unittest.TestCase):
         uid = self.sandbox_uid(name)
         self.assertNotEqual(uid, os.getuid())
         capture = self.home / "game-sandboxes" / name
-        for f in ("home/save", "rw/original", "rw/new"):
+        for f in ("home/save", "overlay/rw/original", "overlay/rw/new"):
             self.assertEqual((capture / f).stat().st_uid, uid, f)
-        self.assertEqual((capture / "rw" / "original").read_text(), "changed")
+        self.assertEqual((capture / "overlay/rw" / "original").read_text(), "changed")
         self.assertEqual((self.game / "original").read_text(), "original")
         self.assertFalse((self.game / "new").exists())
         # Nothing of ours was opened up to let it through: no ACL entries on
@@ -5082,7 +5177,7 @@ class SeparateUidTests(unittest.TestCase):
         (self.game / "sv" / "shipped").write_text("shipped")
         name = "edit-" + self.base.name
         capture = self.home / "game-sandboxes" / name
-        rw = capture / "rw"
+        rw = capture / "overlay/rw"
         # Games save in place, and from a loop: this one until told to stop.
         proc = self.launch_named(name, "/bin/sh", "-c",
             'printf save > "$HOME/save"; printf slot > /game/sv/slot1; '
@@ -5120,7 +5215,7 @@ class SeparateUidTests(unittest.TestCase):
         for f in ("sv/slot1", "sv/added"):
             self.assertEqual((rw / f).stat().st_uid, uid, f)
             self.assertTrue(os.access(rw / f, os.W_OK), f)
-        # Straight in rw/, between runs: replaced as an editor does, and a
+        # Straight in overlay/rw/, between runs: replaced as an editor does, and a
         # file moved in from elsewhere, which is handed over at the launch.
         tmp = rw / "sv" / ".slot1.tmp"
         tmp.write_text("edited")
@@ -5138,7 +5233,7 @@ class SeparateUidTests(unittest.TestCase):
             f.write("-edited")
 
     def test_its_own_changes_reach_the_sandboxes_files(self):
-        # An executable copy in rw/, made by sandbox-game: the capture comes
+        # An executable copy in overlay/rw/, made by sandbox-game: the capture comes
         # back to us for it, and goes to the sandbox again for the game.
         self.run_guest('printf save > "$HOME/save"')
         name = self.cli("--print-name", self.game).stdout.strip()
@@ -5146,8 +5241,8 @@ class SeparateUidTests(unittest.TestCase):
         (self.game / "bin").mkdir()
         shutil.copyfile("/bin/true", self.game / "bin" / "Game")
         self.cli("--headless", self.game, "/game/bin/Game")
-        self.assertTrue((capture / "rw" / "bin" / "Game").stat().st_mode & 0o100)
-        for f in ("home/save", "rw/bin", "rw/bin/Game"):
+        self.assertTrue((capture / "overlay/rw" / "bin" / "Game").stat().st_mode & 0o100)
+        for f in ("home/save", "overlay/rw/bin", "overlay/rw/bin/Game"):
             self.assertEqual((capture / f).stat().st_uid, uid, f)
 
     def test_damaged_registry_is_put_back_after_the_run(self):
@@ -5318,7 +5413,7 @@ class SystemdBackendTests(unittest.TestCase):
                 self.assertEqual(set(registry.glob('i*.userns')) - before, set(),
                                  'namespace allocation survived game exit')
                 self.assertEqual((capture / 'home/save').read_text(), 'x' * (cycle + 1))
-                self.assertFalse((capture / 'work/work').exists())
+                self.assertFalse((capture / 'overlay/work/work').exists())
 
     def test_managed_namespace_cannot_write_where_it_was_not_given(self):
         # nsresourced's BPF restriction, not file permissions, keeps a managed
@@ -5463,7 +5558,7 @@ print(json.dumps([before, original.read_text(), replacement_errno,
         self.assertEqual((capture / "home" / "save").read_text(), "save")
         self.assertEqual((self.game / "original").read_text(), "original")
         self.assertTrue((capture / "managed-uid").exists())
-        self.assertFalse((capture / "work" / "work").exists())
+        self.assertFalse((capture / "overlay/work/work").exists())
         # Nothing of ours was opened up to let it through.
         for path in (self.base, self.home, self.game, self.game / "original"):
             acl = subprocess.run(["getfacl", "-cp", str(path)], capture_output=True,

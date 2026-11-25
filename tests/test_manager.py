@@ -821,6 +821,16 @@ class LibraryTests(unittest.TestCase):
         entry = self.library.create("game")
         lower = Path(entry["directory"]) / "play.exe"
         lower.write_text("original")
+        upper = self.library.capture(entry["name"]) / "overlay/rw/play.exe"
+        upper.parent.mkdir(parents=True)
+        upper.write_text("update")
+        self.assertEqual(self.library.program_host(entry, "/game/play.exe"), upper)
+        self.assertEqual(self.library.programs(entry), [("/game/play.exe", "play.exe")])
+
+    def test_a_capture_not_moved_yet_still_reads_its_old_upper_layer(self):
+        entry = self.library.create("game")
+        lower = Path(entry["directory"]) / "play.exe"
+        lower.write_text("original")
         upper = self.library.capture(entry["name"]) / "rw/play.exe"
         upper.parent.mkdir()
         upper.write_text("update")

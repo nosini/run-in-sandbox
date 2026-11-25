@@ -155,7 +155,7 @@ class ManagedLaunchTests(unittest.TestCase):
             cap = Path(tmp)
             seen = []
 
-            def delegations(argv, specs, extra):
+            def delegations(argv, specs, extra, cap=None):
                 seen.append(list(extra))
                 raise RuntimeError
             with mock.patch.object(uid, 'managed_identity_error', return_value=None), \
@@ -243,6 +243,79 @@ class DelegationTests(unittest.TestCase):
         with mock.patch.object(uid, 'mount_points', return_value=set()):
             self.assertEqual(uid.delegations(argv, [], [(str(mounts), True)]),
                              [(str(self.base), True)])
+
+    def test_overlay_layers_delegate_their_folder_not_the_capture(self):
+        cap = self.base / 'cap'
+        (cap / 'overlay/rw').mkdir(parents=True)
+        (cap / 'overlay/work').mkdir()
+        specs = [(str(self.base / 'm'), [], str(cap / 'overlay/rw'),
+                  str(cap / 'overlay/work'))]
+        with mock.patch.object(uid, 'mount_points', return_value=set()):
+            delegated = uid.delegations(['bwrap'], specs, cap=cap)
+        self.assertEqual(delegated, [(str(cap / 'overlay'), True)])
+        self.assertNotIn(str(cap), [path for path, _ in delegated])
+
+    def test_overlay_layers_at_the_capture_are_refused(self):
+        cap = self.base / 'cap'
+        (cap / 'rw').mkdir(parents=True)
+        (cap / 'work').mkdir()
+        specs = [(str(self.base / 'm'), [], str(cap / 'rw'), str(cap / 'work'))]
+        with mock.patch.object(uid, 'mount_points', return_value=set()), \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.delegations(['bwrap'], specs, cap=cap)
+        self.assertIn('overlay layers', fail.call_args.args[0])
+        self.assertIn(str(cap), fail.call_args.args[0])
+
+    def test_overlay_layers_outside_the_capture_are_refused(self):
+        cap = self.base / 'cap'
+        cap.mkdir()
+        layers = self.base / 'elsewhere'
+        (layers / 'rw').mkdir(parents=True)
+        (layers / 'work').mkdir()
+        specs = [(str(self.base / 'm'), [], str(layers / 'rw'), str(layers / 'work'))]
+        with mock.patch.object(uid, 'mount_points', return_value=set()), \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.delegations(['bwrap'], specs, cap=cap)
+        self.assertIn('inside', fail.call_args.args[0])
+
+    def test_a_socket_in_the_runtime_folder_is_refused(self):
+        runtime = self.base / 'run'
+        runtime.mkdir()
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(runtime / 'wayland-0'))
+        self.addCleanup(sock.close)
+        argv = ['bwrap', '--ro-bind', str(runtime / 'wayland-0'), '/sock']
+        with mock.patch.dict(uid.os.environ, {'XDG_RUNTIME_DIR': str(runtime)}), \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.delegations(argv, [])
+        self.assertIn('refusing to delegate the runtime folder', fail.call_args.args[0])
+
+    def test_a_socket_in_a_folder_of_its_own_delegates_only_that_folder(self):
+        runtime = self.base / 'run'
+        own = runtime / 'sandbox-game-sockets' / 'game.123'
+        own.mkdir(parents=True)
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(own / 'wayland-0'))
+        self.addCleanup(sock.close)
+        argv = ['bwrap', '--ro-bind', str(own / 'wayland-0'), '/sock']
+        with mock.patch.dict(uid.os.environ, {'XDG_RUNTIME_DIR': str(runtime)}), \
+             mock.patch.object(uid, 'mount_points', return_value=set()):
+            self.assertEqual(uid.delegations(argv, []), [(str(own), False)])
+        # --net delegates the folder of pasta's copies whole: another
+        # launch's sockets must not be in it.
+        pastas = runtime / 'sandbox-game'
+        pastas.mkdir()
+        (pastas / 'game-pasta').write_bytes(b'')
+        other = runtime / 'sandbox-game-sockets' / 'other.456'
+        other.mkdir()
+        with mock.patch.dict(uid.os.environ, {'XDG_RUNTIME_DIR': str(runtime)}), \
+             mock.patch.object(uid, 'mount_points', return_value=set()):
+            wanted = uid.delegations(argv, [], [(str(pastas / 'game-pasta'), False)])
+        for folder, _ in wanted:
+            self.assertFalse(str(other).startswith(folder.rstrip('/') + '/'), wanted)
 
 
 class WarmWorkerTests(unittest.TestCase):
@@ -526,7 +599,7 @@ class GroupTests(unittest.TestCase):
 
     def layout(self):
         b = self.base
-        for d in ("game", "cap/rw/sub", "cap/work", "cap/home"):
+        for d in ("game", "cap/overlay/rw/sub", "cap/overlay/work", "cap/home"):
             (b / d).mkdir(parents=True)
         (b / "readonly").write_text("x")
         sock = socket.socket(socket.AF_UNIX)
@@ -535,7 +608,7 @@ class GroupTests(unittest.TestCase):
         argv = ["bwrap", "--bind", str(b / "cap/home"), "/home",
                 "--ro-bind", str(b / "readonly"), "/r", "--ro-bind", str(b / "sock"), "/s",
                 "--bind", "/dev/null", "/dev/null"]
-        specs = [(str(b / "m"), [str(b / "game")], str(b / "cap/rw"), str(b / "cap/work"))]
+        specs = [(str(b / "m"), [str(b / "game")], str(b / "cap/overlay/rw"), str(b / "cap/overlay/work"))]
         return argv, specs
 
     def mismatches(self, paths):
@@ -551,11 +624,11 @@ class GroupTests(unittest.TestCase):
 
     def test_what_is_written_connected_to_or_copied_up_from_is_checked(self):
         b = self.base
-        found = self.mismatches([b / "game", b / "cap/home", b / "cap/work", b / "sock",
+        found = self.mismatches([b / "game", b / "cap/home", b / "cap/overlay/work", b / "sock",
                                  b / "readonly", "/dev/null"])
         # Not a read-only file, and not /dev/null: no folder of ours shares it.
         self.assertEqual(sorted(found), sorted(str(b / p) for p in
-                                               ("game", "cap/home", "cap/work", "sock")))
+                                               ("game", "cap/home", "cap/overlay/work", "sock")))
 
     def test_message_names_the_fix(self):
         b = self.base
@@ -582,11 +655,11 @@ class GroupTests(unittest.TestCase):
 
     def test_adopting_a_capture_with_other_groups_changes_nothing(self):
         cap = self.base / "cap"
-        (cap / "rw/sub").mkdir(parents=True)
+        (cap / "overlay" / "rw/sub").mkdir(parents=True)
         (cap / "home").mkdir()
         (cap / "home/save").write_text("s")
-        (cap / "rw/sub/.wh..wh..opq").write_text("")
-        (cap / "rw/.wh.gone").write_text("")
+        (cap / "overlay" / "rw/sub/.wh..wh..opq").write_text("")
+        (cap / "overlay" / "rw/.wh.gone").write_text("")
         (cap / "link").symlink_to("home/save")
         stat_patch, lstat_patch = regrouped([cap / "home/save"], self.other)
         with stat_patch, lstat_patch, mock.patch.object(uid.os, "getuid", return_value=self.me), \
@@ -595,8 +668,8 @@ class GroupTests(unittest.TestCase):
                 uid.managed_adopt(str(cap))
         self.assertIn("1 of the files", fail.call_args.args[0])
         self.assertIn(f"chgrp -R {self.me} ", fail.call_args.args[0])
-        self.assertTrue((cap / "rw/sub/.wh..wh..opq").exists())
-        self.assertTrue((cap / "rw/.wh.gone").is_file())
+        self.assertTrue((cap / "overlay" / "rw/sub/.wh..wh..opq").exists())
+        self.assertTrue((cap / "overlay" / "rw/.wh.gone").is_file())
 
     def test_links_do_not_count(self):
         if os.getgid() != self.me:
@@ -630,12 +703,12 @@ class CaptureTests(unittest.TestCase):
         if os.getgid() != os.getuid():
             self.skipTest("this account's own files are not grouped as its uid")
         cap = self.base / "cap"
-        for d in ("rw/sub", "rw/kept", "home/saves"):
+        for d in ("overlay/rw/sub", "overlay/rw/kept", "home/saves"):
             (cap / d).mkdir(parents=True)
-        (cap / "rw/sub/.wh..wh..opq").write_text("")
-        (cap / "rw/.wh.gone").write_text("")
+        (cap / "overlay" / "rw/sub/.wh..wh..opq").write_text("")
+        (cap / "overlay" / "rw/.wh.gone").write_text("")
         try:
-            os.setxattr(cap / "rw/kept", "user.fuseoverlayfs.opaque", b"y")
+            os.setxattr(cap / "overlay" / "rw/kept", "user.fuseoverlayfs.opaque", b"y")
             os.mknod(cap / "probe", stat.S_IFCHR, 0)
             os.unlink(cap / "probe")
         except OSError as e:
@@ -644,11 +717,11 @@ class CaptureTests(unittest.TestCase):
         with scandir:
             uid.managed_adopt(str(cap))
         self.assertEqual(sorted(seen), sorted(set(seen)))
-        for d in ("rw/sub", "rw/kept"):
+        for d in ("overlay/rw/sub", "overlay/rw/kept"):
             self.assertEqual(os.getxattr(cap / d, "user.overlay.opaque"), b"y")
-        self.assertFalse((cap / "rw/sub/.wh..wh..opq").exists())
-        self.assertFalse((cap / "rw/.wh.gone").exists())
-        st = os.lstat(cap / "rw/gone")
+        self.assertFalse((cap / "overlay" / "rw/sub/.wh..wh..opq").exists())
+        self.assertFalse((cap / "overlay" / "rw/.wh.gone").exists())
+        st = os.lstat(cap / "overlay" / "rw/gone")
         self.assertTrue(stat.S_ISCHR(st.st_mode))
         self.assertEqual(st.st_rdev, 0)
 
@@ -656,22 +729,22 @@ class CaptureTests(unittest.TestCase):
         if os.getgid() != os.getuid():
             self.skipTest("this account's own files are not grouped as its uid")
         cap = self.base / "cap"
-        (cap / "rw").mkdir(parents=True)
-        (cap / "rw/.wh.gone").write_text("")
+        (cap / "overlay" / "rw").mkdir(parents=True)
+        (cap / "overlay" / "rw/.wh.gone").write_text("")
         with mock.patch.object(uid.os, "mknod", side_effect=OSError("no space")), \
              mock.patch.object(uid, "fail", side_effect=RuntimeError):
             with self.assertRaises(RuntimeError):
                 uid.managed_adopt(str(cap))
-        self.assertTrue((cap / "rw/.wh.gone").is_file())
-        self.assertFalse((cap / "rw/gone").exists())
-        self.assertEqual([p.name for p in (cap / "rw").iterdir()], [".wh.gone"])
+        self.assertTrue((cap / "overlay" / "rw/.wh.gone").is_file())
+        self.assertFalse((cap / "overlay" / "rw/gone").exists())
+        self.assertEqual([p.name for p in (cap / "overlay" / "rw").iterdir()], [".wh.gone"])
 
     def test_a_device_replaces_the_whiteout_only_after_it_exists(self):
         if os.getgid() != os.getuid():
             self.skipTest("this account's own files are not grouped as its uid")
         cap = self.base / "cap"
-        (cap / "rw").mkdir(parents=True)
-        (cap / "rw/.wh.gone").write_text("")
+        (cap / "overlay" / "rw").mkdir(parents=True)
+        (cap / "overlay" / "rw/.wh.gone").write_text("")
 
         def mknod(path, mode, device):
             self.assertEqual(mode, stat.S_IFCHR | 0o000)
@@ -680,30 +753,30 @@ class CaptureTests(unittest.TestCase):
         with mock.patch.object(uid.os, "mknod", side_effect=mknod), \
              mock.patch.object(uid, "fail", side_effect=RuntimeError):
             uid.managed_adopt(str(cap))
-        self.assertTrue((cap / "rw/gone").exists())
-        self.assertFalse((cap / "rw/.wh.gone").exists())
-        self.assertEqual({p.name for p in (cap / "rw").iterdir()}, {"gone"})
+        self.assertTrue((cap / "overlay" / "rw/gone").exists())
+        self.assertFalse((cap / "overlay" / "rw/.wh.gone").exists())
+        self.assertEqual({p.name for p in (cap / "overlay" / "rw").iterdir()}, {"gone"})
 
     def test_an_existing_file_keeps_the_whiteout(self):
         if os.getgid() != os.getuid():
             self.skipTest("this account's own files are not grouped as its uid")
         cap = self.base / "cap"
-        (cap / "rw").mkdir(parents=True)
-        (cap / "rw/.wh.gone").write_text("")
-        (cap / "rw/gone").write_text("kept")
+        (cap / "overlay" / "rw").mkdir(parents=True)
+        (cap / "overlay" / "rw/.wh.gone").write_text("")
+        (cap / "overlay" / "rw/gone").write_text("kept")
         with mock.patch.object(uid.os, "mknod") as mknod, \
              mock.patch.object(uid, "fail", side_effect=RuntimeError):
             with self.assertRaises(RuntimeError):
                 uid.managed_adopt(str(cap))
         mknod.assert_not_called()
-        self.assertTrue((cap / "rw/.wh.gone").is_file())
-        self.assertEqual((cap / "rw/gone").read_text(), "kept")
+        self.assertTrue((cap / "overlay" / "rw/.wh.gone").is_file())
+        self.assertEqual((cap / "overlay" / "rw/gone").read_text(), "kept")
 
     def test_a_folder_it_cannot_read_stops_adoption_with_a_message(self):
         if os.getuid() == 0:
             self.skipTest("root reads any folder")
         cap = self.base / "cap"
-        locked = cap / "rw/locked"
+        locked = cap / "overlay" / "rw/locked"
         locked.mkdir(parents=True)
         locked.chmod(0)
         self.addCleanup(locked.chmod, 0o700)
@@ -714,7 +787,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_forget_reads_each_entry_once(self):
         cap = self.base / "cap"
-        for d in ("rw/a/b", "home"):
+        for d in ("overlay/rw/a/b", "home"):
             (cap / d).mkdir(parents=True)
         (cap / "home/save").write_text("s")
         read, real = [], os.getxattr

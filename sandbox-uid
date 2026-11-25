@@ -59,7 +59,7 @@ Commands:
                                    only for a CAP that has an index (one of
                                    the systemd backend's: just CMD, as you)
   sandbox-uid share CAP            after a run: open what the game changed in
-                                   its own folder (CAP/rw) to you again
+                                   its own folder (CAP/overlay/rw) to you again
   sandbox-uid forget CAP           once CAP is yours again: drop the ACL
                                    entries its uid had
   sandbox-uid managed-available    whether the systemd backend's services
@@ -332,6 +332,24 @@ def overlays(argv, mounts):
             out += argv[i:i + 1 + n]
         i += 1 + n
     return out, specs
+
+
+def capture_layer(cap, name):
+    """CAP/overlay/NAME, or NAME directly in a capture not moved to overlay/."""
+    top = os.path.realpath(cap)
+    new = os.path.join(top, "overlay", name)
+    return new if os.path.lexists(new) else os.path.join(top, name)
+
+
+def layer_parent(cap, upper, work):
+    """The folder UPPER and WORK share, which must be one inside CAP and not
+    CAP itself: delegating it takes everything beside the layers with it."""
+    top = os.path.realpath(cap)
+    parent = os.path.commonpath([os.path.realpath(upper), os.path.realpath(work)])
+    if parent == top or not parent.startswith(top.rstrip("/") + "/"):
+        fail(f"overlay layers {upper} and {work} must share a folder inside {top}, "
+             f"not {parent}; a capture folder holds more than the overlay")
+    return parent
 
 
 def close_others(keep):
@@ -857,7 +875,7 @@ def inside_launch(cap, argv):
     paths = [os.path.abspath(p) for p, _ in sources(argv)] + [os.path.abspath(argv[0])]
     for mp, lowers, upper, work in layers:
         paths += [os.path.abspath(p) for p in lowers]
-        paths.append(os.path.commonpath([os.path.abspath(upper), os.path.abspath(work)]))
+        paths.append(layer_parent(cap, upper, work))
     # Where a link leads may be closed to the sandbox user too: a game folder
     # in your home, named by a link from somewhere open. Staged as well.
     paths = list(dict.fromkeys(paths + [os.path.realpath(p) for p in paths]))
@@ -881,7 +899,7 @@ def inside_launch(cap, argv):
             os.close(fd)
     if layers:
         served([mp for mp, *_ in layers], g_uid, g_gid)
-    rw = os.path.join(os.path.realpath(cap), "rw")
+    rw = capture_layer(cap, "rw")
     if any(os.path.realpath(upper) == rw for _, _, upper, _ in layers):
         keep_shared(rw, g_uid, g_gid)
     os.chdir("/")
@@ -1316,12 +1334,14 @@ def reachable(path, want):
                if want & ok)
 
 
-def delegations(argv, specs, extra=()):
+def delegations(argv, specs, extra=(), cap=None):
     """[(folder, writable)] to delegate, parents first, so that every source
     of ARGV and every layer of SPECS can be reached and used by the managed
     root: a folder of yours itself, or the folder of yours it is in.
     mountfsd mounts only that folder, without what is mounted below it."""
     me, mounts = os.getuid(), mount_points()
+    runtime = {os.path.realpath(p) for p in
+               (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{me}") if p}
 
     def shared(path, writable):
         st = os.stat(path)
@@ -1330,15 +1350,18 @@ def delegations(argv, specs, extra=()):
             folder = path
         elif os.stat(parent).st_uid == me:
             # A file or socket in a folder of yours takes the whole folder,
-            # idmapped to the managed root: under $XDG_RUNTIME_DIR that is
-            # the runtime folder, where a dedicated one holding only the
-            # socket would be narrower.
+            # idmapped to the managed root. A dedicated folder holding only
+            # the socket is the narrow way; the runtime folder also holds the
+            # session bus and every agent's socket.
             folder = parent
         elif reachable(path, 0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
                        else os.R_OK | (os.W_OK if writable else 0)):
             folder = True                   # a device or socket: bwrap needs only the way
         else:
             folder = None
+        if isinstance(folder, str) and os.path.realpath(folder) in runtime:
+            fail(f"refusing to delegate the runtime folder {folder}: "
+                 "bind its sockets from a folder of their own")
         return folder, st.st_mode
 
     # A -try bind that is not yours and that others cannot reach is dropped,
@@ -1363,7 +1386,9 @@ def delegations(argv, specs, extra=()):
         needs += [(p, False) for p in lowers]
         if upper is not None:
             # One mount for both, or overlayfs cannot rename between them.
-            needs.append((os.path.commonpath([upper, work]), True))
+            parent = layer_parent(cap, upper, work) if cap is not None \
+                else os.path.commonpath([upper, work])
+            needs.append((parent, True))
     want, files = {}, {}
     for path, writable in needs:
         folder, mode = shared(path, writable)
@@ -1581,7 +1606,7 @@ def managed_launch(cap, argv, net=None):
         # The overlays' mount points, unless a delegated capture already
         # holds them (delegations() drops one covered by another).
         extra.append((mounts, True))
-    wanted = delegations(argv, specs, extra)
+    wanted = delegations(argv, specs, extra, cap)
     # nsresourced prefixes our uid and truncates names to 22 characters.
     # Keep the complete pid even with a ten-digit caller uid; a long prefix
     # discarded its last digits and made concurrent launches collide.
@@ -1663,7 +1688,7 @@ def managed_launch(cap, argv, net=None):
 
 
 def managed_adopt(cap):
-    """CAP/rw as the kernel's overlayfs reads it. fuse-overlayfs -- the
+    """CAP/overlay/rw as the kernel's overlayfs reads it. fuse-overlayfs -- the
     subordinate-uid backend's, or this script's fallback -- marks a folder
     the game replaced as opaque in a way of its own, which overlayfs ignores,
     and the folder's old files would show through again. Its whiteouts are
@@ -1675,9 +1700,9 @@ def managed_adopt(cap):
     me, top = os.getuid(), os.path.realpath(cap)
     if not os.path.isdir(top):
         return
-    rw = os.path.join(top, "rw")
-    # One walk: the groups everywhere, and rw/'s folders with the whiteout
-    # files in each. rw/ is walked even as a mount of its own.
+    rw = capture_layer(top, "rw")
+    # One walk: the groups everywhere, and rw's folders with the whiteout
+    # files in each. It is walked even as a mount of its own.
     others, layer = 0, []
     try:
         others += os.lstat(top).st_gid != me
@@ -1856,7 +1881,7 @@ def main():
     if cmd == "share":
         # Copied up during the run, those files have the mode of the game's
         # own (see share()). The sandbox user is your uid in there.
-        rw, uid = os.path.join(os.path.realpath(cap), "rw"), os.getuid()
+        rw, uid = capture_layer(cap, "rw"), os.getuid()
         enter(lay)
         if os.path.isdir(rw) and not os.path.islink(rw):
             share([rw], uid, recurse=True)

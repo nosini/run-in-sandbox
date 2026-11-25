@@ -323,7 +323,7 @@ build from [nwjs.io](https://nwjs.io/) and unpacking it into
 
 RPG Maker ships `package.json` with an empty `"name"`, which NW.js refuses to
 start with. The launcher fills it in with the game's folder name; the edited
-copy is a captured write in `rw/`, and a name that is already set is left alone.
+copy is a captured write in `overlay/rw/`, and a name that is already set is left alone.
 
 RPG Maker games are made on Windows, where file names ignore case, and plenty
 ask for `img/pictures/B.png` when the file is `b.png`. Wine lets that pass;
@@ -543,15 +543,15 @@ Install the mod loader into the game's folder as its instructions say. Some
 things to know:
 
 - Whatever the game or the mod loader writes in its folder lands in the
-  sandbox's `rw/` (see [What lands where](#what-lands-where)). Once a file
+  sandbox's `overlay/rw/` (see [What lands where](#what-lands-where)). Once a file
   such as a BepInEx config has been written there, that copy hides the one in
-  the game's own folder, so edit it under `rw/`, or put new plugins there.
+  the game's own folder, so edit it under `overlay/rw/`, or put new plugins there.
   `--reset-install` throws these changes away, configs included.
 - BepInEx 6 for IL2CPP games downloads Unity's base libraries on its first
   start, and then takes a while generating its own files. Give that one
   start internet access, or download the zip by hand and put it in
   `BepInEx/unity-libs/`. BepInEx 5, for Mono games, downloads nothing.
-- If nothing loads, look for `BepInEx/LogOutput.log` under `rw/`. If it is
+- If nothing loads, look for `BepInEx/LogOutput.log` under `overlay/rw/`. If it is
   missing, the mod loader's DLL never ran.
 
 #### RPG Maker XP/VX/VX Ace — mkxp-z
@@ -982,15 +982,15 @@ path can be pasted as it is. The capture home is live: anything copied into it s
 the running game at once.
 
 The game's folder is not, always. What the game changed in it is kept in
-`rw/`, and the game sees that through an overlay. The kernel's overlay usually
-shows a change made straight in `rw/` at once, but does not promise to;
+`overlay/rw/`, and the game sees that through an overlay. The kernel's overlay usually
+shows a change made straight in `overlay/rw/` at once, but does not promise to;
 `fuse-overlayfs`, used by the [subordinate uid backend](#a-uid-of-its-own),
-keeps what it has read, so a save copied into `rw/` while the game runs is not seen until it restarts. `--put` goes through the overlay instead,
-as the game does, replacing the file whole; a host path into `rw/` names the
+keeps what it has read, so a save copied into `overlay/rw/` while the game runs is not seen until it restarts. `--put` goes through the overlay instead,
+as the game does, replacing the file whole; a host path into `overlay/rw/` names the
 same file under `/game`:
 
 ```sh
-sandbox-attach --put ~/edited.rpgsave ~/game-sandboxes/NAME/rw/www/save/file1.rpgsave
+sandbox-attach --put ~/edited.rpgsave ~/game-sandboxes/NAME/overlay/rw/www/save/file1.rpgsave
 ```
 
 Windows programs are started with Proton's own `wine` binary against the live
@@ -1028,7 +1028,8 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ```
 ~/game-sandboxes/<name>/
 ├── home/       writes to $HOME — configs, saves, whatever it scatters
-├── rw/         writes into the install directory at /game
+├── overlay/    the game's overlay: rw/ (writes into the install directory at
+│               /game) and work/ (its scratch space)
 ├── compat/     --proton: the Wine prefix, under pfx/
 ├── registry-backup/  --proton: the prefix's last whole registry files
 ├── mkxp.json   --mkxp: the runtime config, free to edit
@@ -1039,6 +1040,9 @@ may not ptrace the game, which is how Wine reads its memory. Check with
 ├── playtime    one line per launch: when it started, seconds played
 └── lastrun.log the last launch's output, from the file manager or the manager
 ```
+
+A capture that still has `rw/` and `work/` directly in it has them moved
+into `overlay/` on its next launch.
 
 In the hidden `.locks/` folder beside them, a file named after each sandbox
 lets only one launch, `--delete` or `--reset-install` use it at a time. It
@@ -1056,8 +1060,8 @@ some-game                           1.2G    3h 12m  2026-09-24 18:10 running
 files reflinked on XFS or btrfs — once for each of them.
 
 `--reset-install NAME` is for after updating a game. Everything the game wrote
-into its own install folder lives in `rw/`, and shadows the install beneath it:
-left there, an old copy of a file would hide the updated one. This throws `rw/`
+into its own install folder lives in `overlay/rw/`, and shadows the install beneath it:
+left there, an old copy of a file would hide the updated one. This throws `overlay/rw/`
 away, and lists what goes first, but keeps anything in it with "save" in its
 name, in any case — plenty of engines keep saves inside the install: RPG Maker
 MV and MZ in `www/save`, Ren'Py in `game/saves`, RPG Maker XP/VX/VX Ace as
@@ -1639,7 +1643,7 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
 
 ### What changes
 
-- A capture's `home/`, `rw/` and Wine prefix belong to the sandbox's user:
+- A capture's `home/`, `overlay/rw/` and Wine prefix belong to the sandbox's user:
   `ls -l` shows a number such as `150001` as their owner, and a `+` for the
   ACL entries that let the user read and change them all the same, also while
   the game runs. What either of them makes in there gets those entries too, so
@@ -1647,7 +1651,7 @@ It also needs `nsenter` (util-linux), `setfacl` (`acl`) and `fuse-overlayfs`.
   runs with umask 002 for that: the group the files get is the sandbox's own.
 
   `home/` and the prefix are live: the game sees a change there at once. A
-  change made straight in `rw/` while the game runs it may not see before it
+  change made straight in `overlay/rw/` while the game runs it may not see before it
   restarts, as `fuse-overlayfs` keeps what it has read; `sandbox-attach --put`
   (see [Attaching to a running game](#attaching-to-a-running-game)) makes one
   it does. A file *moved* in from elsewhere keeps its own permissions,
@@ -1699,20 +1703,21 @@ files as the game's. So the capture stays the user's on disk: `ls -l` shows
 them as the owner, with no ACL entries, and a save is edited as anywhere else.
 The game's folder and Proton go through the kernel's overlay, not
 `fuse-overlayfs`. Reading game files avoids the FUSE overhead, and edits made
-straight in `rw/` usually show up in the running game immediately. For reliable
+straight in `overlay/rw/` usually show up in the running game immediately. For reliable
 live updates, use `sandbox-attach --put` as described below. There is no
 `/etc/subuid` range and no `newuidmap`.
 
 The game still runs as a uid that is neither the user's nor another sandbox's, a
 different one at every launch. Only what the sandbox binds in is shared with
 it: the capture, the game's folder, Proton, the launcher's helpers, and from
-the user's runtime folder only the Wayland socket and the playback-only sound
-server. Everything else of the user's stays as closed to it as its permissions
+the user's runtime folder only the Wayland and sound sockets, each bound from
+a per-launch folder under `$XDG_RUNTIME_DIR/sandbox-game-sockets/` that holds nothing
+else. Everything else of the user's stays as closed to it as its permissions
 make it.
 
 The setting sticks to a capture, as `1` does. Switching a capture between
 `1`, `systemd` and `0` keeps its files: from `1` they are given back to the user
-first, and the replaced folders `fuse-overlayfs` marked in `rw/` get the
+first, and the replaced folders `fuse-overlayfs` marked in `overlay/rw/` get the
 kernel's mark as well. The old subordinate uid's ACL entries are removed
 before that uid is released.
 
@@ -1727,7 +1732,7 @@ ordinary per-user install: see [`systemd-backend/`](systemd-backend/README.md).
 network belongs to the sandbox's namespace rather than to bwrap's, and pasta
 runs as the sandbox's transient uid too. `sandbox-attach`, including `--put`,
 works as with the other backends. Use `--put` to change a live overlay;
-editing `rw/` directly is not guaranteed to reach the running game.
+editing `overlay/rw/` directly is not guaranteed to reach the running game.
 `sandbox-uid run CAP -- CMD...` runs the command as the user, since the
 capture already belongs to them. Both delegation workers must report the same stable
 version, 261.4 or later; an unavailable or unsupported backend stops the

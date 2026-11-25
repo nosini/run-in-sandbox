@@ -2,7 +2,7 @@
 # Installed to ~/.local/share/bash-completion/completions/ by install.sh.
 # Completes the options, running sandboxes after --name, and files for the
 # program to run or for --put (host paths in the tools folder or a sandbox's
-# home and rw/ are translated by sandbox-attach itself).
+# home and overlay/rw/ are translated by sandbox-attach itself).
 
 _sandbox_attach()
 {

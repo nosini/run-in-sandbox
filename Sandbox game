@@ -152,7 +152,7 @@ elif [ -n "$APPDIR" ]; then
     # without one: the profile directory (localStorage, which is where some
     # games keep their saves) is named after it. Fill in NW_NAME, which is the
     # same on every launch. It runs inside the sandbox, so the edited copy
-    # lands in the capture's rw/ and the install stays untouched. Only an
+    # lands in the capture's overlay/rw/ and the install stays untouched. Only an
     # empty or missing top-level name is replaced; a file that does not parse
     # is left for NW.js to complain about.
     # "inject_js_start" is pointed at nwjs-casefold.js where it is bound in --

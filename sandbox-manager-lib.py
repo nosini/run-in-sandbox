@@ -133,6 +133,12 @@ class Library:
             raise ValueError("Sandbox folders must not be symbolic links")
         return path
 
+    def upper_layer(self, name):
+        """The game overlay's upper folder, or the old one in a capture not moved yet."""
+        capture = self.capture(name)
+        upper = capture / "overlay" / "rw"
+        return upper if upper.exists() else capture / "rw"
+
     def entries(self):
         if not self.root.exists():
             return []
@@ -417,7 +423,7 @@ class Library:
             except OSError:
                 pass
         try:
-            upper = (capture / "rw").resolve()
+            upper = self.upper_layer(entry["name"]).resolve()
             if upper.is_dir() and upper.is_relative_to(capture):
                 roots.append((upper, ()))
         except OSError:
@@ -1100,7 +1106,7 @@ PY
         elif program.startswith("/game/"):
             relative = program[len("/game/"):]
             candidates = [(root, root / relative) for root in
-                          (capture / "rw", Path(entry["directory"]))]
+                          (self.upper_layer(entry["name"]), Path(entry["directory"]))]
         else:
             raise ValueError("Select a program inside this sandbox")
         if ".." in Path(relative).parts or Path(relative).is_absolute():
@@ -1114,7 +1120,8 @@ PY
 
     def programs(self, entry):
         capture = self.capture(entry["name"])
-        roots = [(Path(entry["directory"]), "/game"), (capture / "rw", "/game")]
+        rw = self.upper_layer(entry["name"])
+        roots = [(Path(entry["directory"]), "/game"), (rw, "/game")]
         try:
             roots.insert(0, (self.windows_drive(entry["name"]), "/compat/pfx/drive_c"))
         except ValueError:
@@ -1123,7 +1130,7 @@ PY
         for root, prefix in roots:
             if not root.is_dir():
                 continue
-            if root == capture / "rw" and not root.resolve().is_relative_to(capture.resolve()):
+            if root == rw and not root.resolve().is_relative_to(capture.resolve()):
                 continue
             for folder, dirs, files in os.walk(root, followlinks=False):
                 dirs[:] = [d for d in dirs if d.lower() not in
