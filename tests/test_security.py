@@ -6079,6 +6079,247 @@ main().catch((error) => { console.error(error); process.exit(1); });
                          ["--headless", "--help"])
         self.assertEqual(complete("sandbox-game", "--x11-exe", "/us"), [])
 
+    def test_options_with_separate_values_report_missing_ones(self):
+        cases = (
+            (["--name"], "--name needs a sandbox name"),
+            (["--ro"], "--ro needs SRC and DST"),
+            (["--ro", "only-a-source"], "--ro needs SRC and DST"),
+            (["--env"], "--env wants KEY=VALUE"),
+            (["--env", ""], "--env wants KEY=VALUE"),
+            (["--env", "=value"], "--env wants KEY=VALUE"),
+            (["--stop"], "--stop needs a sandbox name"),
+            (["--delete"], "--delete needs a sandbox name"),
+            (["--reset-install"], "--reset-install needs a sandbox name"),
+            (["--allow-lan"], "--allow-lan needs a list of addresses"),
+            (["--add-host"], "--add-host needs"),
+            (["--x11-backend"], "--x11-backend needs gamescope or satellite"),
+            (["--x11-exe"], "--x11-exe needs an executable name"),
+            (["--require"], "--require needs a list"),
+            (["--nwjs-version"], "--nwjs-version needs a version"),
+        )
+        for args, message in cases:
+            with self.subTest(args=args):
+                result = self.cli(*args, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("unbound variable", result.stderr)
+
+    def test_launcher_library_survives_unreadable_subdirectories(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read every directory")
+        game = self.base / "unreadable" / "Game"
+        (game / "data").mkdir(parents=True)
+        (game / "locked").mkdir()
+        (game / "data" / "Game.exe").write_text("x")
+        (game / "data" / "project.json").write_text("{}")
+        (game / "run.sh").write_text("#!/bin/sh\n")
+        shutil.copy2("/bin/true", game / "app")
+        (game / "app.runtimeconfig.json").write_text(
+            '{"runtimeOptions": {"frameworks": [{"name": "Microsoft.NETCore.App"}]}}')
+        (game / "locked" / "hidden.exe").write_text("x")
+        (game / "locked").chmod(0)
+        try:
+            script = f'''set -euo pipefail
+. {str(ROOT / "sandbox-game-lib")!r}
+game={str(game)!r}
+exes="$(find_exes "$game")"
+[[ "$exes" == *data/Game.exe* ]]
+scripts="$(native_scripts "$game")"
+[[ "$scripts" == *run.sh* ]]
+bins="$(native_binaries "$game")"
+[[ "$bins" == *app* ]]
+is_pgmmv "$game"
+has_windows_exe "$game"
+is_dotnet "$game"
+printf 'ok\\n'
+'''
+            result = subprocess.run(["bash", "-s"], input=script, text=True, env=self.env,
+                                    capture_output=True, timeout=30)
+        finally:
+            (game / "locked").chmod(0o700)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_rank_launchers_handles_slashes_and_backslashes_literally(self):
+        script = f'. {str(ROOT / "sandbox-game-lib")!r}\nrank_launchers "$RANK_DIR" unins'
+        cases = (
+            ("Game///", "5\t/a/Game.exe\n10\t/a/Other.exe\n", "/a/Game.exe"),
+            ("foo\\nbar", "5\t/a/foo\\nbar\n10\t/a/other\n", "/a/foo\\nbar"),
+            ("/", "10\t/a/Game.exe\n5\t/a/other\n", "/a/Game.exe"),
+        )
+        for directory, lines, first in cases:
+            with self.subTest(directory=directory):
+                result = subprocess.run(["bash", "-c", script], input=lines, text=True,
+                                        env={**self.env, "RANK_DIR": directory},
+                                        capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines()[0], first)
+
+    def test_parse_requirements_reads_every_line(self):
+        script = f'''set -euo pipefail
+. {str(ROOT / "sandbox-game-lib")!r}
+R_REQUIRE=
+parse_requirements "audio,
+seccomp\tlimits"
+printf '%s\\n' "$R_REQUIRE"
+if parse_requirements "audio
+bogus"; then exit 9; fi
+'''
+        result = subprocess.run(["bash", "-s"], input=script, text=True, env=self.env,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "limits audio seccomp")
+        self.assertIn("unknown protection requirement 'bogus'", result.stderr)
+
+    def test_uid_helper_honours_override_and_install_locations(self):
+        libdir = self.base / "uidlib"
+        libdir.mkdir()
+        lib = libdir / "sandbox-game-lib"
+        shutil.copy2(ROOT / "sandbox-game-lib", lib)
+        env = {**self.env, "HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        env.pop("SANDBOX_UID_HELPER", None)
+
+        def resolved(extra=None):
+            result = subprocess.run(
+                ["bash", "-c", f'. {str(lib)!r}; printf "%s\\n" "$SANDBOX_UID_HELPER"'],
+                env={**env, **(extra or {})}, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        sibling = libdir / "sandbox-uid"
+        self.assertEqual(resolved(), str(sibling))
+        override = self.base / "override-uid"
+        override.write_text("#!/bin/sh\n")
+        override.chmod(0o755)
+        self.assertEqual(resolved({"SANDBOX_UID_HELPER": str(override)}), str(override))
+        installed = self.home / ".local" / "lib" / "sandbox-game" / "sandbox-uid"
+        installed.parent.mkdir(parents=True)
+        installed.write_text("#!/bin/sh\n")
+        installed.chmod(0o755)
+        self.assertEqual(resolved(), str(installed))
+        installed.unlink()
+        bindir = self.base / "uid-bin"
+        bindir.mkdir()
+        onpath = bindir / "sandbox-uid"
+        onpath.write_text("#!/bin/sh\n")
+        onpath.chmod(0o755)
+        self.assertEqual(resolved({"PATH": str(bindir) + ":/usr/bin:/bin"}), str(onpath))
+
+    def test_gamescope_size_options_accept_all_spellings(self):
+        source = (ROOT / "sandbox-game-lib").read_text()
+        start = source.index("    ga_parse() {")
+        end = source.index("    ga_join() {", start)
+        function = source[start:end]
+        script = ("set -euo pipefail\n" + function
+                  + '\nga_parse "$GA_ARGS"\n'
+                    'printf "%s|%s|%s|%s\\n" "$GA_WIDTH" "$GA_HEIGHT" "$GA_FULL" "${GA_REST[*]}"\n')
+        cases = (
+            ("-W 1920 -H 1080", "1920|1080|0|"),
+            ("--output-width 1920 --output-height 1080", "1920|1080|0|"),
+            ("--output-width=1920 --output-height=1080", "1920|1080|0|"),
+            ("-W1920 -H1080", "1920|1080|0|"),
+            ("-Wfoo -Hbar --adaptive-sync", "||0|-Wfoo -Hbar --adaptive-sync"),
+            ("--adaptive-sync -W=1920", "||0|--adaptive-sync -W=1920"),
+        )
+        for given, expected in cases:
+            with self.subTest(given=given):
+                result = subprocess.run(["bash", "-c", script], env={**self.env, "GA_ARGS": given},
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_host_oui_uses_default_when_ip_is_missing_or_fails(self):
+        source = (ROOT / "sandbox-game").read_text()
+        function = "host_oui() {" + source.split("host_oui() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        script = function + "\nhost_oui\n"
+        bindir = self.base / "oui-bin"
+        bindir.mkdir()
+        ip = bindir / "ip"
+        bash = shutil.which("bash") or "/bin/bash"
+        cases = (
+            ("missing", None, str(bindir)),
+            ("fails", "#!/bin/sh\nexit 1\n", str(bindir) + ":/usr/bin:/bin"),
+            ("empty", "#!/bin/sh\nexit 0\n", str(bindir) + ":/usr/bin:/bin"),
+            ("no dev", "#!/bin/sh\nprintf 'default via 192.0.2.1\\n'\n",
+             str(bindir) + ":/usr/bin:/bin"),
+        )
+        for label, body, path in cases:
+            with self.subTest(case=label):
+                if body is None:
+                    ip.unlink(missing_ok=True)
+                else:
+                    ip.write_text(body)
+                    ip.chmod(0o755)
+                result = subprocess.run([bash, "-c", script], env={**self.env, "PATH": path},
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "00:e0:4c")
+
+    def test_stale_pasta_avx2_copy_is_removed_when_upstream_has_none(self):
+        scripts = self.base / "pasta-copy"
+        scripts.mkdir()
+        for name in ("sandbox-game", "sandbox-game-lib"):
+            shutil.copy2(ROOT / name, scripts / name)
+        marker = "    # cleanup() ends pasta with the game, by the pid it writes here; labeled\n"
+        source = (scripts / "sandbox-game").read_text()
+        self.assertIn(marker, source)
+        (scripts / "sandbox-game").write_text(source.replace(marker, "    exit 0\n" + marker, 1))
+        (scripts / "sandbox-game").chmod(0o755)
+        bindir = self.base / "pasta-bin"
+        bindir.mkdir()
+        pasta = bindir / "pasta"
+        pasta.write_text("#!/bin/sh\nexit 0\n")
+        pasta.chmod(0o755)
+        # Only needed where bwrap has no --overlay; it still lets the run reach
+        # the pasta copy, which is what this checks.
+        fuse = bindir / "fuse-overlayfs"
+        fuse.write_text("#!/bin/sh\nexit 0\n")
+        fuse.chmod(0o755)
+        copies = self.runtime / "sandbox-game"
+        copies.mkdir()
+        stale = copies / "pasta-stale-pasta.avx2"
+        stale.write_text("stale")
+        result = subprocess.run(
+            [str(scripts / "sandbox-game"), "--net", "--headless", "--name", "pasta-stale",
+             str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((copies / "pasta-stale-pasta").read_text(), pasta.read_text())
+        self.assertFalse(stale.exists())
+
+    def test_proton_waits_with_dist_wineserver_as_fallback(self):
+        source = (ROOT / "sandbox-game").read_text()
+        opening = "set -- /bin/sh -c '"
+        start = source.index(opening) + len(opening)
+        end = source.index("' sh /proton/proton run", start)
+        proton = self.base / "proton-dist"
+        dist = proton / "dist" / "bin"
+        dist.mkdir(parents=True)
+        snippet = source[start:end].replace("/proton", str(proton))
+        runner = proton / "proton"
+        runner.write_text("#!/bin/sh\nexit 3\n")
+        runner.chmod(0o755)
+        mark = self.base / "wineserver-mark"
+        wineserver = dist / "wineserver"
+        wineserver.write_text('#!/bin/sh\nprintf "%s\\n" "$WINEPREFIX" > "$WINESERVER_MARK"\n')
+        wineserver.chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-c", snippet, "sh", str(runner), "run"],
+            env={**self.env, "WINESERVER_MARK": str(mark)},
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(mark.read_text().strip(), "/compat/pfx")
+
+    def test_check_accepts_audio_requirement_under_a_uid_of_its_own(self):
+        for value in ("1", "systemd"):
+            self.save_prefs(f"uid-audio-{value}", f"require=audio\nseparate_uid={value}\n")
+        self.save_prefs("uid-audio-0", "require=audio\nseparate_uid=0\n")
+        out = self.cli("--check", check=False).stdout
+        for value in ("1", "systemd"):
+            self.assertRegex(out, rf"ok\s+require\s+uid-audio-{value}: audio")
+        self.assertRegex(out, r"!!\s+require\s+uid-audio-0: audio; cannot launch here: audio: no playback-only")
+
 
 def separate_uid_missing():
     """Why SANDBOX_SEPARATE_UID cannot run here, or None."""

@@ -161,7 +161,7 @@ fi
 # them, then on PATH.
 helper() {
     local d
-    for d in "$(dirname "$(realpath "$0")")" "$HOME/.local/lib/sandbox-game"; do
+    for d in "$(dirname "$(realpath -- "$0")")" "$HOME/.local/lib/sandbox-game"; do
         [ -e "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
     done
     command -v "$1" || true
@@ -283,7 +283,14 @@ selinux_has_type() {
 # waiting launch already has open could be locked again by it while a new
 # file is locked by another. $1 = NAME.
 lock_sandbox() {
-    mkdir -p "$LOCKS" && exec 18>"$LOCKS/$1" && flock -n 18 || return 1
+    local lock="$LOCKS/$1"
+    mkdir -p "$LOCKS" || return 1
+    # A redirection failure on exec can end a non-interactive shell, so test
+    # the file first and open it only where that can no longer surprise us.
+    : >>"$lock" 2>/dev/null || {
+        echo "sandbox-game: cannot lock '$1' in $LOCKS" >&2; return 1; }
+    command exec 18>"$lock" || return 1
+    flock -n 18 || return 1
     # Beside the capture, as NAME.run-lock, for launches before locks moved:
     # one may still be running. Unheld, it goes.
     local old="$SANDBOXES/$1.run-lock"
@@ -950,7 +957,7 @@ requirement_failures() {
             audio)
                 # A uid of its own gets no sound at all without that server.
                 [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ] \
-                    || { [ "${LAUNCH:-0}" = 1 ] && [ "$SEPARATE_UID" != 0 ]; } \
+                    || [ "${SEPARATE_UID:-${SANDBOX_SEPARATE_UID:-0}}" != 0 ] \
                     || echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)"
                 # Before 1.6.6 a game can leave the server's access class.
                 if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ]; then
@@ -1071,8 +1078,18 @@ EOF
 # Shared by both spellings of --env, so "--env FOO" is rejected as loudly as
 # "--env=FOO" instead of quietly setting FOO to itself.
 add_env() {                           # reads $_e as KEY=VALUE
-    [ "$_e" = "${_e#*=}" ] && { echo "--env wants KEY=VALUE, got '$_e'" >&2; exit 1; }
+    [[ "$_e" = *=* && -n "${_e%%=*}" ]] \
+        || { echo "--env wants KEY=VALUE with a non-empty key, got '$_e'" >&2; exit 1; }
     ENV_ARGS+=( --setenv "${_e%%=*}" "${_e#*=}" )
+}
+
+# Options taking a separate value check for it before reading $2/$3: under
+# set -u a missing one would end the script with bash's own message.
+need_args() {                         # $1 = count, $2 = minimum, $3 = message
+    if [ "$1" -lt "$2" ]; then echo "$3" >&2; exit 1; fi
+}
+need_value() {                        # $1 = value, $2 = message
+    if [ -z "$1" ] || [[ "$1" == -* ]]; then echo "$2" >&2; exit 1; fi
 }
 
 # MHUD, not MANGOHUD: that name belongs to MangoHud's own env var, and writing
@@ -1087,13 +1104,12 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --wayland)   WAYLAND=1; shift ;;
         --wayland-x11) WAYLAND_X11=1; GS=1; shift ;;
-        --x11-backend) [ -n "${2:-}" ] && [[ "$2" != -* ]] || {
-                          echo "--x11-backend needs gamescope or satellite" >&2; exit 1; }
+        --x11-backend) need_args "$#" 2 "--x11-backend needs gamescope or satellite"
+                      need_value "$2" "--x11-backend needs gamescope or satellite"
                       X11_BACKEND="$2"; X11_BACKEND_SET=1; shift 2 ;;
         --x11-backend=*) X11_BACKEND="${1#*=}"; X11_BACKEND_SET=1; shift ;;
-        --x11-exe)   [ -n "${2:-}" ] && [[ "$2" != -* ]] || {
-                         echo "--x11-exe needs an executable name (--x11-exe=VALUE for one starting with -)" >&2
-                         exit 1; }
+        --x11-exe)   need_args "$#" 2 "--x11-exe needs an executable name (--x11-exe=VALUE for one starting with -)"
+                     need_value "$2" "--x11-exe needs an executable name (--x11-exe=VALUE for one starting with -)"
                      X11_EXE="$2"; shift 2 ;;
         --x11-exe=*) X11_EXE="${1#--x11-exe=}"; shift ;;
         --host-x11)  HOST_X11=1; shift ;;
@@ -1107,15 +1123,26 @@ while [ "$#" -gt 0 ]; do
         --list-proton) list_protons; exit 0 ;;
         --list-nwjs) list_nwjs; exit 0 ;;
         -h|--help)   usage; exit 0 ;;
-        --stop)      stop_sandboxes "${2:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
+        --stop)      need_args "$#" 2 "--stop needs a sandbox name (or use --stop-all)"
+                     if [ -z "$2" ]; then
+                         echo "--stop needs a sandbox name (or use --stop-all)" >&2; exit 1
+                     fi
+                     stop_sandboxes "$2"; exit ;;
         --stop=*)    _n="${1#--stop=}"   # empty is --stop-all's job, never this one's
                      stop_sandboxes "${_n:?--stop needs a sandbox name (or use --stop-all)}"; exit ;;
         --stop-all)  stop_sandboxes ""; exit ;;
         --list)      list_sandboxes; exit ;;
         --check)     check_host; exit ;;
-        --delete)    delete_sandbox "${2:?--delete needs a sandbox name}"; exit ;;
-        --reset-install) reset_install "${2:?--reset-install needs a sandbox name}"; exit ;;
-        --name)      NAME="$2"; shift 2 ;;
+        --delete)    need_args "$#" 2 "--delete needs a sandbox name"
+                     if [ -z "$2" ]; then echo "--delete needs a sandbox name" >&2; exit 1; fi
+                     delete_sandbox "$2"; exit ;;
+        --reset-install) need_args "$#" 2 "--reset-install needs a sandbox name"
+                         if [ -z "$2" ]; then
+                             echo "--reset-install needs a sandbox name" >&2; exit 1
+                         fi
+                         reset_install "$2"; exit ;;
+        --name)      need_args "$#" 2 "--name needs a sandbox name"
+                     NAME="$2"; shift 2 ;;
         --name=*)    NAME="${1#--name=}"; shift ;;
         --proton)    PROTON_SPEC="auto"; shift ;;
         --proton=*)  PROTON_SPEC="${1#--proton=}"; PROTON_SPEC="${PROTON_SPEC:-auto}"; shift ;;
@@ -1124,10 +1151,9 @@ while [ "$#" -gt 0 ]; do
         --hide-tray) HIDE_TRAY=1; shift ;;
         --mkxp)      MKXP_SPEC="auto"; shift ;;
         --mkxp=*)    MKXP_SPEC="${1#--mkxp=}"; MKXP_SPEC="${MKXP_SPEC:-auto}"; shift ;;
-        --nwjs-version) [ -n "${2:-}" ] && [[ "$2" != -* ]] || {
-                           echo "--nwjs-version needs a version (--nwjs-version=VERSION for one starting with -)" >&2
-                           exit 1; }
-                     NWJS_SPEC="$2"; shift 2 ;;
+        --nwjs-version) need_args "$#" 2 "--nwjs-version needs a version (--nwjs-version=VERSION for one starting with -)"
+                        need_value "$2" "--nwjs-version needs a version (--nwjs-version=VERSION for one starting with -)"
+                        NWJS_SPEC="$2"; shift 2 ;;
         --nwjs-version=*) NWJS_SPEC="${1#--nwjs-version=}"; NWJS_SPEC="${NWJS_SPEC:-auto}"; shift ;;
         --pgmmv)     PGMMV_SPEC="auto"; shift ;;
         --pgmmv=*)   PGMMV_SPEC="${1#--pgmmv=}"; PGMMV_SPEC="${PGMMV_SPEC:-auto}"; shift ;;
@@ -1136,18 +1162,26 @@ while [ "$#" -gt 0 ]; do
         --with-proton) WITH_PROTON_SPEC="auto"; shift ;;
         --with-proton=*) WITH_PROTON_SPEC="${1#--with-proton=}"
                      WITH_PROTON_SPEC="${WITH_PROTON_SPEC:-auto}"; shift ;;
-        --allow-lan) LAN_ALLOW+=( "${2?--allow-lan needs a list of addresses}" ); shift 2 ;;
+        --allow-lan) need_args "$#" 2 "--allow-lan needs a list of addresses"
+                     if [ -z "$2" ]; then echo "--allow-lan needs a list of addresses" >&2; exit 1; fi
+                     LAN_ALLOW+=( "$2" ); shift 2 ;;
         --allow-lan=*) LAN_ALLOW+=( "${1#--allow-lan=}" ); shift ;;
         --lan)       LAN_ALL=1; shift ;;
         --mac-vendor) MAC_VENDOR=1; shift ;;
         --hosts)     HOSTS=1; shift ;;
-        --add-host)  HOSTS=1; HOSTS_ADD+=( "${2?--add-host needs \"ADDRESS NAME...\"}" ); shift 2 ;;
+        --add-host)  need_args "$#" 2 "--add-host needs \"ADDRESS NAME...\""
+                     if [ -z "$2" ]; then echo "--add-host needs \"ADDRESS NAME...\"" >&2; exit 1; fi
+                     HOSTS=1; HOSTS_ADD+=( "$2" ); shift 2 ;;
         --add-host=*) HOSTS=1; HOSTS_ADD+=( "${1#--add-host=}" ); shift ;;
         --hosts-writable) HOSTS=1; HOSTS_RW=1; shift ;;
-        --ro)        EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
-        --require)   REQUIRE_CLI+="${2?--require needs a list} "; shift 2 ;;
+        --ro)        need_args "$#" 3 "--ro needs SRC and DST"
+                     EXTRA_RO+=( --ro-bind "$2" "$3" ); shift 3 ;;
+        --require)   need_args "$#" 2 "--require needs a list"
+                     if [ -z "$2" ]; then echo "--require needs a list" >&2; exit 1; fi
+                     REQUIRE_CLI+="$2 "; shift 2 ;;
         --require=*) REQUIRE_CLI+="${1#--require=} "; shift ;;
-        --env)       _e="$2"; shift 2; add_env ;;
+        --env)       need_args "$#" 2 "--env wants KEY=VALUE"
+                     _e="$2"; shift 2; add_env ;;
         --env=*)     _e="${1#--env=}"; shift; add_env ;;
         --)          shift; break ;;
         -*)          echo "unknown option: $1 (see sandbox-game --help)" >&2; exit 1 ;;
@@ -1263,7 +1297,7 @@ LAN_RULES="[]"; HOSTS_LINES=""
 [ "${#LAN_ALLOW[@]}" = 0 ] || LAN_RULES="$(python3 -I -c "$PREF_CHECK" lan "${LAN_ALLOW[@]}")" || exit 1
 [ "${#HOSTS_ADD[@]}" = 0 ] || HOSTS_LINES="$(python3 -I -c "$PREF_CHECK" hosts "${HOSTS_ADD[@]}")" || exit 1
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
-GAMEDIR="$(realpath "$1")"
+GAMEDIR="$(realpath -- "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
 # make overlay mount ... Invalid argument") doesn't say what went wrong.
 [ -d "$GAMEDIR" ] || {
@@ -1929,7 +1963,11 @@ if [ -n "$PROTON_SPEC" ]; then
     # wineserver -w returns once its last program is gone, at once if none
     # ever started. Proton's own exit status is the sandbox's.
     set -- /bin/sh -c '"$@"; rc=$?
-        [ ! -x /proton/files/bin/wineserver ] || WINEPREFIX=/compat/pfx /proton/files/bin/wineserver -w
+        if [ -x /proton/files/bin/wineserver ]; then
+            WINEPREFIX=/compat/pfx /proton/files/bin/wineserver -w
+        elif [ -x /proton/dist/bin/wineserver ]; then
+            WINEPREFIX=/compat/pfx /proton/dist/bin/wineserver -w
+        fi
         exit "$rc"' sh /proton/proton run "$@"
 fi
 
@@ -2255,7 +2293,7 @@ find_pgmmv() {                       # $1 = auto | bundle dir
     fi
     for d in "${XDG_DATA_HOME:-$HOME/.local/share}"/pgmmv-player*/ \
              "$HOME/.local/opt"/pgmmv-player*/ /opt/pgmmv-player*/ \
-             "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/pgmmv-player-decrypt/"; do
+             "$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")/pgmmv-player-decrypt/"; do
         if [ -x "$d/bin/pgmmv-player" ]; then printf '%s\n' "${d%/}"; return; fi
     done
     return 0
@@ -2269,7 +2307,7 @@ if [ -n "$PGMMV_SPEC" ]; then
         echo "  ~/.local/share/pgmmv-player-decrypt/ or ~/.local/opt/pgmmv-player*/" >&2
         echo "or set PGMMV_DIR=/path/to/bundle (containing bin/pgmmv-player)" >&2
         exit 1; }
-    PGMMV="$(realpath "$PGMMV")"
+    PGMMV="$(realpath -- "$PGMMV")"
     PGMMV_ARGS=( --ro-bind "$PGMMV" /pgmmv )
     # GLFW selects its platform by the session type. An X11 game under
     # gamescope must use its private Xwayland even on a Wayland desktop.
@@ -2296,18 +2334,18 @@ dotnet_root() { [ -d "$1/host/fxr" ] && [ -d "$1/shared/Microsoft.NETCore.App" ]
 find_dotnet() {                       # $1 = auto | dir
     local d arch onpath=""
     if [ "$1" != auto ]; then
-        ! dotnet_root "$1" || realpath "$1"
+        ! dotnet_root "$1" || realpath -- "$1"
         return 0
     fi
     case "$(uname -m)" in x86_64) arch=X64 ;; aarch64) arch=ARM64 ;; *) arch="" ;; esac
-    onpath="$(command -v dotnet 2>/dev/null)" && onpath="$(dirname "$(realpath "$onpath")")" \
+    onpath="$(command -v dotnet 2>/dev/null)" && onpath="$(dirname "$(realpath -- "$onpath")")" \
         || onpath=""
     for d in "$([ -z "$arch" ] || printenv "DOTNET_ROOT_$arch" || true)" "${DOTNET_ROOT:-}" \
              "$(head -n1 "/etc/dotnet/install_location_${arch,,}" 2>/dev/null || true)" \
              "$(head -n1 /etc/dotnet/install_location 2>/dev/null || true)" \
              "$HOME/.dotnet" /usr/share/dotnet /usr/lib64/dotnet /usr/lib/dotnet /opt/dotnet \
              "$onpath"; do
-        if [ -n "$d" ] && dotnet_root "$d"; then realpath "$d"; return 0; fi
+        if [ -n "$d" ] && dotnet_root "$d"; then realpath -- "$d"; return 0; fi
     done
     return 0
 }
@@ -2819,7 +2857,7 @@ if [ "$HEADLESS" = 0 ]; then
         # own cannot read, and the systemd backend would have to share its
         # folder -- your home, for ~/.Xauthority -- to bind it at all.
         XAUTH_HOST="${XAUTHORITY:-$HOME/.Xauthority}"
-        if [ -f "$XAUTH_HOST" ] && exec 14< "$XAUTH_HOST"; then
+        if [ -f "$XAUTH_HOST" ] && command exec 14< "$XAUTH_HOST"; then
             XSOCK_ARGS+=( --ro-bind-data 14 /tmp/.Xauthority
                           --setenv XAUTHORITY /tmp/.Xauthority )
         fi
@@ -3034,7 +3072,9 @@ for f in /proc/cmdline /proc/modules \
     # headset reconnecting takes its input and battery entries with it --
     # and then there is nothing left to cover, where a plain bind would fail
     # the launch.
-    ID_ARGS+=( --ro-bind-try "$CAP/.empty" "$(realpath "$f")" )
+    if target="$(realpath -- "$f" 2>/dev/null)" && [ -n "$target" ]; then
+        ID_ARGS+=( --ro-bind-try "$CAP/.empty" "$target" )
+    fi
 done
 
 # ---- network ---------------------------------------------------------------
@@ -3056,7 +3096,8 @@ done
 # addresses) names no manufacturer: Realtek's then, as common as any.
 host_oui() {
     local dev mac
-    dev="$(ip route show default 2>/dev/null \
+    command -v ip >/dev/null 2>&1 || { printf '00:e0:4c\n'; return 0; }
+    dev="$({ ip -o route show default 2>/dev/null || true; } \
         | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
     mac="$(cat "/sys/class/net/${dev:-none}/address" 2>/dev/null || true)"
     if [[ "$mac" =~ ^([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}): ]] && (( (0x${mac:0:2} & 3) == 0 )) \
@@ -3107,9 +3148,10 @@ if [ "$NET" = 1 ]; then
     # executable's file, /proc/PID/exe, so renaming the process would not do.
     # pasta re-executes itself as "<own path>.avx2" where the CPU allows, so
     # that build is copied alongside and is the name seen there. A copy is
-    # only ever replaced when pasta itself changed, and never removed: a
-    # running pasta whose file goes away shows up as "... (deleted)", and a
-    # rule matching the plain name would quietly stop applying to it.
+    # only ever replaced when pasta itself changed, and the .avx2 one goes
+    # when upstream no longer ships it: a running pasta whose file goes away
+    # shows up as "... (deleted)", and a rule matching the plain name would
+    # quietly stop applying to it.
     # With SELinux and this project's policy module (selinux/, loaded by
     # install.sh --selinux), the copies carry sandbox_pasta_exec_t and pasta
     # runs confined to sandbox_pasta_t; a plain copy would carry its folder's
@@ -3117,7 +3159,7 @@ if [ "$NET" = 1 ]; then
     # launch, so copies made before the module was loaded get the label too.
     # A copy left from a module since removed has a label the policy no longer
     # knows (unlabeled_t), and is made anew.
-    PASTA_SRC="$(realpath "$(command -v pasta)")"
+    PASTA_SRC="$(realpath -- "$(command -v pasta)")"
     PASTA_BIN="$RT/sandbox-game/$NAME-pasta"
     PASTA_TYPE=""; selinux_has_type sandbox_pasta_exec_t && PASTA_TYPE=sandbox_pasta_exec_t
     [ -d "$RT/sandbox-game" ] || mkdir -m 0700 "$RT/sandbox-game"
@@ -3137,6 +3179,7 @@ if [ "$NET" = 1 ]; then
                 "its pasta runs unconfined" >&2
         fi
     done
+    [ -f "$PASTA_SRC.avx2" ] || rm -f -- "$PASTA_BIN.avx2"
     # cleanup() ends pasta with the game, by the pid it writes here; labeled
     # for pasta's domain, which may write no other file.
     PASTA_PID="$(mktemp -p "$RT/sandbox-game" -- "$NAME-pasta.pid.XXXXXX")"
@@ -3180,7 +3223,7 @@ ETC_OUTSIDE=()
 for f in /etc/ssl/certs /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem \
          /etc/pki/tls/certs /etc/pki/tls/cert.pem /etc/pki/ca-trust; do
     [ -e "$f" ] || continue
-    f="$(realpath "$f")"
+    f="$(realpath -- "$f")"
     case "$f" in /usr/*|/etc/*) continue ;; esac
     [ -d /var/lib/ca-certificates ] && [[ "$f" == /var/lib/ca-certificates/* ]] \
         && f=/var/lib/ca-certificates
@@ -3574,7 +3617,14 @@ done
 # --unshare-all only tries, and bwrap confirms the door is shut before starting.
 # bwrap itself starts with no environment: --clearenv empties only the game's,
 # and the sandbox's pid 1 would otherwise hold all of ours in /proc/1/environ.
-BWRAP=( "${SCOPE[@]}" env -i "${UID_WRAP[@]}" "$(command -v bwrap)"
+# sandbox-uid needs PATH and XDG_RUNTIME_DIR for its own setup; without it,
+# bwrap starts with nothing.
+UID_ENV=()
+if [ "${#UID_WRAP[@]}" -gt 0 ]; then
+    [ -z "${PATH:-}" ] || UID_ENV+=( "PATH=$PATH" )
+    [ -z "${XDG_RUNTIME_DIR:-}" ] || UID_ENV+=( "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" )
+fi
+BWRAP=( "${SCOPE[@]}" env -i "${UID_ENV[@]}" "${UID_WRAP[@]}" "$(command -v bwrap)"
     --unshare-all --unshare-user --disable-userns --seccomp 9
     --die-with-parent --new-session
     "${BASE_ENV[@]}"

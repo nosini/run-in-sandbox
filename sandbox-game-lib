@@ -13,7 +13,7 @@ CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game"
 # All file-manager dialogs use one host-side GTK helper. An explicit override
 # also lets tests record requests without needing a desktop session.
 dialog() {
-    local helper="${SANDBOX_DIALOG:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")/sandbox-game-dialog}"
+    local helper="${SANDBOX_DIALOG:-$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")/sandbox-game-dialog}"
     [ -x "$helper" ] || helper="$HOME/.local/lib/sandbox-game/sandbox-game-dialog"
     [ -x "$helper" ] || { echo "sandbox-game-dialog not found; run install.sh" >&2; return 2; }
     "$helper" "$@"
@@ -139,9 +139,10 @@ pipewire_at_least() {                  # $1 = version, $2 = minimum
 # separated and in the order above. Fails, naming it, on one it does not know.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
 parse_requirements() {                         # $1 = list
-    local word r out="" seen=" "
+    local word r out="" seen=" " norm
     local -a words
-    read -r -a words <<<"${1//,/ }"
+    norm="${1//[[:space:],]/ }"
+    read -r -a words <<<"$norm"
     for word in ${words[@]+"${words[@]}"}; do
         if [ "$word" = all ]; then seen=" $REQUIREMENTS "; continue; fi
         [[ " $REQUIREMENTS " == *" $word "* ]] || {
@@ -214,7 +215,7 @@ nwjs_installs() {
             ver="$(grep -oE '[0-9]+(\.[0-9]+)+' <<<"$name" | tail -n1 || true)"
             [ -n "$ver" ] || continue
             printf '%s\t%s\n' "$ver" "$d"
-        done < <(find "$base" -type d -name 'nwjs-*linux*' 2>/dev/null)
+        done < <(find -- "$base" -type d -name 'nwjs-*linux*' 2>/dev/null || true)
     done | sort -Vr -k1,1
 }
 
@@ -286,15 +287,17 @@ PY
 # is rarely the small one. awk keeps the folder name literal, so a game called
 # "S.T.A.L.K.E.R." is not read as a regex.
 rank_launchers() {                             # $1 = dir, $2 = junk, $3 = strict
-    local dir="$1" list keep
+    local dir="$1" list keep base
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
     list="$(grep . || true)"
     keep="$(grep -Eiv "/[^/]*(${2})[^/]*$" <<<"$list" || true)"
     [ -n "$keep" ] || [ "${3:-}" = strict ] || keep="$list"
     [ -n "$keep" ] || return 0
-    awk -F'\t' -v b="${dir##*/}" '
-        BEGIN { b = tolower(b) }
+    base="${dir##*/}"
+    RANK_BASE="$base" awk -F'\t' '
+        BEGIN { b = tolower(ENVIRON["RANK_BASE"]) }
         { n = $2; sub(/.*\//, "", n)
-          print (index(tolower(n), b) ? 0 : 1) "\t" $0 }' <<<"$keep" \
+          print (b != "" && index(tolower(n), b) ? 0 : 1) "\t" $0 }' <<<"$keep" \
         | sort -t"$(printf '\t')" -k1,1n -k2,2rn | cut -f3
 }
 
@@ -311,7 +314,7 @@ find_exes() {                                  # $1 = dir -> best guess first
     # candidate that is not junk: an uninstaller alone at the top, with the
     # game in bin/, would otherwise be the one picked, and run.
     for d in 1 5; do
-        list="$(find "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null)"
+        list="$(find -- "$dir" -maxdepth "$d" -type f -iname '*.exe' -printf '%s\t%p\n' 2>/dev/null || true)"
         keep="$(grep -Eiv "/[^/]*(${EXE_JUNK})[^/]*$" <<<"$list" || true)"
         [ -n "$keep" ] && break
     done
@@ -320,7 +323,7 @@ find_exes() {                                  # $1 = dir -> best guess first
 
 # A native game's .sh launchers, at the top of its folder.
 native_scripts() {                             # $1 = dir
-    find "$1" -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort
+    { find -- "$1" -maxdepth 1 -type f -name '*.sh' 2>/dev/null || true; } | sort
 }
 
 # Standalone Linux programs at the top of a game folder (a Godot .x86_64,
@@ -332,17 +335,17 @@ native_scripts() {                             # $1 = dir
 # not turn it into a native game.
 native_binaries() {                            # $1 = dir
     local dir="$1" files=() list stems compat
-    mapfile -d '' files < <(find "$dir" -maxdepth 1 -type f ! -name '*.sh' ! -iname '*.exe' \
-        ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null)
+    mapfile -d '' files < <(find -- "$dir" -maxdepth 1 -type f ! -name '*.sh' ! -iname '*.exe' \
+        ! -iname '*.dll' ! -name '*.so' ! -name '*.so.*' -print0 2>/dev/null || true)
     [ "${#files[@]}" -gt 0 ] || return 0
     for compat in "" --compat; do
         list="$(elf_programs ${compat:+"$compat"} "${files[@]}" | grep -Eiv "/[^/]*(${NATIVE_JUNK})[^/]*$" || true)"
         [ -z "$list" ] || break
     done
     [ -n "$list" ] || return 0
-    if [ -n "$(find "$dir" -maxdepth 1 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]; then
-        stems="$(find "$dir" -maxdepth 1 -type f \( -iname '*.exe' -o -name '*.runtimeconfig.json' \) \
-            -printf '%f\n' 2>/dev/null | sed -E 's/(\.runtimeconfig\.json|\.[eE][xX][eE])$//')"
+    if [ -n "$(find -- "$dir" -maxdepth 1 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]; then
+        stems="$(find -- "$dir" -maxdepth 1 -type f \( -iname '*.exe' -o -name '*.runtimeconfig.json' \) \
+            -printf '%f\n' 2>/dev/null | sed -E 's/(\.runtimeconfig\.json|\.[eE][xX][eE])$//' || true)"
         list="$(awk -F'\t' 'NR == FNR { s[tolower($0)]; next }
             { n = $2; sub(/.*\//, "", n); n = tolower(n); m = n; sub(/\.[^.]*$/, "", m)
               if ((n in s) || (m in s)) print }' <(printf '%s\n' "$stems") - <<<"$list")"
@@ -390,7 +393,7 @@ resolve_selection() {                          # $1 = selected path
 # Both exported (including encrypted) games and editor projects have this
 # file. Match case as the Linux player does, without parsing encrypted JSON.
 is_pgmmv() {
-    find "$1" -maxdepth 3 -type f -iname project.json -printf '%P\n' 2>/dev/null \
+    { find -- "$1" -maxdepth 3 -type f -iname project.json -printf '%P\n' 2>/dev/null || true; } \
         | grep -iEx 'data/project[.]json|resources/data/project[.]json' >/dev/null
 }
 
@@ -405,12 +408,12 @@ is_dotnet() {                                  # $1 = game dir
         [ -f "${f%.runtimeconfig.json}" ] \
             && [ -n "$(elf_programs "${f%.runtimeconfig.json}")" ] \
             && grep -qE '"frameworks?"[[:space:]]*:' "$f" && return 0
-    done < <(find "$1" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null)
+    done < <(find -- "$1" -maxdepth 3 -type f -name '*.runtimeconfig.json' -print0 2>/dev/null || true)
     return 1
 }
 
 has_windows_exe() {
-    [ -n "$(find "$1" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null)" ]
+    [ -n "$(find -- "$1" -maxdepth 5 -type f -iname '*.exe' -print -quit 2>/dev/null || true)" ]
 }
 
 # RPG Maker XP / VX / VX Ace, i.e. the RGSS engines mkxp-z reimplements. Game.ini
@@ -419,8 +422,8 @@ has_windows_exe() {
 is_rgss() {
     [ -f "$1/Game.ini" ] &&
         grep -qiE '^[[:space:]]*Library[[:space:]]*=[[:space:]]*RGSS' "$1/Game.ini" && return 0
-    [ -n "$(find "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
-            -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null)" ]
+    [ -n "$(find -- "$1" -maxdepth 2 \( -iname '*.rvdata2' -o -iname '*.rvdata' \
+            -o -iname '*.rxdata' -o -iname 'Game.rgss*' \) -print -quit 2>/dev/null || true)" ]
 }
 
 # What "Sandbox game" will run a selection with, in the order it goes by: an
@@ -472,7 +475,7 @@ renpy_without_wayland() {                      # $1 = game dir
     # The shared objects only (librenpython.so, or a separate libSDL2): the
     # rest need not be read on every launch.
     # -H: the arch folder itself may be a symlink.
-    mapfile -t sos < <(find -H "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null)
+    mapfile -t sos < <(find -H -- "${libs[@]}" -maxdepth 2 -type f -name '*.so*' 2>/dev/null || true)
     [ "${#sos[@]}" -gt 0 ] || return 1
     grep -a -q -F "SDL X11 video driver" "${sos[@]}" 2>/dev/null \
         && ! grep -a -q -F "SDL Wayland video driver" "${sos[@]}" 2>/dev/null
@@ -662,6 +665,10 @@ PY
             case "${words[$i]}" in
                 -W|--output-width) GA_WIDTH="${words[$((i+1))]:-}"; i=$((i+2)) ;;
                 -H|--output-height) GA_HEIGHT="${words[$((i+1))]:-}"; i=$((i+2)) ;;
+                --output-width=*) GA_WIDTH="${words[$i]#*=}"; i=$((i+1)) ;;
+                --output-height=*) GA_HEIGHT="${words[$i]#*=}"; i=$((i+1)) ;;
+                -W[0-9]*) GA_WIDTH="${words[$i]#-W}"; i=$((i+1)) ;;
+                -H[0-9]*) GA_HEIGHT="${words[$i]#-H}"; i=$((i+1)) ;;
                 -f|--fullscreen) GA_FULL=1; i=$((i+1)) ;;
                 *) GA_REST+=( "${words[$i]}" ); i=$((i+1)) ;;
             esac
@@ -784,7 +791,14 @@ started_by_us() {                     # $1 = PID
 # ours, and the outer bwrap runs as a transient uid of systemd-nsresourced's,
 # in a user namespace whose parent is the one sandbox-uid had allocated for
 # that launch, and recorded in the capture (see managed_owns there).
-SANDBOX_UID_HELPER="${BASH_SOURCE[0]%/*}/sandbox-uid"   # installed beside this
+SANDBOX_UID_HELPER="${SANDBOX_UID_HELPER:-${BASH_SOURCE[0]%/*}/sandbox-uid}"   # installed beside this
+if [ ! -x "$SANDBOX_UID_HELPER" ]; then
+    if [ -x "$HOME/.local/lib/sandbox-game/sandbox-uid" ]; then
+        SANDBOX_UID_HELPER="$HOME/.local/lib/sandbox-game/sandbox-uid"
+    elif command -v sandbox-uid >/dev/null 2>&1; then
+        SANDBOX_UID_HELPER="$(command -v sandbox-uid)"
+    fi
+fi
 sandbox_user() {                      # $1 = PID, $2 = NAME
     local u
     if [ -f "$HOME/game-sandboxes/$2/managed-uid" ]; then
