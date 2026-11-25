@@ -16,7 +16,10 @@ ExecReload=/usr/local/libexec/sandbox-game/systemd-render-devices
 ExecStopPost=/usr/local/libexec/sandbox-game/systemd-render-devices --disable
 UMask=0077
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+# CAP_SYS_RESOURCE: the mount's usrquota limits apply to root's files too,
+# and only this capability lets the aliases and their records, and handing a
+# revoked user's ones back to root, go past them.
+CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SYS_RESOURCE
 ProtectSystem=strict
 ReadWritePaths=/run/sandboxgame/render
 ProtectHome=yes

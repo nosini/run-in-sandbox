@@ -277,9 +277,12 @@ def uninstall():
             modules = output('semodule', '-l').splitlines()
             if any(line.split()[0] == MODULE for line in modules):
                 run('semodule', '-r', MODULE)
-        else:
+        elif not Path('/sys/fs/selinux/enforce').exists():
             print(f'warning: the {MODULE} policy module could not be removed '
                   'automatically while SELinux is disabled', file=sys.stderr)
+        else:
+            print(f'warning: the {MODULE} policy module could not be removed '
+                  'automatically: semodule is not installed', file=sys.stderr)
     for path in FILES:
         path.unlink(missing_ok=True)
     STATE.unlink()

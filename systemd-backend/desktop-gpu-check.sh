@@ -271,7 +271,7 @@ for name in os.listdir(results):
     path = os.path.join(results, name)
     p = Path(path)
     try:
-        if not p.is_file() or p.is_symlink():
+        if p.is_symlink() or not p.is_file():
             continue
         with p.open(encoding="utf-8", errors="surrogateescape") as f:
             text = f.read()

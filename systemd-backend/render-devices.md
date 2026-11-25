@@ -24,7 +24,11 @@ never changes the original device's owner, permissions or ACL.
 
 A dedicated, device-enabled tmpfs at `/run/sandboxgame/render` holds the
 aliases. The matching [mount unit](run-sandboxgame-render.mount) bounds it to
-4 MiB and 16,384 inodes, with `nosuid,noexec`. A caller-owned alias is published
+4 MiB and 16,384 inodes, with `nosuid,noexec`. Per-user quotas (`usrquota`)
+cap each user at 64 KiB and 64 inodes there, so one allowlisted user cannot
+fill it for the others. The limits apply to root's files too; the service keeps
+`CAP_SYS_RESOURCE` so that the helper's own records and revoked aliases, which
+it hands back to root, are not refused. A caller-owned alias is published
 at `UID/renderD128`, for example. `MountDirectory(mode=root)` maps its owner to
 managed root; the game's child namespace then sees its usual UID. No render
 group or other desktop supplementary group is retained.
@@ -116,7 +120,7 @@ Run the isolated lifecycle tests as root on the VM:
 sudo python3 -I systemd-backend/test_render_devices.py -v
 ```
 
-All **25 tests pass**, covering initial creation, unchanged/reused devices,
+All **28 tests pass**, covering initial creation, unchanged/reused devices,
 devices replaced at the same path, parallel reconciliation, malformed
 configuration, source and destination symlinks, primary-node exclusion,
 published aliases moved/hardlinked by a user, directories planted at alias

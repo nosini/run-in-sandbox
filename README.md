@@ -1391,6 +1391,19 @@ title, WirePlumber keys the game by its node name: for NW.js the game's folder
 name, so each game remembers its own device. Mixers show such a stream by its
 application name alone.
 
+One channel stays open on current PipeWire: the Pulse sample cache
+(`pactl upload-sample`, `play-sample`, `list samples`) is a single store for the
+whole server, outside WirePlumber's permissions. Games sharing `sandbox-pulse`,
+one without network and one with included, can leave data there for each other,
+and it stays until the server restarts. `sandbox-pulse.conf` sets
+`pulse.max-sample-cache = 0`, which refuses every upload, but PipeWire 1.6.11
+and earlier ignore that setting. Until a release has it, restarting the server
+clears the cache:
+
+```sh
+systemctl --user restart sandbox-pulse.service
+```
+
 What goes where: `~/.config/pipewire/sandbox-pulse.conf`,
 `~/.config/systemd/user/sandbox-pulse.service`,
 `~/.config/wireplumber/wireplumber.conf.d/60-sandbox-audio.conf`, and

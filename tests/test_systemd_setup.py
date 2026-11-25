@@ -1714,7 +1714,8 @@ class RenderDevicePolicyTests(unittest.TestCase):
         lines = {line.strip() for line in text.splitlines()}
         self.assertIn('RestrictAddressFamilies=none', lines)
         self.assertNotIn('RestrictAddressFamilies=AF_UNIX', lines)
-        self.assertIn('CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE',
+        self.assertIn('CapabilityBoundingSet=CAP_MKNOD CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE '
+                      'CAP_SYS_RESOURCE',
                       lines)
         self.assertNotIn('PrivateDevices=yes', lines)
         for directive in ('PrivateNetwork=yes', 'ProtectKernelTunables=yes',
