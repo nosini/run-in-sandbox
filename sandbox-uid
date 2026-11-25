@@ -84,6 +84,8 @@ import json
 import os
 import pwd
 import re
+import resource
+import select
 import shlex
 import shutil
 import signal
@@ -117,12 +119,13 @@ def fail(msg):
 
 def occupy_stdio():
     """Leave nothing for internal pipes or sockets to mistake for a standard
-    descriptor: one that was closed before this started is /dev/null."""
+    descriptor: one that was closed before this started is /dev/null, made
+    inheritable so the exec that ends this does not close it again."""
     for fd in (0, 1, 2):
         try:
             os.fstat(fd)
         except OSError:
-            os.open(os.devnull, os.O_RDWR)
+            os.set_inheritable(os.open(os.devnull, os.O_RDWR), True)
 
 
 def reset_exec_signals():
@@ -149,12 +152,16 @@ def exec_bwrap(argv, bwrap=None):
 
 
 def option_index(argv, option):
-    """Where OPTION comes in ARGV before bwrap's --, or None."""
-    for i, arg in enumerate(argv):
-        if arg == "--":
+    """Where OPTION comes in ARGV among bwrap's own options -- before its
+    command, and never as another option's argument -- or None."""
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--" or not a.startswith("--"):
             break
-        if arg == option:
+        if a == option:
             return i
+        i += 1 + ARITY.get(a, 0)
     return None
 
 
@@ -663,7 +670,12 @@ def forget(cap, uid):
                     continue
                 fail(f"could not read {path}'s ACL: {e}")
             if acl.pop((ACL_USER, uid), None) is not None:
-                os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
+                try:
+                    os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
+                except OSError as e:
+                    if e.errno in (errno.ENODATA, errno.ENOTSUP):
+                        continue
+                    fail(f"could not write {path}'s ACL: {e}")
 
     def usable(path):
         # The game may have left a folder of ours with the mode it made. What
@@ -697,12 +709,13 @@ def forget(cap, uid):
             drop(path, stat.S_ISDIR(st.st_mode))
 
 
-def watch_fd(ino, events, dirs, fd, uid, fix, dev):
+def watch_fd(ino, events, dirs, fd, uid, fix, dev, report=None):
     """Watch FD, a directory open without following a link, then each folder
     under it opened relative to its parent. DIRS maps a watch descriptor to
     the open (fd, dev) it stands for. A folder that cannot be watched is
     closed and never entered; its descriptor is stored only after the watch
-    succeeds."""
+    succeeds. REPORT, when given, is called should an open find no
+    descriptor free: the walk goes on, and the caller can say so."""
     todo = [(fd, dev)]
     while todo:
         fd, dev = todo.pop()
@@ -735,7 +748,9 @@ def watch_fd(ino, events, dirs, fd, uid, fix, dev):
             try:
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
                                 os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-            except OSError:
+            except OSError as e:
+                if report is not None and e.errno in (errno.EMFILE, errno.ENFILE):
+                    report()
                 continue
             todo.append((child, dev))
 
@@ -771,11 +786,25 @@ def keep_shared(rw, uid, gid):
 
     if os.fork():
         os.close(ready)
-        os.read(ready_r, 1)                 # or end of file: it gave up
+        # b"1": it watches; b"!": it ran out of descriptors; end of file:
+        # it gave up.
+        watching = os.read(ready_r, 1)
         os.close(ready_r)
+        if watching == b"!":
+            sys.stderr.write(f"sandbox-uid: warning: the watcher of {rw} ran out of "
+                             "descriptors; what the game saves in a folder it could "
+                             "not watch may stay closed to you until the game ends\n")
         return
     try:
         os.close(ready_r)
+        # One open descriptor per watched folder, held for the run: at the
+        # soft limit -- a thousand-odd -- a big game's rw/ would end the
+        # walk, so raise it to the hard one while that is still allowed.
+        try:
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        except (OSError, ValueError):
+            pass
         devnull = os.open("/dev/null", os.O_RDWR)
         for fd in (0, 1, 2):
             os.dup2(devnull, fd)
@@ -799,8 +828,13 @@ def keep_shared(rw, uid, gid):
             dev = os.fstat(root).st_dev
         except OSError:
             os._exit(0)
-        watch_fd(ino, events, dirs, os.dup(root), uid, False, dev)
-        os.write(ready, b"1")
+        # The walk reports running out of descriptors here, while the parent
+        # still waits on this pipe: past it the watcher's own stderr is
+        # /dev/null, and nothing of it can reach you.
+        ran_out = []
+        watch_fd(ino, events, dirs, os.dup(root), uid, False, dev,
+                 lambda: ran_out.append(True))
+        os.write(ready, b"!" if ran_out else b"1")
         os.close(ready)
         while True:
             data = os.read(ino, 65536)
@@ -1034,7 +1068,11 @@ def inside_launch(cap, argv):
     layers = overlay_points(mounts, specs, (g_uid, g_gid))
     # fuse-overlayfs follows its layers' descriptors back to paths, which it
     # must be able to reach as well; upper and work as one, to rename across.
-    paths = [os.path.abspath(p) for p, _ in sources(argv)] + [os.path.abspath(argv[0])]
+    # The binary is resolved now, before the working folder changes: a bare
+    # name is found on PATH, a relative one keeps its place, and what is
+    # staged is what exec_bwrap() below runs.
+    bwrap_bin = resolve_executable(argv[0])
+    paths = [os.path.abspath(p) for p, _ in sources(argv)] + [bwrap_bin]
     for mp, lowers, upper, work in layers:
         paths += [os.path.abspath(p) for p in lowers]
         paths.append(layer_parent(cap, upper, work))
@@ -1071,7 +1109,7 @@ def inside_launch(cap, argv):
     relay_output(g_uid)
     # What it makes is then open to its group, and so to you (see share()).
     os.umask(0o002)
-    exec_bwrap(argv)
+    exec_bwrap(argv, bwrap_bin)
 
 
 # ---- the systemd backend ---------------------------------------------------
@@ -1524,7 +1562,9 @@ def delegations(argv, specs, extra=(), cap=None):
     root: a folder of yours itself, or the folder of yours it is in.
     mountfsd mounts only that folder, without what is mounted below it."""
     me, mounts = os.getuid(), mount_points()
-    bwrap_real = os.path.realpath(argv[0]) if argv else None
+    # The same binary managed_launch() stages: a bare "bwrap" through PATH,
+    # or the X_OK check below never asks for the one exec'd.
+    bwrap_real = resolve_executable(argv[0]) if argv else None
     runtime = {os.path.realpath(p) for p in
                (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{me}") if p}
 
@@ -1716,13 +1756,20 @@ def managed_network(net):
             devnull = os.open("/dev/null", os.O_RDWR)
             os.dup2(devnull, 0)
             os.dup2(devnull, 1)
-            close_others([go_r])
+            # pasta's stderr as a pipe, drained below: fd 2 as it was -- the
+            # terminal -- is denied to it in the sandbox_pasta_t domain, which
+            # replaces it with /dev/null there.
+            note_r, note = os.pipe()
+            close_others([go_r, note_r, note])
             if os.read(go_r, 1) != b"1":
                 os._exit(0)                 # setup failed: nothing to serve
             os.close(go_r)
             keeper_pid = os.getpid()
             pasta = os.fork()
             if pasta == 0:
+                os.close(note_r)
+                os.dup2(note, 2)
+                os.close(note)
                 signal.pthread_sigmask(signal.SIG_SETMASK, set())
                 libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
                 if os.getppid() != keeper_pid:
@@ -1735,12 +1782,51 @@ def managed_network(net):
                     "--map-host-loopback", "none", "--map-guest-addr", "none",
                     *net["dns"], "--ns-mac-addr", net["mac"],
                     *([] if net["ipv6"] else ["-4"])])
+            os.close(note)                  # pasta is the only writer now
+            os.set_blocking(note_r, False)
+            # Woken by what pasta says or by a signal, never by a timer, for
+            # as long as the game runs: the signals, unblocked only now, wake
+            # select() through a pipe of their own.
+            wake_r, wake = os.pipe()
+            os.set_blocking(wake_r, False)
+            os.set_blocking(wake, False)
+            for sig in ends | {signal.SIGCHLD}:
+                signal.signal(sig, lambda *_: None)
+            signal.set_wakeup_fd(wake)
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, ends | {signal.SIGCHLD})
+            relaying = True
+
+            def relay():
+                nonlocal relaying
+                try:
+                    while relaying:
+                        data = os.read(note_r, 65536)
+                        if not data:
+                            relaying = False    # pasta's end of the pipe gone
+                            break
+                        try:
+                            os.write(2, data)
+                        except OSError:
+                            pass                # our own stderr is gone too
+                except BlockingIOError:
+                    pass                        # nothing more to read yet
+
             while True:
-                sig = signal.sigwait(ends | {signal.SIGCHLD})
-                if sig != signal.SIGCHLD:
+                ready = select.select([wake_r, note_r] if relaying else [wake_r], [], [])[0]
+                if note_r in ready:
+                    relay()
+                if wake_r not in ready:
+                    continue
+                try:
+                    got = os.read(wake_r, 64)
+                except BlockingIOError:
+                    got = b""
+                if any(sig != signal.SIGCHLD for sig in got):
                     reap_child(pasta)
+                    relay()
                     break
                 if os.waitpid(pasta, os.WNOHANG)[0]:
+                    relay()                     # what it said before it ended
                     break
         except BaseException as e:
             os.write(2, f"sandbox-uid: pasta: {e}\n".encode())
@@ -1956,7 +2042,13 @@ def managed_adopt(cap):
                     # would show.
                     target = os.path.join(d, name[4:])
                     if os.path.lexists(target):
-                        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), target)
+                        # Not a whiteout, then: no overlay keeps one beside
+                        # what it hides, for making that again would take the
+                        # mark away. Both files are the game's own; a device
+                        # here would hide the real one. Both stay as they are.
+                        sys.stderr.write(f"sandbox-uid: warning: {os.path.join(d, name)} "
+                                         f"is no whiteout: {target} exists\n")
+                        continue
                     # Not .wh.NAME.tmp: that is the whiteout of NAME.tmp.
                     temporary, made, attempt = None, False, 0
                     while True:

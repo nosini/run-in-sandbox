@@ -99,11 +99,14 @@ allow sandbox_pasta_t sandbox_pasta_exec_t:file entrypoint;
 # the same, and runs in this domain too.
 allow sandbox_pasta_t sandbox_pasta_exec_t:file { read open getattr map execute execute_no_trans ioctl lock };
 
-# What it inherits: the launcher's output, a terminal or the game's log,
-# written to but never opened -- so no other file of the user's. The parent
-# hears it exit. A terminal is opened read-write because that is how it is
-# inherited, but only writes and safe read-only queries are allowed: no
-# keystroke reads, TIOCSTI or TIOCLINUX input injection.
+# What it inherits: both launchers give it /dev/null for stdin and stdout and
+# a pipe of theirs for stderr, which they pass on to their own; the parent
+# hears it exit. The terminal and log-file rules after the pipe's only keep a
+# launcher installed before that working: written to but never opened, so no
+# other file of the user's, and for a terminal only writes and safe
+# read-only queries -- no keystroke reads, TIOCSTI or TIOCLINUX input
+# injection. (An inherited read-write terminal fd is still checked for read
+# as well, and replaced by /dev/null without it.)
 allow sandbox_pasta_t unconfined_t:fd use;
 allow sandbox_pasta_t unconfined_t:fifo_file { getattr read write append ioctl lock };
 allow sandbox_pasta_t { user_tty_device_t user_devpts_t }:chr_file { getattr write append ioctl lock };

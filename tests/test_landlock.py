@@ -141,6 +141,23 @@ class TruncatedMessageTests(unittest.TestCase):
                 os.fstat(fd)
 
 
+class LinkUpdateTests(unittest.TestCase):
+    def test_a_selector_error_while_updating_closes_the_link(self):
+        owner = FakeOwner()
+        client, server = FakeSocket(), FakeSocket()
+        server.sendmsg = mock.Mock(side_effect=BlockingIOError)
+        link = LANDLOCK.Link(owner, client, server)
+        owner.links.add(link)
+        client.recv_result = (b"request", [], 0, None)
+        error = OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+        with mock.patch.object(owner.sel, "modify", side_effect=error):
+            link.pump(client, LANDLOCK.selectors.EVENT_READ)
+        self.assertTrue(link.closed)
+        self.assertTrue(client.closed)
+        self.assertTrue(server.closed)
+        self.assertNotIn(link, owner.links)
+
+
 class OnDemandReopenTests(unittest.TestCase):
     def test_a_new_gamescope_session_clears_the_earlier_window_close(self):
         ondemand = make_ondemand(pid=None)
@@ -217,6 +234,20 @@ class OnDemandFloodTests(unittest.TestCase):
         error = OSError(errno.EMFILE, os.strerror(errno.EMFILE))
         with mock.patch.object(LANDLOCK.socket, "socket", side_effect=error):
             ondemand.connect()
+        self.assertFalse(client.closed)
+        self.assertEqual(ondemand.waiting, [client])
+        self.assertEqual(ondemand.links, set())
+
+    def test_connect_survives_emfile_finding_the_display(self):
+        ondemand = make_ondemand()
+        client = FakeSocket()
+        ondemand.waiting = [client]
+        ondemand.display = None
+        error = OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+        with mock.patch.object(LANDLOCK.os, "listdir", side_effect=error):
+            ondemand.connect()
+        self.assertIsNone(ondemand.display)
+        self.assertFalse(ondemand.shown)
         self.assertFalse(client.closed)
         self.assertEqual(ondemand.waiting, [client])
         self.assertEqual(ondemand.links, set())
@@ -302,6 +333,22 @@ class RunAttachedTests(unittest.TestCase):
             mock.call(10, 0), mock.call(11, 1), mock.call(12, 2)])
         self.assertEqual(close.call_args_list, [mock.call(10), mock.call(11), mock.call(12)])
 
+    def test_an_unwritable_standard_error_still_ends_the_child(self):
+        error = OSError(errno.EIO, os.strerror(errno.EIO))
+        bad = OSError(errno.EBADF, os.strerror(errno.EBADF))
+        with mock.patch.object(LANDLOCK.os, "setsid"), \
+                mock.patch.object(LANDLOCK.os, "dup2"), \
+                mock.patch.object(LANDLOCK.os, "closerange"), \
+                mock.patch.object(LANDLOCK.os, "chdir"), \
+                mock.patch.object(LANDLOCK, "reset_signals"), \
+                mock.patch.object(LANDLOCK.os, "write", side_effect=bad), \
+                mock.patch.object(LANDLOCK.os, "execvpe", side_effect=error), \
+                mock.patch.object(LANDLOCK.os, "_exit",
+                                  side_effect=SystemExit) as ended:
+            with self.assertRaises(SystemExit):
+                LANDLOCK.run_attached(["cmd"], {}, [3, 4, 5], False)
+        ended.assert_called_once_with(127)
+
 
 class FinishSignalTests(unittest.TestCase):
     def test_finish_still_dies_by_sigpipe_when_python_ignores_it(self):
@@ -373,6 +420,49 @@ class AttachServeTests(unittest.TestCase):
         finally:
             first.close()
             second.close()
+
+    def test_a_client_awake_with_nothing_to_read_is_not_hung_up(self):
+        class Finished(Exception):
+            pass
+
+        class Scripted:
+            def __init__(self, events):
+                self.events = list(events)
+
+            def register(self, fileobj, events, data=None):
+                pass
+
+            def unregister(self, fileobj):
+                pass
+
+            def select(self, timeout=None):
+                if not self.events:
+                    raise Finished
+                return [self.events.pop(0)]
+
+        conn = mock.Mock()
+        conn.recv = mock.Mock(
+            side_effect=BlockingIOError(errno.EAGAIN, os.strerror(errno.EAGAIN)))
+        listener = mock.Mock()
+        listener.accept.return_value = (conn, None)
+        rounds = [
+            (mock.Mock(data=("listen", None), fileobj=listener), None),
+            (mock.Mock(data=("pending", conn), fileobj=conn), None),
+            (mock.Mock(data=("client", 4242), fileobj=conn), None),
+        ]
+        with mock.patch.object(LANDLOCK.selectors, "DefaultSelector",
+                               return_value=Scripted(rounds)), \
+                mock.patch.object(LANDLOCK.signal, "signal"), \
+                mock.patch.object(LANDLOCK.os, "pidfd_open",
+                                  side_effect=[9, 10]), \
+                mock.patch.object(LANDLOCK, "external", return_value=True), \
+                mock.patch.object(LANDLOCK, "attach", return_value=(4242, None)), \
+                mock.patch.object(LANDLOCK.os, "killpg") as killpg:
+            with self.assertRaises(Finished):
+                LANDLOCK.serve(listener, 777)
+        conn.recv.assert_called_once_with(4096)
+        conn.close.assert_not_called()
+        killpg.assert_not_called()
 
     def test_inner_connection_is_rejected_and_game_exit_is_not_stalled(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -227,6 +227,16 @@ def start_game(cmd, listener, restrict):
     os._exit(status)
 
 
+def say(text):
+    """TEXT to standard error, if that can still be written to: reporting
+    must never raise, or the forked child would be thrown back into
+    serve()'s loop."""
+    try:
+        os.write(2, text.encode())
+    except OSError:
+        pass
+
+
 def run_attached(argv, env, stdio, terminal):
     try:
         os.setsid()                     # then closing the ready pipe tells serve()
@@ -250,10 +260,12 @@ def run_attached(argv, env, stdio, terminal):
         reset_signals()
         os.execvpe(argv[0], argv, env)
     except OSError as e:
-        os.write(2, f"sandbox-attach: {argv[0]}: {e.strerror}\n".encode())
-    except BaseException as e:          # never back into serve()'s loop
-        os.write(2, f"sandbox-attach: {argv[0]}: {e}\n".encode())
-    os._exit(127)
+        say(f"sandbox-attach: {argv[0]}: {e.strerror}\n")
+    except BaseException as e:
+        say(f"sandbox-attach: {argv[0]}: {e}\n")
+    finally:
+        # Nothing of this child may return into serve()'s loop.
+        os._exit(127)
 
 
 def external(conn):
@@ -477,6 +489,8 @@ def serve(listener, game):
                 try:
                     msg = key.fileobj.recv(4096)
                     sig = json.loads(msg).get("signal") if msg else signal.SIGHUP
+                except (BlockingIOError, InterruptedError):
+                    continue                # awake with nothing to read yet
                 except (OSError, ValueError, AttributeError):
                     msg, sig = b"", signal.SIGHUP
                 if not msg:
@@ -542,7 +556,11 @@ def gamescope_display(pid):
     """The lowest display whose lock file names PID or a process below it --
     a wrapper script's gamescope -- or None so far."""
     found = []
-    for name in os.listdir("/tmp"):
+    try:
+        names = os.listdir("/tmp")
+    except OSError:
+        return None                    # e.g. no descriptor left to open it with
+    for name in names:
         number = re.fullmatch(r"\.X([0-9]{1,4})-lock", name)
         if not number:
             continue
@@ -649,7 +667,12 @@ class Link:
             pass
         except OSError:
             return self.close()
-        self.update()
+        # Also after a read that found nothing: a write above may have
+        # emptied a queue, and the selector must stop asking about it.
+        try:
+            self.update()
+        except OSError:
+            self.close()
 
     def close(self):
         if self.closed:

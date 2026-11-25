@@ -478,6 +478,71 @@ subprocess.Popen(child_argv)
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["file", "folder"])
         self.assertEqual(sorted(p.name for p in directory.iterdir()), ["new"])
 
+    def test_put_treats_a_trailing_slash_as_a_folder(self):
+        # A destination ending in "/" is a folder to put into, never a file
+        # made or replaced under that name.
+        work = self.base / "work"
+        work.mkdir()
+        missing = work / "missing"
+        result = self.put(str(missing) + "/", "file")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"not a directory", result.stderr)
+        self.assertFalse(missing.exists())
+
+        folder = work / "folder"
+        folder.mkdir()
+        result = self.put(str(folder) + "/", "file", data=b"contents")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((folder / "file").read_text(), "contents")
+
+        target = work / "target"
+        target.write_text("keep")
+        result = self.put(str(target) + "/", "file")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"not a directory", result.stderr)
+        self.assertEqual(target.read_text(), "keep")
+
+    def test_put_reports_a_folder_it_cannot_write_to(self):
+        if os.getuid() == 0:
+            self.skipTest("root writes any folder")
+        locked = self.base / "locked"
+        locked.mkdir()
+        locked.chmod(0o555)
+        self.addCleanup(locked.chmod, 0o755)
+        result = self.put(locked / "save")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"sandbox-attach:", result.stderr)
+        self.assertNotIn(b"Traceback", result.stderr)
+
+    def test_put_reports_a_write_that_fails_halfway(self):
+        # A full disk partway through: said as sandbox-attach's own error, and
+        # neither the old file nor a temporary one is left changed behind.
+        import resource
+        target = self.base / "save"
+        target.write_text("old")
+        raw = os.fspath(target)
+        result = subprocess.run(
+            ["/bin/bash", "-c", self.inner, "sandbox-attach", "put", raw, target.name],
+            input=b"x" * 65536, capture_output=True, timeout=15,
+            env={**os.environ, "HOME": str(self.home)},
+            # Python ignores SIGXFSZ, so past this limit write() fails (EFBIG).
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"sandbox-attach: cannot write", result.stderr)
+        self.assertNotIn(b"Traceback", result.stderr)
+        self.assertEqual(target.read_text(), "old")
+        self.assertEqual(sorted(p.name for p in self.base.iterdir()
+                                if p.name.startswith(".sandbox-attach.")), [])
+
+    def test_put_does_not_copy_the_special_mode_bits(self):
+        target = self.base / "save"
+        target.write_text("old")
+        target.chmod(0o4755)             # setuid, of all things, on a save
+        result = self.put(target)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(), "edited")
+        self.assertEqual(stat.S_IMODE(os.lstat(target).st_mode), 0o755)
+
     def test_scan_requires_an_owned_proc_for_a_sandbox_in_our_namespace(self):
         proc, child, _ = self.fake_sandbox("owned-" + self.base.name)
         name = "owned-" + self.base.name
@@ -503,6 +568,76 @@ subprocess.Popen(child_argv)
         result = self.run_bash(script, path=str(fakebin) + os.pathsep + os.environ["PATH"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(name, result.stdout)
+
+    def test_scan_skips_a_child_whose_command_line_is_empty(self):
+        # An outer that does not wait keeps a child that ended as a zombie,
+        # whose /proc cmdline is empty: scan must skip it, not die of an
+        # unbound kargs[0] under set -u before finding the sandbox.
+        name = "zombie-" + self.base.name
+        capture = self.home / "game-sandboxes" / name / "home"
+        capture.mkdir(parents=True)
+        trigger = self.base / (name + "-trigger")
+        child_script = self.base / (name + "-child.sh")
+        child_script.write_text('#!/bin/sh\n'
+                                'while [ ! -e "$1" ]; do sleep 0.05; done\n'
+                                'exec sleep 30\n')
+        child_script.chmod(0o755)
+        outer_code = (
+            "import signal, subprocess, time\n"
+            "zombie = subprocess.Popen(['unshare', '--user', '/bin/true'])\n"
+            "inner = subprocess.Popen(['unshare', '--user', '/bin/bash', '-c',\n"
+            f"    'exec -a bwrap /bin/bash {child_script} {trigger}'])\n"
+            "def stop(*_):\n"
+            "    for proc in (inner, zombie):\n"
+            "        proc.kill()\n"
+            "    for proc in (inner, zombie):\n"
+            "        proc.wait()\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            f"capture, home = {str(capture)!r}, {str(self.home)!r}\n"
+            + self.AS_OUTER_BWRAP
+            + "time.sleep(30)\n")
+        outer = subprocess.Popen(
+            ["bwrap", "-c", outer_code],
+            executable=sys.executable,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        child = None
+        deadline = time.monotonic() + 10
+        while child is None and time.monotonic() < deadline and outer.poll() is None:
+            try:
+                kids = Path(f"/proc/{outer.pid}/task/{outer.pid}/children").read_text().split()
+            except OSError:
+                kids = []
+            for pid in kids:
+                try:
+                    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+                except OSError:
+                    continue
+                if cmdline.split(b"\0")[0].endswith(b"bwrap"):
+                    child = int(pid)
+                    break
+            if child is None:
+                time.sleep(0.02)
+
+        def stop():
+            os.kill(outer.pid, signal.SIGTERM)
+            outer.wait(timeout=5)
+        self.addCleanup(stop)
+        if child is None:
+            outer.kill()
+            _, error = outer.communicate(timeout=5)
+            self.fail(f"fake sandbox never started a child: {error}")
+        script = ('set -u\n'
+                  '. "$SANDBOX_LIB"\n' + self.scan + '\n'
+                  'SB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SB_OUTERS=()\n'
+                  'scan\n'
+                  'for i in "${!SB_PIDS[@]}"; do\n'
+                  '    printf "%s %s %s\\n" "${SB_NAMES[$i]}" "${SB_PIDS[$i]}" '
+                  '"${SB_OUTERS[$i]}"\n'
+                  'done\n')
+        result = self.run_bash(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{name} {child} {outer.pid}", result.stdout)
 
     def test_verify_target_rejects_a_pid_that_changed_after_selection(self):
         name = "changed-" + self.base.name

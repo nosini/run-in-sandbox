@@ -280,9 +280,9 @@ class ManagedLaunchTests(unittest.TestCase):
             with ExitStack() as stack:
                 for patch in patches:
                     stack.enter_context(patch)
-                execv = stack.enter_context(mock.patch.object(uid.os, 'execv'))
+                execve = stack.enter_context(mock.patch.object(uid.os, 'execve'))
                 uid.managed_launch(str(cap), [str(link)])
-            execv.assert_called_once_with(os.path.realpath(link), [str(link)])
+            execve.assert_called_once_with(os.path.realpath(link), [str(link)], {})
 
 
 class DelegationTests(unittest.TestCase):
@@ -352,6 +352,24 @@ class DelegationTests(unittest.TestCase):
             self.skipTest('bwrap is not installed')
         with mock.patch.object(uid, 'mount_points', return_value=set()):
             self.assertEqual(uid.delegations(['bwrap'], [], [(bwrap, False)]), [])
+
+    def test_a_bare_bwrap_is_asked_for_its_execute_bit(self):
+        # managed_launch() stages bwrap as PATH resolves it; the same
+        # resolution must decide whether the sandbox's user may run it.
+        self.base.chmod(0o755)          # a way open to others, as /tmp is
+        bindir = self.base / 'bin'
+        bindir.mkdir()
+        bwrap = bindir / 'bwrap'
+        bwrap.write_text('')
+        # PATH finds it, its owner may run it; others may only read it.
+        bwrap.chmod(0o754)
+        with mock.patch.dict(uid.os.environ, {'PATH': str(bindir)}), \
+             mock.patch.object(uid.os, 'getuid', return_value=os.getuid() + 1), \
+             mock.patch.object(uid, 'mount_points', return_value=set()), \
+             mock.patch.object(uid, 'fail', side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.delegations(['bwrap'], [], [(str(bwrap), False)])
+        self.assertIn(str(bwrap), fail.call_args.args[0])
 
     def test_a_required_bind_others_cannot_reach_still_fails(self):
         private = self.base / 'private'
@@ -585,16 +603,24 @@ class WarmWorkerTests(unittest.TestCase):
         def opened(path, mode="r"):
             return io.BytesIO(titles[path.split("/")[2]])
 
+        def statted(path, **kw):
+            return SimpleNamespace(st_uid=0)    # PID 1's uid: root's
+
         with mock.patch.object(uid.os, "listdir", return_value=[*titles, "self"]), \
+             mock.patch.object(uid.os, "stat", side_effect=statted), \
              mock.patch("builtins.open", side_effect=opened):
             self.assertEqual(uid.idle_workers(), 2)
         with mock.patch.object(uid.os, "listdir", return_value=["4"]), \
+             mock.patch.object(uid.os, "stat",
+                               side_effect=PermissionError(errno.EACCES, "hidepid")), \
              mock.patch("builtins.open", side_effect=opened):
             self.assertIsNone(uid.idle_workers())    # hidepid: none to see
 
     def test_hold_takes_the_idle_workers_but_one_and_more_when_needed(self):
+        clock = [0.0]
         with mock.patch.object(uid.socket, "socket", side_effect=lambda *a: mock.Mock()), \
              mock.patch.object(uid.signal, "setitimer") as timer, \
+             mock.patch.object(uid.time, "monotonic", side_effect=lambda: clock[0]), \
              mock.patch.object(uid, "idle_workers", side_effect=[8, 3, None, 99]):
             with uid.WarmWorker() as worker:
                 self.assertEqual(len(worker.sockets), 7)
@@ -602,10 +628,16 @@ class WarmWorkerTests(unittest.TestCase):
                 self.assertEqual(len(worker.sockets), 9)
                 worker.hold()                       # titles unseen
                 self.assertEqual(len(worker.sockets), 9 + uid.HELD_CONNECTIONS)
+                clock[0] += 1.0
                 worker.hold()
                 self.assertEqual(len(worker.sockets), uid.HELD_MAX)
-            timer.assert_any_call(signal.ITIMER_REAL, uid.HELD_TIMEOUT)
-            self.assertEqual(timer.call_count, 2)   # armed once, then disarmed
+            # Every hold re-arms the alarm for what is left of HELD_TIMEOUT
+            # since the first, so one span covers all the holds; the exit
+            # takes it down.
+            self.assertEqual(timer.call_args_list,
+                             [mock.call(signal.ITIMER_REAL, uid.HELD_TIMEOUT)] * 3 +
+                             [mock.call(signal.ITIMER_REAL, uid.HELD_TIMEOUT - 1.0),
+                              mock.call(signal.ITIMER_REAL, 0)])
             self.assertEqual(worker.sockets, [])
 
     def test_nothing_is_held_after_a_fast_allocation(self):
@@ -635,6 +667,7 @@ class WarmWorkerTests(unittest.TestCase):
         threads = threading.active_count()
         with mock.patch.object(uid.socket, "socket", side_effect=connection), \
              mock.patch.object(uid, "idle_workers", return_value=None), \
+             mock.patch.object(uid.time, "monotonic", return_value=100.0), \
              mock.patch.object(uid.signal, "setitimer") as timer:
             worker = uid.WarmWorker()
             with worker:
@@ -707,6 +740,156 @@ class AllocationTests(unittest.TestCase):
                               expect_failure=True)
         self.assertEqual(len(calls), uid.NSRESOURCE_TRIES)
 
+
+class ManagedNetworkTests(unittest.TestCase):
+    """pasta's keeper: stderr on a pipe of the keeper's, the same end for
+    every signal."""
+
+    def setUp(self):
+        self.net = {"pasta": "/x/pasta", "dns": ["--dns-forward", "10.0.2.3"],
+                    "mac": "52:54:00:12:34:56", "ipv6": False, "rules": {}}
+
+    def drive(self, forks, reads, ready=(), write_errors=(), ended=0):
+        """managed_network()'s forked halves, mocked through their loop and
+        stopped by the SystemExit its _exit mock raises. READS maps a
+        descriptor to what os.read returns from it in turn: 9 is the go pipe,
+        13 pasta's stderr, 15 the signals' wakeup pipe. READY lists what each
+        select() finds readable; ENDED is the pid waitpid() reports gone."""
+        did = mock.Mock()
+        dup2, closed = [], []
+        reads = {fd: list(data) for fd, data in reads.items()}
+        ready, write_errors = list(ready), list(write_errors)
+
+        def selecting(rlist, wlist, xlist, *timeout):
+            did.select(list(rlist), *timeout)
+            return [fd for fd in ready.pop(0) if fd in rlist], [], []
+
+        def reading(fd, size):
+            if not reads.get(fd):
+                if fd == 15:
+                    raise BlockingIOError()
+                return b""
+            data = reads[fd].pop(0)
+            if isinstance(data, BaseException):
+                raise data
+            return data
+
+        def write(fd, data):
+            if write_errors:
+                raise write_errors.pop(0)
+            did.write(fd, data)
+
+        def execv(path, argv):
+            did.execv(path, argv)
+            raise OSError("exec does not happen in a test")
+
+        patches = [
+            mock.patch.object(uid.libc, "prctl", return_value=0),
+            mock.patch.object(uid.signal, "pthread_sigmask",
+                              side_effect=lambda how, mask: did.sigmask(how, set(mask))),
+            mock.patch.object(uid.signal, "signal",
+                              side_effect=lambda sig, handler: did.handle(sig)),
+            mock.patch.object(uid.signal, "set_wakeup_fd",
+                              side_effect=lambda fd: did.set_wakeup_fd(fd)),
+            mock.patch.object(uid.select, "select", side_effect=selecting),
+            mock.patch.object(uid.os, "getpid", return_value=4242),
+            mock.patch.object(uid.os, "getppid", return_value=4242),
+            mock.patch.object(uid.os, "fork", side_effect=forks),
+            mock.patch.object(uid.os, "open", return_value=11),
+            mock.patch.object(uid.os, "pipe", side_effect=[(9, 10), (13, 14), (15, 16)]),
+            mock.patch.object(uid.os, "read", side_effect=reading),
+            mock.patch.object(uid.os, "waitpid", return_value=(ended, 0)),
+            mock.patch.object(uid.os, "dup2",
+                              side_effect=lambda a, b: dup2.append((a, b))),
+            mock.patch.object(uid.os, "close",
+                              side_effect=lambda fd: closed.append(fd)),
+            mock.patch.object(uid.os, "set_blocking",
+                              side_effect=lambda fd, blocking: did.set_blocking(fd, blocking)),
+            mock.patch.object(uid.os, "write", side_effect=write),
+            mock.patch.object(uid.os, "execv", side_effect=execv),
+            mock.patch.object(uid, "close_others",
+                              side_effect=lambda keep: did.close_others(keep)),
+            mock.patch.object(uid, "reset_exec_signals"),
+            mock.patch.object(uid, "reap_child",
+                              side_effect=lambda pid: did.reap_child(pid)),
+            mock.patch.object(uid.os, "_exit", side_effect=SystemExit),
+        ]
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(SystemExit):
+                uid.managed_network(self.net)
+        did.dup2, did.closed = dup2, closed
+        return did
+
+    ENDS = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGCHLD}
+
+    def test_pasta_writes_its_stderr_to_a_pipe_of_the_keepers(self):
+        did = self.drive([0, 0], {9: [b"1"]})
+        self.assertIn((11, 0), did.dup2)      # stdin and stdout: /dev/null
+        self.assertIn((11, 1), did.dup2)
+        self.assertIn((14, 2), did.dup2)      # stderr: the pipe, not the terminal
+        self.assertIn(13, did.closed)         # its read end is not pasta's
+        did.close_others.assert_called_with([9, 13, 14])   # the pipe survives it
+        argv = did.execv.call_args.args[1]
+        self.assertEqual(argv, [
+            "/x/pasta", "--quiet", "--foreground", "--config-net", "--netns-only",
+            "--netns", "/proc/4242/ns/net", "--no-netns-quit",
+            "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+            "--map-host-loopback", "none", "--map-guest-addr", "none",
+            "--dns-forward", "10.0.2.3", "--ns-mac-addr", "52:54:00:12:34:56",
+            "-4"])
+
+    def test_the_keeper_relays_pasta_stderr_and_ends_it_on_a_signal(self):
+        did = self.drive([0, 777], {9: [b"1"], 13: [b"pasta speaks\n", b""],
+                                    15: [bytes([signal.SIGTERM])]},
+                         ready=[[13], [15]])
+        self.assertIn(14, did.closed)         # the keeper keeps no write end
+        for fd in (13, 15, 16):
+            did.set_blocking.assert_any_call(fd, False)
+        did.set_wakeup_fd.assert_called_once_with(16)
+        self.assertEqual({c.args[0] for c in did.handle.call_args_list}, self.ENDS)
+        did.sigmask.assert_called_with(signal.SIG_UNBLOCK, self.ENDS)
+        # pasta's pipe is watched until it ends, the signals' throughout.
+        self.assertEqual([c.args for c in did.select.call_args_list],
+                         [([15, 13],), ([15],)])
+        did.write.assert_called_once_with(2, b"pasta speaks\n")
+        did.reap_child.assert_called_once_with(777)
+
+    def test_the_keeper_waits_without_a_timer(self):
+        did = self.drive([0, 777], {9: [b"1"], 15: [bytes([signal.SIGHUP])]},
+                         ready=[[15]])
+        for call in did.select.call_args_list:
+            self.assertEqual(len(call.args), 1, "select() was given a timeout")
+        did.reap_child.assert_called_once_with(777)
+
+    def test_what_an_ended_pasta_said_last_is_still_relayed(self):
+        did = self.drive([0, 777], {9: [b"1"], 13: [b"cannot open tap\n", b""],
+                                    15: [bytes([signal.SIGCHLD])]},
+                         ready=[[15]], ended=777)
+        did.write.assert_called_once_with(2, b"cannot open tap\n")
+        did.reap_child.assert_not_called()
+
+    def test_the_relay_keeps_the_keeper_when_its_own_stderr_is_gone(self):
+        error = OSError(errno.EBADF, os.strerror(errno.EBADF))
+        did = self.drive([0, 777], {9: [b"1"], 13: [b"pasta speaks\n", b""],
+                                    15: [bytes([signal.SIGTERM])]},
+                         ready=[[13], [15]], write_errors=[error])
+        did.reap_child.assert_called_once_with(777)
+
+    def test_a_drain_that_finds_nothing_waits_for_the_next_round(self):
+        did = self.drive([0, 777], {9: [b"1"], 13: [BlockingIOError()],
+                                    15: [bytes([signal.SIGTERM])]},
+                         ready=[[13], [15]])
+        did.write.assert_not_called()
+        did.reap_child.assert_called_once_with(777)
+
+    def test_a_child_signal_for_a_living_pasta_only_keeps_waiting(self):
+        did = self.drive([0, 777], {9: [b"1"], 15: [bytes([signal.SIGCHLD]),
+                                                    bytes([signal.SIGTERM])]},
+                         ready=[[15], [15]])
+        did.write.assert_not_called()
+        did.reap_child.assert_called_once_with(777)
 
 def regrouped(paths, gid):
     """os.stat and os.lstat, with PATHS reported as belonging to GID: no
@@ -904,12 +1087,14 @@ class CaptureTests(unittest.TestCase):
         (cap / "overlay" / "rw/.wh.gone").write_text("")
         (cap / "overlay" / "rw/gone").write_text("kept")
         with mock.patch.object(uid.os, "mknod") as mknod, \
-             mock.patch.object(uid, "fail", side_effect=RuntimeError):
-            with self.assertRaises(RuntimeError):
-                uid.managed_adopt(str(cap))
+             mock.patch.object(uid.sys, "stderr") as stderr:
+            uid.managed_adopt(str(cap))
         mknod.assert_not_called()
         self.assertTrue((cap / "overlay" / "rw/.wh.gone").is_file())
         self.assertEqual((cap / "overlay" / "rw/gone").read_text(), "kept")
+        text = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn(f"sandbox-uid: warning: {cap / 'overlay' / 'rw/.wh.gone'} "
+                      "is no whiteout", text)
 
     def test_a_folder_it_cannot_read_stops_adoption_with_a_message(self):
         if os.getuid() == 0:
@@ -951,6 +1136,20 @@ class CaptureTests(unittest.TestCase):
             uid.main()
         forget.assert_not_called()
         self.assertIn("its ACL entries stay", "".join(c.args[0] for c in stderr.write.call_args_list))
+
+    def test_forget_reports_a_write_it_cannot_make(self):
+        cap = self.base / "cap"
+        cap.mkdir()
+        user = 123456
+        _, getxattr, _ = self.fake_acls(user)
+        error = OSError(errno.EPERM, os.strerror(errno.EPERM))
+        with getxattr, \
+             mock.patch.object(uid.os, "setxattr", side_effect=error), \
+             mock.patch.object(uid, "fail", side_effect=RuntimeError) as fail:
+            with self.assertRaises(RuntimeError):
+                uid.forget(str(cap), user)
+        self.assertIn("could not write", fail.call_args.args[0])
+        self.assertIn(str(cap), fail.call_args.args[0])
 
     def fake_acls(self, user):
         data = uid.acl_pack({(uid.ACL_USER_OBJ, uid.NO_ID): 7,

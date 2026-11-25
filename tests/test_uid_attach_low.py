@@ -3,10 +3,13 @@
 import ast
 import errno
 import importlib.util
+from contextlib import ExitStack
 from importlib.machinery import SourceFileLoader
 import io
+import json
 import os
 from pathlib import Path
+import resource
 import signal
 import stat
 import subprocess
@@ -117,6 +120,27 @@ with open(sys.argv[2], "w") as marker:
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(marker.read_text(), "ok")
 
+    def test_the_occupied_descriptors_survive_an_exec(self):
+        script = r"""
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("sandbox_uid_stdio", sys.argv[1])
+module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(module)
+for fd in (0, 1, 2):
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+module.occupy_stdio()
+os.execv(sys.executable, [sys.executable, "-c",
+                          "import os; os.fstat(1); os.fstat(2)"])
+"""
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(ROOT / "sandbox-uid")],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 class ExecBwrapTests(unittest.TestCase):
     def test_a_bare_bwrap_is_found_on_path_and_started_with_no_environment(self):
@@ -147,8 +171,53 @@ class ExecBwrapTests(unittest.TestCase):
 
 class OptionScanTests(unittest.TestCase):
     def test_unshare_all_after_bwraps_terminator_is_a_command_argument(self):
-        self.assertIsNone(UID.option_index(["--", "--unshare-all"], "--unshare-all"))
-        self.assertEqual(UID.option_index(["--unshare-all", "--"], "--unshare-all"), 0)
+        self.assertIsNone(UID.option_index(["bwrap", "--", "--unshare-all"], "--unshare-all"))
+        self.assertEqual(UID.option_index(["bwrap", "--unshare-all", "--"], "--unshare-all"), 1)
+
+    def test_an_options_value_is_not_taken_for_the_option(self):
+        # The value of --setenv is not bwrap's --unshare-all.
+        argv = ["bwrap", "--setenv", "KEY", "--unshare-all", "game"]
+        self.assertIsNone(UID.option_index(argv, "--unshare-all"))
+        argv = ["bwrap", "--setenv", "KEY", "--unshare-all", "--unshare-all", "game"]
+        self.assertEqual(UID.option_index(argv, "--unshare-all"), 4)
+        argv = ["bwrap", "--bind", "/x", "/y", "--unshare-all", "game"]
+        self.assertEqual(UID.option_index(argv, "--unshare-all"), 4)
+
+    def test_a_command_argument_is_not_bwraps_option(self):
+        self.assertIsNone(UID.option_index(["bwrap", "game", "--unshare-all"],
+                                           "--unshare-all"))
+
+
+class InsideLaunchTests(unittest.TestCase):
+    def test_a_bare_bwrap_is_resolved_before_the_working_folder_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            bwrap = bindir / "bwrap"
+            bwrap.write_text("#!/bin/sh\n")
+            bwrap.chmod(0o755)
+            cap = Path(tmp) / "cap"
+            cap.mkdir()
+            lay = {"outer_uid": 123450, "outer_gid": 123450, "user": "me"}
+            with mock.patch.dict(os.environ,
+                                 {"SANDBOX_UID_LAYOUT": json.dumps(lay),
+                                  "PATH": str(bindir)}), \
+                    mock.patch.object(UID, "own"), \
+                    mock.patch.object(UID, "stage") as staged, \
+                    mock.patch.object(UID, "as_user", return_value=[]), \
+                    mock.patch.object(UID, "keep_shared"), \
+                    mock.patch.object(UID.os, "setgroups"), \
+                    mock.patch.object(UID.os, "setgid"), \
+                    mock.patch.object(UID.os, "setuid"), \
+                    mock.patch.object(UID, "relay_output"), \
+                    mock.patch.object(UID, "exec_bwrap") as exec_bwrap:
+                self.addCleanup(os.chdir, os.getcwd())
+                current = os.umask(0o022)
+                os.umask(current)
+                self.addCleanup(os.umask, current)
+                UID.inside_launch(str(cap), ["bwrap"])
+            exec_bwrap.assert_called_once_with(["bwrap"], str(bwrap))
+            self.assertIn(str(bwrap), staged.call_args.args[0])
 
 
 class RelayOutputTests(unittest.TestCase):
@@ -228,6 +297,109 @@ class ReapChildTests(unittest.TestCase):
         self.assertEqual(kill.call_args_list, [
             mock.call(123, signal.SIGTERM), mock.call(123, signal.SIGKILL)])
         self.assertLess(clock.now, 1)
+
+
+class WatchFdTests(unittest.TestCase):
+    """The watcher's walk, and what it says when descriptors run out."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.rw = Path(tmp.name)
+        for name in ("a", "b"):
+            (self.rw / name).mkdir()
+
+    def test_a_folder_open_that_finds_no_descriptor_free_is_reported(self):
+        fd = os.open(self.rw, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        dev = os.fstat(fd).st_dev
+        for err, calls in ((errno.EMFILE, 2), (errno.ENFILE, 2),
+                           (errno.EACCES, 0)):
+            with self.subTest(err=err):
+                reported = mock.Mock()
+                dirs = {}
+                with mock.patch.object(UID.libc, "inotify_add_watch",
+                                       return_value=1), \
+                        mock.patch.object(UID.os, "open",
+                                          side_effect=OSError(err, os.strerror(err))):
+                    UID.watch_fd(5, 0, dirs, os.dup(fd), os.getuid(), False,
+                                 dev, reported)
+                os.close(dirs[1][0])
+                self.assertEqual(reported.call_count, calls)
+
+
+class KeepSharedTests(unittest.TestCase):
+    """The watcher beside the game: its descriptor limit, and what the
+    waiting launcher is told."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.rw = Path(tmp.name) / "rw"
+        self.rw.mkdir()
+
+    def child_half(self, walker):
+        """The forked half of keep_shared(), mocked as far as its loop."""
+        written = []
+        hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+        patches = [
+            mock.patch.object(UID.os, "getpid", return_value=4242),
+            mock.patch.object(UID.os, "pipe", return_value=(9, 10)),
+            mock.patch.object(UID.os, "fork", return_value=0),
+            mock.patch.object(UID.os, "open", return_value=11),
+            mock.patch.object(UID.os, "dup", return_value=13),
+            mock.patch.object(UID.os, "dup2"),
+            mock.patch.object(UID, "close_others"),
+            mock.patch.object(UID, "unshare"),
+            mock.patch.object(UID.libc, "prctl", return_value=0),
+            mock.patch.object(UID.os, "setgroups"),
+            mock.patch.object(UID.os, "setgid"),
+            mock.patch.object(UID.os, "setuid"),
+            mock.patch.object(UID.os, "getppid", return_value=4242),
+            mock.patch.object(UID.libc, "inotify_init1", return_value=12),
+            mock.patch.object(UID.os, "fstat",
+                              return_value=type("Stat", (), {"st_dev": 1})()),
+            mock.patch.object(UID.os, "write",
+                              side_effect=lambda fd, data: written.append((fd, data))),
+            mock.patch.object(UID.os, "close"),
+            mock.patch.object(UID.os, "read", side_effect=KeyboardInterrupt),
+            mock.patch.object(UID.os, "_exit", side_effect=SystemExit),
+        ]
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            limited = stack.enter_context(
+                mock.patch.object(UID.resource, "setrlimit"))
+            walked = stack.enter_context(mock.patch.object(UID, "watch_fd",
+                                                           side_effect=walker))
+            with self.assertRaises(SystemExit):
+                UID.keep_shared(str(self.rw), 1000, 1000)
+        return limited, walked, written, hard
+
+    def test_the_watcher_takes_the_hard_descriptor_limit_and_says_it_watches(self):
+        limited, walked, written, hard = self.child_half(lambda *args: None)
+        limited.assert_called_once_with(resource.RLIMIT_NOFILE, (hard, hard))
+        self.assertTrue(callable(walked.call_args.args[-1]))
+        self.assertEqual(written, [(10, b"1")])
+
+    def test_a_walk_out_of_descriptors_is_told_to_the_waiting_launcher(self):
+        def out_of_fds(*args):
+            args[-1]()
+        limited, walked, written, hard = self.child_half(out_of_fds)
+        limited.assert_called_once_with(resource.RLIMIT_NOFILE, (hard, hard))
+        self.assertEqual(written, [(10, b"!")])
+
+    def test_the_launcher_warns_only_of_a_walk_out_of_descriptors(self):
+        for byte, warns in ((b"!", True), (b"1", False)):
+            with self.subTest(byte=byte):
+                stderr = io.StringIO()
+                with mock.patch.object(UID.os, "fork", return_value=4242), \
+                        mock.patch.object(UID.os, "pipe", return_value=(9, 10)), \
+                        mock.patch.object(UID.os, "read", return_value=byte), \
+                        mock.patch.object(UID.os, "close"), \
+                        mock.patch.object(UID.sys, "stderr", new=stderr):
+                    UID.keep_shared(str(self.rw), 1000, 1000)
+                self.assertEqual("sandbox-uid: warning:" in stderr.getvalue(), warns)
 
 
 class AttachNameTests(unittest.TestCase):
