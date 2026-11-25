@@ -1,4 +1,4 @@
-module sandbox_pasta 1.1;
+module sandbox_pasta 1.2;
 
 # A domain for the pasta that connects a sandbox to the internet under --net:
 # sandbox-game's copy of it, named after the game (see "network" in
@@ -100,10 +100,13 @@ allow sandbox_pasta_t sandbox_pasta_exec_t:file { read open getattr map execute 
 
 # What it inherits: the launcher's output, a terminal or the game's log,
 # written to but never opened -- so no other file of the user's. The parent
-# hears it exit.
+# hears it exit. A terminal is opened read-write because that is how it is
+# inherited, but only writes and safe read-only queries are allowed: no
+# keystroke reads, TIOCSTI or TIOCLINUX input injection.
 allow sandbox_pasta_t unconfined_t:fd use;
 allow sandbox_pasta_t unconfined_t:fifo_file { getattr read write append ioctl lock };
-allow sandbox_pasta_t { user_tty_device_t user_devpts_t }:chr_file { getattr read write append ioctl lock };
+allow sandbox_pasta_t { user_tty_device_t user_devpts_t }:chr_file { getattr write append ioctl lock };
+allowxperm sandbox_pasta_t { user_tty_device_t user_devpts_t }:chr_file ioctl { 0x5401 0x5413 0x542a };
 allow sandbox_pasta_t { user_home_type user_tmp_type }:file { getattr write append ioctl lock };
 allow sandbox_pasta_t unconfined_t:process sigchld;
 

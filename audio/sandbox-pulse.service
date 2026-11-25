@@ -13,6 +13,8 @@ ExecStartPre=/usr/bin/chmod 0700 %t/sandbox-pulse
 ExecStart=/usr/bin/pipewire -c sandbox-pulse.conf
 Restart=on-failure
 Slice=session.slice
+MemoryMax=128M
+TasksMax=64
 
 [Install]
 WantedBy=default.target

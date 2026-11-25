@@ -1,5 +1,6 @@
 #!/usr/bin/env -S python3 -I
 """Root-only lifecycle/adversarial tests, intended for an isolated test VM."""
+import errno
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
@@ -10,6 +11,7 @@ import stat
 import sys
 import tempfile
 import traceback
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -21,6 +23,38 @@ sys.modules[spec.name] = helper
 loader.exec_module(helper)
 
 UID = 1000
+
+
+class ActivationStateTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="sandbox-render-state-")
+        self.addCleanup(self.temporary.cleanup)
+        self.state = os.open(self.temporary.name, helper.DIRECTORY)
+        self.addCleanup(os.close, self.state)
+
+    def marker(self, size):
+        return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0,
+                               st_nlink=1, st_size=size)
+
+    def test_activation_state_writes_in_place_without_truncating_first(self):
+        with mock.patch.object(helper.os, "fstat", return_value=self.marker(2)), \
+             mock.patch.object(helper, "read_root_file", return_value=b"1\n"), \
+             mock.patch.object(helper.os, "ftruncate") as truncate, \
+             mock.patch.object(helper.os, "pwrite", wraps=os.pwrite) as pwrite:
+            self.assertTrue(helper.activation_state(self.state, "enable"))
+        pwrite.assert_called_once()
+        self.assertEqual(pwrite.call_args.args[1:], (b"1\n", 0))
+        truncate.assert_not_called()
+
+    def test_activation_state_truncates_an_oversized_marker_after_writing(self):
+        with mock.patch.object(helper.os, "fstat", return_value=self.marker(10)), \
+             mock.patch.object(helper, "read_root_file", return_value=b"0\n"), \
+             mock.patch.object(helper.os, "ftruncate", wraps=os.ftruncate) as truncate, \
+             mock.patch.object(helper.os, "pwrite", wraps=os.pwrite) as pwrite:
+            self.assertFalse(helper.activation_state(self.state, "disable"))
+        pwrite.assert_called_once()
+        self.assertEqual(pwrite.call_args.args[1:], (b"0\n", 0))
+        truncate.assert_called_once_with(pwrite.call_args.args[0], 2)
 
 
 @unittest.skipUnless(os.geteuid() == 0, "requires root in the test VM for synthetic device inodes")
@@ -337,6 +371,28 @@ class RenderLifecycle(unittest.TestCase):
         self.revoked(old)
         self.assertNotEqual(os.fstat(old).st_ino, self.alias.stat().st_ino)
         self.assert_private_identity()
+
+    def test_failed_creation_removes_partial_private_objects(self):
+        objects = self.paths.state / ".objects"
+        objects.mkdir(parents=True, mode=0o700)
+        fd = os.open(objects, helper.DIRECTORY)
+        self.addCleanup(os.close, fd)
+        source = helper.device(self.paths, "renderD128")
+        metadata = self.private.with_name(self.private.name + ".json")
+        for failure in ("permissions", "metadata"):
+            with self.subTest(failure=failure):
+                if failure == "permissions":
+                    patch = mock.patch.object(
+                        helper, "inode_permissions",
+                        side_effect=OSError(errno.EDQUOT, "quota exceeded"))
+                else:
+                    patch = mock.patch.object(
+                        helper.os, "write",
+                        side_effect=OSError(errno.ENOSPC, "no space"))
+                with patch, self.assertRaises(OSError):
+                    helper.create(self.paths, fd, self.private.name, UID, source)
+                self.assertFalse(self.private.exists(), failure)
+                self.assertFalse(metadata.exists(), failure)
 
     def test_orphan_metadata_does_not_prevent_recreation(self):
         self.reconcile()

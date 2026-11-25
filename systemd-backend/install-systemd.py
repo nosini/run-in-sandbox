@@ -218,6 +218,11 @@ def install(values):
             run('checkmodule', '-M', '-m', '-o', mod, str(SOURCE / f'{MODULE}.te'))
             run('semodule_package', '-o', pp, '-m', mod)
             run('semodule', '-i', pp)
+        # Persist an updated flag only after the module is actually loaded, so
+        # uninstall() knows it has a module to remove.
+        if not state.get('selinux'):
+            state['selinux'] = True
+            write(STATE, (json.dumps(state, indent=2) + '\n').encode())
     write(HELPER, (SOURCE / 'systemd-render-devices').read_bytes(), 0o755)
     write(RULE, (SOURCE / 'systemd-render-devices.rules').read_bytes())
     for name in (RENDER, MOUNT):
@@ -267,8 +272,14 @@ def uninstall():
             run('systemctl', 'disable', '--now', socket)
     # Stop idle managers before removing their additional SELinux permissions.
     run('systemctl', 'stop', *SERVICES)
-    if state['selinux'] and any(line.split()[0] == MODULE for line in output('semodule', '-l').splitlines()):
-        run('semodule', '-r', MODULE)
+    if state.get('selinux'):
+        if Path('/sys/fs/selinux/enforce').exists() and shutil.which('semodule'):
+            modules = output('semodule', '-l').splitlines()
+            if any(line.split()[0] == MODULE for line in modules):
+                run('semodule', '-r', MODULE)
+        else:
+            print(f'warning: the {MODULE} policy module could not be removed '
+                  'automatically while SELinux is disabled', file=sys.stderr)
     for path in FILES:
         path.unlink(missing_ok=True)
     STATE.unlink()

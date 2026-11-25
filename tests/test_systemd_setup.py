@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -1388,6 +1389,47 @@ class AdministratorLayoutTests(unittest.TestCase):
         self.wanted.parent.mkdir(parents=True, exist_ok=True)
         self.wanted.symlink_to('/usr/local/lib/systemd/system/' + setup.RENDER)
 
+    def selinux(self, enabled):
+        original = Path.exists
+
+        def exists(path):
+            if str(path) == '/sys/fs/selinux/enforce':
+                return enabled
+            return original(path)
+        return mock.patch.object(Path, 'exists', exists)
+
+    def test_reinstall_enabling_selinux_records_and_removes_the_module(self):
+        self.old_install()
+        sockets = json.loads(setup.STATE.read_text())['sockets_enabled']
+        with self.selinux(True):
+            setup.install(['1000'])
+        state = json.loads(setup.STATE.read_text())
+        self.assertTrue(state['selinux'])
+        self.assertEqual(state['sockets_enabled'], sockets)
+        self.commands.assert_any_call('semodule', '-i', mock.ANY)
+        self.commands.reset_mock()
+        with self.selinux(True), \
+             mock.patch.object(setup, 'output',
+                               return_value=f'{setup.MODULE} 1.1'):
+            setup.uninstall()
+        self.commands.assert_any_call('semodule', '-r', setup.MODULE)
+        self.assertFalse(setup.STATE.exists())
+
+    def test_uninstall_warns_when_the_recorded_module_cannot_be_removed(self):
+        self.old_install()
+        state = json.loads(setup.STATE.read_text())
+        state['selinux'] = True
+        setup.STATE.write_text(json.dumps(state))
+        stderr = io.StringIO()
+        with self.selinux(False), mock.patch.object(setup.sys, 'stderr', stderr):
+            setup.uninstall()
+        self.assertFalse(setup.STATE.exists())
+        self.assertEqual([call for call in self.commands.call_args_list
+                          if call.args and call.args[0] == 'semodule'], [])
+        self.assertIn('could not be removed automatically',
+                      stderr.getvalue())
+        self.assertIn('SELinux is disabled', stderr.getvalue())
+
     def test_update_moves_old_units_and_enablement_then_uninstalls(self):
         self.old_install()
         setup.install(['1000'])
@@ -1431,3 +1473,91 @@ class AdministratorLayoutTests(unittest.TestCase):
                                 text=True, capture_output=True)
         for name in (setup.RENDER, setup.MOUNT, 'usr-local.mount'):
             self.assertIn(f'{name}: Installed new job {name}/start', result.stderr, result.stderr)
+
+
+class RenderDevicePolicyTests(unittest.TestCase):
+    def test_render_mount_sets_per_user_tmpfs_quotas(self):
+        text = (ROOT / 'systemd-backend/run-sandboxgame-render.mount').read_text()
+        options = next(line.partition('=')[2] for line in text.splitlines()
+                       if line.startswith('Options=')).split(',')
+        self.assertIn('usrquota', options)
+        self.assertIn('usrquota_block_hardlimit=64k', options)
+        self.assertIn('usrquota_inode_hardlimit=64', options)
+
+    def test_activation_state_rewrites_without_truncating_to_zero(self):
+        helper = load('setup_test_render_helper',
+                      ROOT / 'systemd-backend/systemd-render-devices')
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.open(tmp, helper.DIRECTORY)
+            self.addCleanup(os.close, state)
+            marker = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0,
+                                     st_nlink=1, st_size=2)
+            with mock.patch.object(helper.os, 'fstat', return_value=marker), \
+                 mock.patch.object(helper, 'read_root_file', return_value=b'1\n'), \
+                 mock.patch.object(helper.os, 'ftruncate') as truncate, \
+                 mock.patch.object(helper.os, 'pwrite', wraps=os.pwrite) as pwrite:
+                self.assertTrue(helper.activation_state(state, 'enable'))
+            pwrite.assert_called_once()
+            self.assertEqual(pwrite.call_args.args[1:], (b'1\n', 0))
+            truncate.assert_not_called()
+
+
+class SandboxPolicyTests(unittest.TestCase):
+    def test_systemd_policy_covers_home_directory_and_var_run(self):
+        text = (ROOT / 'systemd-backend/sandbox_game_systemd.te').read_text()
+        self.assertIn('module sandbox_game_systemd 1.1;', text)
+        self.assertIn('type user_home_dir_t;', text)
+        self.assertIn('type var_run_t;', text)
+        lines = text.splitlines()
+        mount_allow = next(line for line in lines
+                           if line.startswith('allow systemd_mountfsd_t {')
+                           and ':dir { getattr ioctl };' in line)
+        ns_allow = next(line for line in lines
+                        if line.startswith('allow systemd_nsresourced_t {')
+                        and ':dir { getattr ioctl };' in line)
+        mount_xperm = next(line for line in lines
+                           if line.startswith('allowxperm systemd_mountfsd_t {')
+                           and ':dir ioctl 0x6601;' in line)
+        ns_xperm = next(line for line in lines
+                        if line.startswith('allowxperm systemd_nsresourced_t {')
+                        and ':dir ioctl 0x6601;' in line)
+        for rule in (mount_allow, ns_allow, mount_xperm, ns_xperm):
+            self.assertIn('user_home_dir_t', rule)
+        for rule in (mount_allow, mount_xperm):
+            self.assertIn('var_run_t', rule)
+        for rule in (ns_allow, ns_xperm):
+            self.assertNotIn('var_run_t', rule)
+
+    def test_pasta_tty_rules_forbid_reading_and_dangerous_ioctls(self):
+        text = (ROOT / 'selinux/sandbox_pasta.te').read_text()
+        self.assertIn('module sandbox_pasta 1.2;', text)
+        lines = text.splitlines()
+        allow = next(line for line in lines
+                     if line.startswith(
+                         'allow sandbox_pasta_t { user_tty_device_t user_devpts_t }'
+                         ':chr_file'))
+        xperm = next(line for line in lines
+                     if line.startswith(
+                         'allowxperm sandbox_pasta_t { user_tty_device_t user_devpts_t }'
+                         ':chr_file ioctl'))
+        self.assertNotIn('read', allow)
+        for query in ('0x5401', '0x5413', '0x542a'):
+            self.assertIn(query, xperm)
+        self.assertNotIn('0x5412', text)
+        self.assertNotIn('0x541c', text)
+
+
+class AudioPolicyTests(unittest.TestCase):
+    def test_sandbox_pulse_disables_sample_cache_and_bounds_resources(self):
+        text = (ROOT / 'audio/sandbox-pulse.conf').read_text()
+        properties = re.search(r'^pulse\.properties\s*=\s*\{.*?^\}', text,
+                               re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(properties)
+        self.assertIn('pulse.max-sample-cache = 0', properties.group(0))
+        service = (ROOT / 'audio/sandbox-pulse.service').read_text()
+        section = re.search(r'^\[Service\]\s*$(.*?)^\[', service,
+                            re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(section)
+        body = section.group(1).splitlines()
+        self.assertTrue(any(line.startswith('MemoryMax=') for line in body))
+        self.assertTrue(any(line.startswith('TasksMax=') for line in body))

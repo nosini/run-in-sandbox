@@ -286,22 +286,35 @@ def create(paths, objects, key, uid, source):
     except FileNotFoundError:
         pass
     os.mknod(key, stat.S_IFCHR, source["rdev"], dir_fd=objects)
-    fd = os.open(key, PATH_ONLY, dir_fd=objects)
     try:
-        if source["label"] is not None:
-            os.setxattr(str(paths.state / ".objects" / key), "security.selinux",
-                        bytes.fromhex(source["label"]), follow_symlinks=False)
-        inode_permissions(fd, uid, 0o600)
-        metadata = {"source": source, "inode": os.fstat(fd).st_ino}
-        data = (json.dumps(metadata, sort_keys=True) + "\n").encode()
-        meta = os.open(key + ".json", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                       os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=objects)
+        fd = os.open(key, PATH_ONLY, dir_fd=objects)
         try:
-            os.write(meta, data)
+            if source["label"] is not None:
+                os.setxattr(str(paths.state / ".objects" / key), "security.selinux",
+                            bytes.fromhex(source["label"]), follow_symlinks=False)
+            inode_permissions(fd, uid, 0o600)
+            metadata = {"source": source, "inode": os.fstat(fd).st_ino}
+            data = (json.dumps(metadata, sort_keys=True) + "\n").encode()
+            meta = os.open(key + ".json", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                           os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=objects)
+            try:
+                os.write(meta, data)
+            finally:
+                os.close(meta)
         finally:
-            os.close(meta)
-    finally:
-        os.close(fd)
+            os.close(fd)
+    except BaseException:
+        # A failed creation must not leave a root-owned node or metadata behind
+        # for a later reconciliation to mistake for a complete object.
+        try:
+            os.unlink(key + ".json", dir_fd=objects)
+        except FileNotFoundError:
+            pass
+        try:
+            os.unlink(key, dir_fd=objects)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def activation_state(state, action):
@@ -313,8 +326,14 @@ def activation_state(state, action):
             st = os.fstat(fd)
             require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1
                     and not st.st_mode & 0o022, "unsafe activation marker")
-            os.ftruncate(fd, 0)
-            os.write(fd, b"1\n" if action == "enable" else b"0\n")
+            payload = b"1\n" if action == "enable" else b"0\n"
+            written = 0
+            while written < len(payload):
+                count = os.pwrite(fd, payload[written:], written)
+                require(count > 0, "short activation-marker write")
+                written += count
+            if st.st_size > len(payload):
+                os.ftruncate(fd, len(payload))
         finally:
             os.close(fd)
     try:
