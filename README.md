@@ -739,7 +739,11 @@ stands for. For a game that
 is the defaults' value; for the defaults it is the built-in one. Choosing it
 removes the setting from the file being saved, so it follows later changes to
 the defaults. A dropdown the game's file has no value for starts on Default;
-any other choice is saved, even one equal to the defaults. The resolution and
+any other choice is saved, even one equal to the defaults. Each scope keeps
+its own dropdown choices: switching **Save for** shows the other scope's
+settings, and switching back restores the first. A choice left on Default
+stays on Default for its own scope, while the defaults show any value their
+file already holds. The resolution and
 fullscreen switch share `gamescope_args`: with a Default resolution and a
 fullscreen choice different from the defaults', the game's file keeps the
 defaults' resolution too. With the defaults, **None** and **No override**

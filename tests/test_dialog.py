@@ -64,6 +64,65 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.result()["separate_uid"], "systemd")
         self.assertEqual(state.result()["seccomp"], "log")
 
+    def test_each_scope_keeps_its_network_and_hosts_settings(self):
+        game = {"net": "1", "lan": "1", "lan_allow": "10.0.50.105:443", "mac_vendor": "1",
+                "private_hosts": "1", "hosts": "10.0.50.105 a.example", "hosts_writable": "1",
+                "mangohud": "1", "hdr": "1"}
+        defaults = {"net": "0", "lan": "0", "lan_allow": "", "mac_vendor": "0",
+                    "private_hosts": "0", "hosts": "", "hosts_writable": "0",
+                    "mangohud": "0", "hdr": "0"}
+        state = Preferences({"engine": "native", "values": {**defaults, **game},
+                             "security": {"game": game, "all": defaults}})
+        saved = state.result()
+        self.assertEqual((saved["net"], saved["lan"], saved["mac_vendor"], saved["private_hosts"],
+                          saved["hosts_writable"], saved["mangohud"], saved["hdr"]),
+                         ("1", "1", "1", "1", "1", "1", "1"))
+        self.assertEqual(saved["hosts"], "10.0.50.105 a.example")
+        state.set_scope("all")
+        saved = state.result()
+        # The defaults file holds none of the game's relaxations.
+        self.assertEqual((saved["net"], saved["private_hosts"], saved["mangohud"], saved["hdr"]),
+                         ("0", "0", "0", "0"))
+        for key in ("lan", "lan_allow", "mac_vendor", "hosts", "hosts_writable"):
+            self.assertNotIn(key, saved)
+        state.set_scope("game")
+        saved = state.result()
+        self.assertEqual((saved["net"], saved["lan"], saved["mac_vendor"], saved["private_hosts"],
+                          saved["hosts"], saved["hosts_writable"]),
+                         ("1", "1", "1", "1", "10.0.50.105 a.example", "1"))
+        # With the LAN left to a few addresses, the list is its own setting.
+        state.values["lan"] = "0"
+        self.assertEqual(state.result()["lan_allow"], "10.0.50.105:443")
+        state.set_scope("all")
+        self.assertNotIn("lan_allow", state.result())
+        state.values["net"] = "1"
+        self.assertEqual(state.result()["lan_allow"], "")
+        state.set_scope("game")
+        self.assertEqual(state.result()["lan_allow"], "10.0.50.105:443")
+
+    def test_each_scope_keeps_its_proton_settings_and_x11_executable(self):
+        game = {"wayland": "1", "wayland_x11": "1", "mod_loaders": "1", "steam": "1",
+                "hide_tray": "1", "x11_exe": "GameLauncher.exe"}
+        defaults = {"wayland": "1", "wayland_x11": "1", "mod_loaders": "0", "steam": "0",
+                    "hide_tray": "0", "x11_exe": "DefaultLauncher.exe"}
+        state = Preferences({"engine": "proton", "values": {**defaults, **game},
+                             "security": {"game": game, "all": defaults}})
+        saved = state.result()
+        self.assertEqual((saved["mod_loaders"], saved["steam"], saved["hide_tray"], saved["x11_exe"]),
+                         ("1", "1", "1", "GameLauncher.exe"))
+        state.set_scope("all")
+        saved = state.result()
+        self.assertEqual((saved["mod_loaders"], saved["steam"], saved["hide_tray"], saved["x11_exe"]),
+                         ("0", "0", "0", "DefaultLauncher.exe"))
+        # Edits in one scope stay there while the other is shown.
+        state.values["steam"] = "1"
+        state.set_scope("game")
+        state.values["steam"] = "0"
+        state.set_scope("all")
+        self.assertEqual(state.result()["steam"], "1")
+        state.set_scope("game")
+        self.assertEqual(state.result()["steam"], "0")
+
     def test_explicit_log_mode_conflicts_with_required_seccomp(self):
         state = Preferences({"security": {"game": {"require": "seccomp", "seccomp": "log"}, "all": {}}})
         self.assertIn("Enforce", state.error())
@@ -192,6 +251,49 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertIsNone(state.choice("display"))
         self.assertEqual(state.result()["inherit"], "display,nwjs")
         self.assertEqual(state.result()["casefold"], "0")
+
+    def test_each_scope_keeps_its_inherited_dropdown_choices(self):
+        game = {"host_x11": "1", "launch_with": "proton", "proton": "GE-Game",
+                "gamescope_args": "-W 1920 -H 1080 -f"}
+        defaults = {"wayland": "0", "launch_with": "auto", "proton": "GE-Default",
+                    "gamescope_args": "-W 1280 -H 720"}
+        state = Preferences({"engine": "proton", "can_proton": True,
+                             "values": {**defaults, **game},
+                             "security": {"game": game, "all": defaults}})
+        self.assertEqual(state.choice("display"), "host-x11")
+        self.assertEqual(state.choice("launch_with"), "proton")
+        self.assertEqual(state.choice("proton"), "GE-Game")
+        self.assertEqual((state.resolution, state.fullscreen), ("1920x1080", True))
+        state.set_scope("all")
+        saved = state.result()
+        self.assertEqual((saved["wayland"], saved["host_x11"]), ("0", "0"))
+        self.assertEqual(saved["launch_with"], "auto")
+        self.assertEqual(saved["proton"], "GE-Default")
+        self.assertEqual((saved["gamescope_resolution"], saved["gamescope_fullscreen"]),
+                         ("1280x720", "0"))
+        state.set_scope("game")
+        saved = state.result()
+        self.assertEqual(saved["host_x11"], "1")
+        self.assertEqual(saved["launch_with"], "proton")
+        self.assertEqual(saved["proton"], "GE-Game")
+        self.assertEqual((state.resolution, state.fullscreen), ("1920x1080", True))
+
+    def test_a_default_dropdown_stays_default_for_each_scope(self):
+        game = {"wayland": "1"}
+        defaults = {"casefold": "0", "webgl": "vulkan"}
+        state = Preferences({"engine": "nwjs", "values": {**defaults, **game},
+                             "security": {"game": game, "all": defaults}})
+        self.assertIsNone(state.choice("casefold"))
+        self.assertIsNone(state.choice("webgl"))
+        self.assertIsNone(state.choice("nwjs"))
+        state.set_scope("all")
+        self.assertEqual(state.choice("casefold"), "0")
+        self.assertEqual(state.choice("webgl"), "vulkan")
+        self.assertIsNone(state.choice("nwjs"))
+        state.set_scope("game")
+        self.assertIsNone(state.choice("casefold"))
+        self.assertIsNone(state.choice("webgl"))
+        self.assertIsNone(state.choice("nwjs"))
 
     def test_nwjs_version_is_saved_for_nwjs_games(self):
         nwjs = Preferences({"engine": "nwjs", "values": {"nwjs": "0.40.0"},
@@ -474,6 +576,64 @@ class GtkDialogTests(unittest.TestCase):
         dialog.save_preferences()
         self.assertEqual(self.responses[0][1]["separate_uid"], "0")
         self.assertEqual(self.responses[0][1]["seccomp_policy"], "")
+
+    def test_scope_switch_shows_each_files_network_settings(self):
+        game = {"net": "1", "lan": "1", "mac_vendor": "1", "private_hosts": "1",
+                "hosts": "10.0.50.105 a.example", "hosts_writable": "1"}
+        defaults = {"net": "0"}
+        dialog = self.create("preferences", {"engine": "native", "values": {**defaults, **game},
+                                             "security": {"game": game, "all": defaults}})
+        self.assertTrue(dialog.widgets["net"].get_active())
+        self.assertTrue(dialog.widgets["lan"].get_active())
+        self.assertTrue(dialog.widgets["private_hosts"].get_active())
+        self.assertTrue(dialog.rows["hosts"].get_visible())
+        dialog.widgets["scope"].set_selected(1)
+        self.assertFalse(dialog.widgets["net"].get_active())
+        self.assertFalse(dialog.widgets["lan"].get_active())
+        self.assertFalse(dialog.widgets["private_hosts"].get_active())
+        self.assertFalse(dialog.rows["lan"].get_visible())
+        self.assertFalse(dialog.rows["hosts"].get_visible())
+        saved = dialog.state.result()
+        self.assertEqual(saved["net"], "0")
+        self.assertNotIn("lan", saved)
+        dialog.widgets["scope"].set_selected(0)
+        self.assertTrue(dialog.widgets["net"].get_active())
+        self.assertTrue(dialog.widgets["lan"].get_active())
+        self.assertTrue(dialog.widgets["private_hosts"].get_active())
+        self.assertTrue(dialog.rows["hosts"].get_visible())
+
+    def test_scope_switch_shows_each_files_inherited_dropdowns(self):
+        game = {"host_x11": "1", "launch_with": "proton", "proton": "GE-Game",
+                "gamescope_args": "-W 1920 -H 1080 -f"}
+        defaults = {"wayland": "0", "launch_with": "auto", "proton": "GE-Default",
+                    "gamescope_args": "-W 1280 -H 720"}
+        dialog = self.create("preferences", {
+            "engine": "proton", "can_proton": True, "values": {**defaults, **game},
+            "security": {"game": game, "all": defaults}})
+        self.assertEqual(dialog.selected("display"), "host-x11")
+        self.assertEqual(dialog.selected("launch_with"), "proton")
+        self.assertEqual(dialog.selected("proton"), "GE-Game")
+        self.assertEqual(dialog.state.resolution, "1920x1080")
+        self.assertTrue(dialog.widgets["fullscreen"].get_active())
+        dialog.widgets["scope"].set_selected(1)
+        self.assertEqual(dialog.selected("display"), "x11")
+        self.assertEqual(dialog.selected("launch_with"), "auto")
+        self.assertEqual(dialog.selected("proton"), "GE-Default")
+        self.assertEqual(dialog.state.resolution, "1280x720")
+        self.assertFalse(dialog.widgets["fullscreen"].get_active())
+        dialog.save_preferences()
+        saved = self.responses[0][1]
+        self.assertEqual((saved["wayland"], saved["host_x11"]), ("0", "0"))
+        self.assertEqual(saved["launch_with"], "auto")
+        self.assertEqual(saved["proton"], "GE-Default")
+        self.assertEqual((saved["gamescope_resolution"], saved["gamescope_fullscreen"]),
+                         ("1280x720", "0"))
+        dialog.widgets["scope"].set_selected(0)
+        self.assertEqual(dialog.selected("display"), "host-x11")
+        self.assertEqual(dialog.selected("launch_with"), "proton")
+        self.assertEqual(dialog.selected("proton"), "GE-Game")
+        self.assertEqual(dialog.state.resolution, "1920x1080")
+        self.assertTrue(dialog.widgets["fullscreen"].get_active())
 
     def test_invalid_security_value_can_be_replaced_by_inherit_in_one_selection(self):
         dialog = self.create("preferences", {"security": {

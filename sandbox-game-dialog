@@ -43,6 +43,29 @@ INHERITED = {
     "resolution": ("gamescope_args",),
 }
 
+# Switches and entries saved as they are, never inherited from the defaults:
+# the property that decides whether the window shows and saves one, or None
+# for the ones always shown. Saving and switching scope both read this list.
+PLAIN = {
+    "net": None,
+    "mangohud": "mangohud_controls",
+    "hdr": "hdr_controls",
+    "mod_loaders": "proton_controls",
+    "steam": "proton_controls",
+    "hide_tray": "proton_controls",
+    "dotnet": "dotnet_controls",
+    "lan": "lan_controls",
+    "mac_vendor": "lan_controls",
+    "lan_allow": "lan_allow_controls",
+    "private_hosts": None,
+    "hosts": "hosts_controls",
+    "hosts_writable": "hosts_controls",
+    "x11_exe": "split_controls",
+}
+
+# The plain settings whose file value is 0 or 1.
+PLAIN_BOOLEAN = tuple(key for key in PLAIN if key not in ("lan_allow", "hosts", "x11_exe"))
+
 
 def display_of(values):
     if values.get("host_x11") == "1":
@@ -221,6 +244,23 @@ def hosts_value(text):
     return ", ".join(" ".join(line.split()) for line in re.split(r"[,\n]", text) if line.strip())
 
 
+def plain_settings(values):
+    """One settings file's plain values, with the built-in value for absent keys."""
+    return {key: ("1" if values.get(key) == "1" else "0") if key in PLAIN_BOOLEAN
+            else values.get(key, "") for key in PLAIN}
+
+
+def plain_value(key, value):
+    """A plain setting as Save writes it."""
+    if key == "lan_allow":
+        return ", ".join(word for word in re.split(r"[\s,]+", value) if word)
+    if key == "hosts":
+        return hosts_value(value)
+    if key == "x11_exe":
+        return value.strip()
+    return value
+
+
 REQUIREMENTS = (
     ("landlock", "Filesystem restrictions (Landlock): the game will not start without them"),
     ("scoped", "Signal and abstract socket scoping (Landlock ABI 6): the game will not start without it"),
@@ -241,11 +281,7 @@ class Preferences:
         self.values = dict(request.get("values", {}))
         for key in ("x11_backend", "proton", "nwjs", "casefold", "webgl", "kawariki", "with_proton"):
             self.values[key] = file_choice(key, self.values)
-        for key in ("net", "mangohud", "hdr", "mod_loaders", "steam", "hide_tray", "dotnet", "lan", "mac_vendor", "private_hosts",
-                    "hosts_writable"):
-            self.values[key] = "1" if self.values.get(key) == "1" else "0"
-        for key in ("lan_allow", "hosts"):
-            self.values[key] = self.values.get(key, "")
+        self.values.update(plain_settings(self.values))
         self.values["require"] = requirements_value(self.values.get("require", ""))
         self.runtime = file_choice("launch_with", self.values)
         self.scope = "all" if self.defaults_only else "game"
@@ -257,7 +293,10 @@ class Preferences:
         scopes = request.get("security", {"all": request.get("values", {})} if self.defaults_only else {})
         self.security_scopes = set(scopes)
         # Each file's own values, by scope: what a Default choice stands for.
+        # A legacy caller sends only merged values, so both scopes start there.
         self.files = {scope: dict(values) for scope, values in scopes.items()}
+        self.plain_values = {"game": {key: self.values[key] for key in PLAIN},
+                             "all": plain_settings(self.files.get("all", self.values))}
         self.security_values = {scope: {key: scopes.get(scope, {}).get(key, "") for key in SECURITY_CHOICES}
                                 for scope in ("game", "all")}
         self.values.update(self.security_values[self.scope])
@@ -274,30 +313,38 @@ class Preferences:
         self.display = display_of(self.values)
         self.resolution, self.fullscreen, _ = gamescope_parts(
             self.values.get("gamescope_args", ""))
-        # A dropdown whose keys this scope's file lacks starts on Default.
-        self.inherit = {key: self.offers_default(key) and self.files[self.scope].keys().isdisjoint(keys)
-                        for key, keys in INHERITED.items()}
-        for key in INHERITED:
-            if self.inherit[key]:
-                self.choose(key, None)
-        self.set_runtime(self.runtime)
+        # Each scope keeps its own dropdown choices, including Default.
+        self.choice_values = {scope: self.scope_choices(scope) for scope in self.files}
+        self.inherit = {}
+        if self.scope in self.choice_values:
+            self.load_choices(self.choice_values[self.scope])
+        else:
+            self.inherit = {key: False for key in INHERITED}
+            self.set_runtime(self.runtime)
+
+    def engine_for(self, runtime):
+        if self.defaults_only:
+            return ""  # Defaults cover every engine, independently of Launch with.
+        return "proton" if runtime == "proton" else self.request.get("engine", "")
 
     @property
     def engine(self):
-        if self.defaults_only:
-            return ""  # Defaults cover every engine, independently of Launch with.
-        return "proton" if self.runtime == "proton" else self.request.get("engine", "")
+        return self.engine_for(self.runtime)
 
-    @property
-    def displays(self):
-        if self.engine == "proton":
+    def displays_for(self, runtime):
+        engine = self.engine_for(runtime)
+        if engine == "proton":
             return ["wayland", "wayland-x11", "x11", "host-x11"]
-        if self.engine == "native" and self.request.get("renpy_x11"):
+        if engine == "native" and self.request.get("renpy_x11"):
             return ["x11", "host-x11"]
-        if not self.engine:
+        if not engine:
             # Unknown, e.g. a folder that is gone: keep whatever was chosen.
             return list(DISPLAY_CHOICES)
         return ["wayland", "wayland-gamescope", "x11", "host-x11"]
+
+    @property
+    def displays(self):
+        return self.displays_for(self.runtime)
 
     @property
     def proton_controls(self):
@@ -316,6 +363,11 @@ class Preferences:
     def with_proton_controls(self):
         """A native launcher beside Windows programs may run Wine itself."""
         return self.defaults_only or (self.native and bool(self.request.get("can_proton")))
+
+    @property
+    def mangohud_controls(self):
+        """NW.js hangs behind MangoHud's preloaded GL shim."""
+        return self.engine != "nwjs"
 
     @property
     def nwjs_controls(self):
@@ -352,10 +404,56 @@ class Preferences:
             mode = self.saved_defaults["seccomp"]
         return mode or self.host_seccomp
 
-    def offers_default(self, key):
-        scope = self.security_scope
+    def offers_default(self, key, scope=None):
+        scope = self.security_scope if scope is None else scope
         # For the defaults, None and No override already are the built-in values.
         return scope in self.files and not (scope == "all" and key in ("with_proton", "resolution"))
+
+    def scope_choices(self, scope):
+        """One scope's inherited dropdown values and Default choices."""
+        own = self.files[scope]
+        # A display choice is made of several keys, each from the nearest file.
+        display = dict(self.files.get("all", {}))
+        if not own.keys().isdisjoint(("wayland", "gamescope", "host_x11")):
+            display.pop("wayland_x11", None)
+        display.update(own)
+        state = {}
+        for key, keys in INHERITED.items():
+            if not own.keys().isdisjoint(keys):
+                state[key] = (file_choice(key, display if key == "display" else own), False)
+            elif self.offers_default(key, scope):
+                # The game takes what the defaults file has; the defaults
+                # themselves take the built-in value.
+                source = self.files.get("all", {}) if scope == "game" else {}
+                state[key] = (file_choice(key, source), True)
+            else:
+                state[key] = (file_choice(key, {}), False)
+        displays = self.displays_for(state["launch_with"][0])
+        value, inherited = state["display"]
+        if value not in displays:
+            value = "wayland" if value == "wayland-x11" and "wayland" in displays else "x11"
+            state["display"] = (value, inherited)
+        if own.keys().isdisjoint(INHERITED["resolution"]) and state["resolution"][1]:
+            args = self.files.get("all", {}).get("gamescope_args", "") if scope == "game" else ""
+        else:
+            args = own.get("gamescope_args", "")
+        state["fullscreen"] = gamescope_parts(args)[1]
+        return state
+
+    def choice_state(self):
+        """The current inherited dropdown values and Default choices."""
+        state = {key: (self.current(key), self.inherits(key)) for key in INHERITED}
+        state["fullscreen"] = self.fullscreen
+        return state
+
+    def load_choices(self, state):
+        """Put one scope's inherited dropdown values and Default choices in place."""
+        self.inherit = {}
+        for key in INHERITED:
+            value, inherited = state[key]
+            self.choose(key, None if inherited else value)
+        self.fullscreen = state["fullscreen"]
+        self.set_runtime(self.runtime)
 
     def inherited(self, key):
         """The value a Default choice stands for in the scope being edited."""
@@ -477,20 +575,17 @@ class Preferences:
     def set_scope(self, scope):
         self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
         self.require_values[self.security_scope] = self.values["require"]
-        inherited = [key for key in INHERITED if self.inherits(key)]
+        self.plain_values[self.security_scope] = {key: self.values[key] for key in PLAIN}
+        if self.security_scope in self.choice_values:
+            self.choice_values[self.security_scope] = self.choice_state()
         self.scope = scope
         if scope != "clear":
             self.security_scope = scope
+            self.values.update(self.plain_values[scope])
             self.values.update(self.security_values[scope])
             self.values["require"] = self.require_values[scope]
-            # Default stays Default, now for the new scope -- unless the
-            # defaults file has the value shown, which then is saved there.
-            for key in inherited:
-                if self.offers_default(key) and (
-                        scope == "game" or self.files["all"].keys().isdisjoint(INHERITED[key])):
-                    self.choose(key, None)
-                else:
-                    self.inherit[key] = False
+            if scope in self.choice_values:
+                self.load_choices(self.choice_values[scope])
 
     def result(self):
         if self.scope == "clear":
@@ -499,42 +594,26 @@ class Preferences:
                   "wayland": "1" if self.display.startswith("wayland") else "0",
                   "wayland_x11": "1" if self.display == "wayland-x11" else "0",
                   "gamescope": "1" if self.display == "wayland-gamescope" else "0",
-                  "host_x11": "1" if self.display == "host-x11" else "0",
-                  "net": self.values.get("net", "0")}
+                  "host_x11": "1" if self.display == "host-x11" else "0"}
         if self.request.get("can_proton"):
             result["launch_with"] = self.runtime
-        if self.engine != "nwjs":
-            result["mangohud"] = self.values.get("mangohud", "0")
-        if self.hdr_controls:
-            result["hdr"] = self.values["hdr"]
         if self.proton_controls:
             if self.split_controls:
-                result["x11_exe"] = self.values.get("x11_exe", "").strip()
                 result["x11_backend"] = self.values["x11_backend"]
-            for key, fallback in (("proton", "auto"), ("mod_loaders", "0"), ("steam", "0"),
-                                  ("hide_tray", "0")):
-                result[key] = self.values.get(key, fallback)
+            result["proton"] = self.values.get("proton", "auto")
         if self.nwjs_controls:
             result["nwjs"] = self.values.get("nwjs", "auto")
             result["casefold"] = self.values.get("casefold", "1")
             result["webgl"] = self.values.get("webgl", "auto")
         if self.mkxp_controls:
             result["kawariki"] = self.values.get("kawariki", "1")
-        if self.dotnet_controls:
-            result["dotnet"] = self.values["dotnet"]
         if self.with_proton_controls:
             result["with_proton"] = self.values["with_proton"]
         # Controls shown only under another one are returned only when they
         # show; hidden, the saved values stay as they were.
-        if self.lan_controls:
-            result["lan"] = self.values["lan"]
-            result["mac_vendor"] = self.values["mac_vendor"]
-        if self.lan_allow_controls:
-            result["lan_allow"] = ", ".join(w for w in re.split(r"[\s,]+", self.values["lan_allow"]) if w)
-        result["private_hosts"] = self.values["private_hosts"]
-        if self.hosts_controls:
-            result["hosts"] = hosts_value(self.values["hosts"])
-            result["hosts_writable"] = self.values["hosts_writable"]
+        for key, controls in PLAIN.items():
+            if controls is None or getattr(self, controls):
+                result[key] = plain_value(key, self.values.get(key, ""))
         if self.require_controls:
             result["require"] = self.values["require"]
         if self.security_controls:
@@ -709,12 +788,23 @@ class Dialog:
                       lambda *_: self.choice_changed(key))
 
     def choice_options(self, key):
-        options = self.base_options[key]
+        options = list(self.base_options[key])
+        current = self.state.current(key)
+        if not self.state.inherits(key) and current not in [value for value, _ in options]:
+            options.append((current, self.choice_label(key, current)))
         if not self.state.offers_default(key):
             return options
         value = self.state.inherited(key)
         label = next((label for v, label in options if v == value), value)
         return [(None, "Default — " + label), *options]
+
+    def choice_label(self, key, value):
+        """A label for a value the dropdown's fixed list did not include."""
+        if key in ("proton", "nwjs", "with_proton") and value == "auto":
+            return "Newest installed (auto)"
+        if key == "resolution" and not value:
+            return "No override (the game's own size)"
+        return value
 
     def update_choices(self):
         for key in self.base_options:
@@ -897,6 +987,8 @@ class Dialog:
         self.require_group.set_visible(self.state.require_controls)
         for key, _ in REQUIREMENTS:
             self.widgets["require_" + key].set_active(key in self.state.values["require"].split(","))
+        self.show_plain()
+        self.widgets["fullscreen"].set_active(self.state.fullscreen)
         self.updating = False
         for key, row in self.rows.items():
             if key not in ("scope", "appearance"):
@@ -917,10 +1009,24 @@ class Dialog:
             options = self.state.security_choices(key)
             if options != self.choices[key] or self.state.values[key] != self.selected(key):
                 self.set_options(key, options, self.state.values[key])
-        self.widgets["mangohud"].set_sensitive(self.state.engine != "nwjs")
-        self.widgets["mangohud"].set_active(self.state.engine != "nwjs" and self.state.values.get("mangohud") == "1")
+        self.widgets["mangohud"].set_sensitive(self.state.mangohud_controls)
+        self.widgets["mangohud"].set_active(self.state.mangohud_controls and
+                                            self.state.values.get("mangohud") == "1")
         self.updating = False
         self.refresh_visibility()
+
+    def show_plain(self):
+        """Put the selected scope's switches and entries in their controls."""
+        for key in PLAIN:
+            if key == "mangohud":
+                continue  # refresh() also turns it off for NW.js
+            widget = self.widgets[key]
+            if key == "hosts":
+                widget.get_buffer().set_text(hosts_lines(self.state.values[key]))
+            elif key in ("lan_allow", "x11_exe"):
+                widget.set_text(self.state.values[key])
+            else:
+                widget.set_active(self.state.values[key] == "1")
 
     def refresh_visibility(self):
         self.rows["x11_backend"].set_visible(self.state.split_controls)
