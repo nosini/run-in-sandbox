@@ -21,7 +21,8 @@
 #
 #   Run from a checkout, it installs that checkout. Run on its own -- as in
 #     curl -fsSL https://raw.githubusercontent.com/nosini/run-in-sandbox/main/install.sh | bash
-#   -- it downloads the branch named by $REF (default main) first.
+#   -- it downloads the branch named by $REF (default main) first. A root run
+#   without a checkout needs REF to name a full commit hash or release tag.
 #
 #   Running it again updates in place. --uninstall removes the installed
 #   scripts, and the sound setup if it is there, and leaves everything else
@@ -88,6 +89,17 @@ each_audio() {
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 
+# Root piped installs must fetch an immutable source: a branch such as main
+# can change between a review and the download. A release tag or full commit
+# hash names the same tree every time.
+ref_is_pinned() {
+    case "$REF" in
+        *[!0-9a-f]*) ;;
+        *) [ "${#REF}" -eq 40 ] || [ "${#REF}" -eq 64 ] && return 0 ;;
+    esac
+    [[ "$REF" =~ ^v?[0-9]+(\.[0-9]+)+([._+-][0-9A-Za-z]+)*$ ]]
+}
+
 remove_one() {
     [ ! -e "$3/$2" ] || { rm -f "$3/$2"; say "removed $3/$2"; }
 }
@@ -122,6 +134,16 @@ install_audio() {
     AUDIO_CHANGED=1
 }
 
+# Everything but the explicit administrator modes installs files for the
+# current user, under that user's home, so root is the wrong identity for it.
+case "${1:-}" in
+    --systemd-backend|--uninstall-systemd-backend|--selinux|--uninstall-selinux) ;;
+    *)
+        if [ "$(id -u)" = 0 ]; then
+            echo "this mode installs for the current user; run install.sh as that user, without sudo" >&2
+            exit 1
+        fi ;;
+esac
 AUDIO=0
 SYSTEMD_MODE=""
 SELINUX_MODE=""
@@ -171,11 +193,17 @@ if [ -n "$here" ] && [ -f "$here" ]; then
     here="$(cd "$(dirname "$here")" && pwd)"
     [ -f "$here/sandbox-game" ] && SRC="$here"
 fi
-if [ -z "$SRC" ]; then
+# Removing the SELinux module needs nothing from the source.
+if [ -z "$SRC" ] && [ "$SELINUX_MODE" != uninstall ]; then
+    if [ "$(id -u)" = 0 ] && ! ref_is_pinned; then
+        echo "a root install must download a full commit hash or a release tag; set REF to one, or run install.sh from a checkout" >&2
+        exit 1
+    fi
     command -v curl >/dev/null || { echo "curl is needed to download" >&2; exit 1; }
     TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
     say "downloading $REPO ($REF)"
-    curl -fsSL "$REPO/archive/$REF.tar.gz" | tar xz -C "$TMP" --strip-components=1
+    curl --proto '=https' --tlsv1.2 -fsSL "$REPO/archive/$REF.tar.gz" \
+        | tar xz -C "$TMP" --strip-components=1 --no-same-owner
     SRC="$TMP"
 fi
 

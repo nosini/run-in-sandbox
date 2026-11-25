@@ -5943,6 +5943,78 @@ class InstallScriptTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def run_script(self, args=(), env=None):
+        return subprocess.run(["bash", "-s", "--", *args],
+                              input=(ROOT / "install.sh").read_text(), text=True,
+                              env={**self.env, **(env or {})}, cwd=self.base,
+                              capture_output=True, timeout=30)
+
+    def test_piped_download_uses_https_and_drops_archive_ownership(self):
+        if os.geteuid() == 0:
+            self.skipTest("the per-user install refuses root")
+        curl_log, tar_log = self.base / "curl.args", self.base / "tar.args"
+        self.command("curl", 'printf "%s\\n" "$@" > "$CURL_LOG"')
+        self.command("tar", 'printf "%s\\n" "$@" > "$TAR_LOG"; exit 1')
+        result = self.run_script(env={"CURL_LOG": str(curl_log), "TAR_LOG": str(tar_log)})
+        self.assertNotEqual(result.returncode, 0)
+        curl_args = curl_log.read_text().splitlines()
+        self.assertIn("--proto", curl_args)
+        self.assertEqual(curl_args[curl_args.index("--proto") + 1], "=https")
+        self.assertIn("--tlsv1.2", curl_args)
+        self.assertIn("--no-same-owner", tar_log.read_text().splitlines())
+
+    def test_per_user_modes_refuse_to_run_as_root(self):
+        self.command("id", "printf '0\\n'")
+        for args in ((), ("--restrict-audio",), ("--uninstall",)):
+            with self.subTest(args=args):
+                result = self.run_script(args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("without sudo", result.stderr)
+
+    def test_root_piped_download_needs_a_commit_or_release_tag(self):
+        self.command("id", "printf '0\\n'")
+        curl_log = self.base / "curl.args"
+        self.command("curl", 'printf "%s\\n" "$@" > "$CURL_LOG"; exit 1')
+        env = {"CURL_LOG": str(curl_log)}
+        result = self.run_script(("--systemd-backend", "1000"), env)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("full commit hash or a release tag", result.stderr)
+        self.assertFalse(curl_log.exists())
+        ref = "a" * 40
+        result = self.run_script(("--systemd-backend", "1000"), {**env, "REF": ref})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any(row.endswith(f"/archive/{ref}.tar.gz")
+                            for row in curl_log.read_text().splitlines()))
+
+    def test_piped_selinux_removal_downloads_nothing(self):
+        # Removing the module uses nothing from the source, so it needs no
+        # pinned ref and fetches no archive.
+        self.command("id", "printf '0\\n'")
+        curl_log = self.base / "curl.args"
+        self.command("curl", 'printf "%s\\n" "$@" > "$CURL_LOG"; exit 1')
+        self.command("semodule", "exit 0")
+        result = self.run_script(("--uninstall-selinux",), {"CURL_LOG": str(curl_log)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("full commit hash", result.stderr)
+        self.assertIn("is not loaded", result.stdout)
+        self.assertFalse(curl_log.exists())
+
+    def test_root_checkout_install_does_not_need_a_pinned_ref(self):
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        shutil.copy2(ROOT / "install.sh", checkout / "install.sh")
+        (checkout / "sandbox-game").write_text("")
+        self.command("id", "printf '0\\n'")
+        log = self.base / "python.args"
+        self.command("python3", 'printf "%s\\n" "$@" > "$PY_LOG"; exit 1')
+        result = subprocess.run(["bash", str(checkout / "install.sh"),
+                                 "--systemd-backend", "1000"], text=True,
+                                env={**self.env, "PY_LOG": str(log)},
+                                cwd=self.base, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("full commit hash or a release tag", result.stderr)
+        self.assertIn("install-systemd.py", log.read_text())
+
     def test_restrict_audio_warns_about_old_pipewire_and_installs(self):
         if os.geteuid() == 0:
             self.skipTest("the per-user install refuses root")

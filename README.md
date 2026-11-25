@@ -59,10 +59,15 @@ less install.sh && bash install.sh
 ```
 
 `REF=<branch or tag>` installs something other than `main`
-(`curl ... | REF=<tag> bash`). To remove the
+(`curl ... | REF=<tag> bash`). Root installs from a pipe download only an
+immutable source: `REF` must name a full commit hash or a release tag such as
+`v1.2.3`, not a branch. The administrator commands below run from a checkout,
+which needs no download. To remove the
 scripts again, `./install.sh --uninstall`, or through the pipe
 `... | bash -s -- --uninstall`. That leaves `~/game-sandboxes` (saves and Wine
-prefixes), the preferences and the shared tools folder alone.
+prefixes), the preferences and the shared tools folder alone. The per-user
+install, `--restrict-audio` and `--uninstall` refuse to run as root; the
+explicit administrator modes are the only ones for `sudo`.
 
 `./install.sh --restrict-audio` (or `... | bash -s -- --restrict-audio`)
 additionally makes games' sound playback only; see [Sound](#sound). It changes
