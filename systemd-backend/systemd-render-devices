@@ -231,10 +231,15 @@ def retire(objects, state, key):
             try:
                 try:
                     published = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                except FileNotFoundError:
+                except (FileNotFoundError, IsADirectoryError,
+                        NotADirectoryError, PermissionError):
                     published = None
                 if published is not None and same_inode(st, published):
-                    os.unlink(name, dir_fd=directory)
+                    try:
+                        os.unlink(name, dir_fd=directory)
+                    except (FileNotFoundError, IsADirectoryError,
+                            NotADirectoryError, PermissionError):
+                        pass
             finally:
                 os.close(directory)
     finally:
@@ -253,6 +258,18 @@ def publish(objects, directory, key, name):
     os.link(key, temporary, src_dir_fd=objects, dst_dir_fd=objects,
             follow_symlinks=False)
     try:
+        # A user can put a directory where the alias belongs. An empty one is
+        # in the rename's way and is ours to remove; one with contents is left
+        # alone and reported by the caller.
+        try:
+            published = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            published = None
+        if published is not None and stat.S_ISDIR(published.st_mode):
+            try:
+                os.rmdir(name, dir_fd=directory)
+            except FileNotFoundError:
+                pass                    # its owner removed it first
         os.replace(temporary, name, src_dir_fd=objects, dst_dir_fd=directory)
     finally:
         try:
@@ -334,6 +351,27 @@ def reconcile(paths=Paths(), activation="keep"):
         existing = {name for name in entries(objects) if OBJECT.fullmatch(name)}
         desired = {f"{uid}-{name}": (uid, name, source)
                    for uid in allowed for name, source in live.items()}
+        # Revoked users keep no searchable caller-owned directory. Do not
+        # recursively delete any unexpected user-created contents as root.
+        # Lock them down before retiring their aliases, so their owner cannot
+        # swap a published name between the check and its removal.
+        for entry in entries(state):
+            if entry.isascii() and entry.isdecimal() and int(entry) not in allowed:
+                try:
+                    directory = os.open(entry, DIRECTORY, dir_fd=state)
+                except OSError as error:
+                    print(f"systemd-render-devices: cannot lock revoked user "
+                          f"directory {paths.state / entry}: {error}", file=sys.stderr)
+                    continue
+                try:
+                    os.fchown(directory, 0, 0)
+                    os.fchmod(directory, 0)
+                except OSError as error:
+                    print(f"systemd-render-devices: cannot lock revoked user "
+                          f"directory {paths.state / entry}: {error}", file=sys.stderr)
+                finally:
+                    os.close(directory)
+        failed = set()
         for key in sorted(existing):
             expected = desired.get(key)
             try:
@@ -346,41 +384,45 @@ def reconcile(paths=Paths(), activation="keep"):
             except (FileNotFoundError, ValueError, KeyError):
                 keep = False
             if not keep:
-                retire(objects, state, key)
-                existing.remove(key)
-        # Revoked users keep no searchable caller-owned directory. Do not
-        # recursively delete any unexpected user-created contents as root.
-        for entry in entries(state):
-            if entry.isascii() and entry.isdecimal() and int(entry) not in allowed:
-                directory = os.open(entry, DIRECTORY, dir_fd=state)
                 try:
-                    os.fchown(directory, 0, 0)
-                    os.fchmod(directory, 0)
+                    retire(objects, state, key)
+                except OSError as error:
+                    # A failed retirement is tried again on the next
+                    # reconciliation; its alias is not reused for this one.
+                    print(f"systemd-render-devices: cannot retire {key}: {error}",
+                          file=sys.stderr)
+                    failed.add(key)
+                existing.remove(key)
+        for key, (uid, name, source) in sorted(desired.items()):
+            if key in failed:
+                continue
+            try:
+                directory = user_directory(state, uid)
+                try:
+                    copy_directory_label(state, directory)
+                    if key not in existing:
+                        create(paths, objects, key, uid, source)
+                    # A device can disappear while we prepare its alias. Never
+                    # publish a source snapshot that has already become obsolete.
+                    try:
+                        current = device(paths, name)
+                    except (FileNotFoundError, RuntimeError):
+                        current = None
+                    if current != source:
+                        retire(objects, state, key)
+                        continue
+                    fd = os.open(key, PATH_ONLY, dir_fd=objects)
+                    try:
+                        inode_permissions(fd, uid, 0o600)
+                    finally:
+                        os.close(fd)
+                    publish(objects, directory, key, name)
                 finally:
                     os.close(directory)
-        for key, (uid, name, source) in sorted(desired.items()):
-            directory = user_directory(state, uid)
-            try:
-                copy_directory_label(state, directory)
-                if key not in existing:
-                    create(paths, objects, key, uid, source)
-                # A device can disappear while we prepare its alias. Never
-                # publish a source snapshot that has already become obsolete.
-                try:
-                    current = device(paths, name)
-                except (FileNotFoundError, RuntimeError):
-                    current = None
-                if current != source:
-                    retire(objects, state, key)
-                    continue
-                fd = os.open(key, PATH_ONLY, dir_fd=objects)
-                try:
-                    inode_permissions(fd, uid, 0o600)
-                finally:
-                    os.close(fd)
-                publish(objects, directory, key, name)
-            finally:
-                os.close(directory)
+            except OSError as error:
+                print(f"systemd-render-devices: cannot publish {name} for user "
+                      f"{uid} at {paths.state / str(uid) / name}: {error}",
+                      file=sys.stderr)
 
 
 def main():

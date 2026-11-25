@@ -63,8 +63,11 @@ Root-controlled ancestors are opened without following symlinks. Publication
 uses a hardlink prepared in the root-only directory and an atomic rename over
 the destination; no privileged ownership or permission operation follows a
 user-supplied published path. Revocation does not recurse into unexpected
-user-created contents. Interrupted creation/publication is repaired on the
-next reconciliation.
+user-created contents. An empty directory at an alias path is removed; one with
+contents is left in place, with a message. A failure on one user's alias is
+reported and does not stop the others, and revoked users' directories are
+locked before their aliases are retired. Interrupted creation/publication is
+repaired on the next reconciliation.
 
 ## Temporary setup on a dedicated test VM
 
@@ -113,10 +116,11 @@ Run the isolated lifecycle tests as root on the VM:
 sudo python3 -I systemd-backend/test_render_devices.py -v
 ```
 
-All **21 tests pass**, covering initial creation, unchanged/reused devices,
+All **25 tests pass**, covering initial creation, unchanged/reused devices,
 devices replaced at the same path, parallel reconciliation, malformed
 configuration, source and destination symlinks, primary-node exclusion,
-published aliases moved/hardlinked by a user, allowlist revocation and
+published aliases moved/hardlinked by a user, directories planted at alias
+paths, entries removed between check and removal, allowlist revocation and
 interrupted creation/publication. They also check queued events after stop and
 revocation with invalid config/absent sysfs. They create synthetic sysfs/device
 fixtures under a private `/var/lib` test directory and remove them. No physical

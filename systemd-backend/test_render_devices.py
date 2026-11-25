@@ -2,6 +2,7 @@
 """Root-only lifecycle/adversarial tests, intended for an isolated test VM."""
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import io
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import traceback
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 loader = SourceFileLoader("render_helper", str(Path(__file__).with_name("systemd-render-devices")))
@@ -166,6 +168,67 @@ class RenderLifecycle(unittest.TestCase):
         self.revoked(old)
         self.assertEqual(victim.stat(), before)
 
+    def test_empty_directory_planted_at_alias_path_is_replaced_by_the_device(self):
+        self.reconcile()
+        self.alias.unlink()
+        self.alias.mkdir()
+        self.reconcile()
+        self.assertTrue(stat.S_ISCHR(self.alias.stat().st_mode))
+        self.assertEqual(self.alias.stat().st_rdev, self.source.stat().st_rdev)
+        self.assert_private_identity()
+
+    def test_unremovable_alias_directory_does_not_stop_another_user(self):
+        self.paths.config.write_text(f"{UID}\n{UID+1}\n")
+        self.reconcile()
+        other = self.paths.state / str(UID + 1) / "renderD128"
+        other.unlink()
+        self.alias.unlink()
+        self.alias.mkdir()
+        (self.alias / "keep").write_text("not ours to delete")
+        stderr = io.StringIO()
+        with mock.patch.object(helper.sys, "stderr", stderr):
+            self.reconcile()
+        self.assertTrue(stat.S_ISCHR(other.stat().st_mode))
+        self.assertEqual((self.alias / "keep").read_text(), "not ours to delete")
+        text = stderr.getvalue()
+        self.assertIn(f"user {UID}", text)
+        self.assertIn(str(self.alias), text)
+
+    def test_alias_removed_between_stat_and_unlink_is_skipped(self):
+        self.reconcile()
+        old = self.held()
+        self.paths.config.write_text("")
+        original = helper.os.stat
+
+        def vanishing(name, *args, **kwargs):
+            result = original(name, *args, **kwargs)
+            if name == "renderD128" and kwargs.get("dir_fd") is not None:
+                os.unlink(self.alias)
+            return result
+
+        with mock.patch.object(helper.os, "stat", side_effect=vanishing):
+            self.reconcile()
+        self.revoked(old)
+        self.assertFalse(self.alias.exists())
+        self.assertFalse(self.private.exists())
+        self.assertFalse(self.private.with_name(self.private.name + ".json").exists())
+
+    def test_revoked_user_directory_is_locked_before_aliases_are_retired(self):
+        self.reconcile()
+        seen = []
+        original = helper.retire
+
+        def observed(objects, state, key):
+            uid = int(key.split("-", 1)[0])
+            directory = os.stat(self.paths.state / str(uid))
+            seen.append((directory.st_uid, stat.S_IMODE(directory.st_mode)))
+            return original(objects, state, key)
+
+        self.paths.config.write_text("")
+        with mock.patch.object(helper, "retire", side_effect=observed):
+            self.reconcile()
+        self.assertEqual(seen, [(0, 0)])
+
     def test_revoking_user_does_not_recurse_into_unexpected_user_contents(self):
         self.reconcile()
         old = self.held()
@@ -222,9 +285,11 @@ class RenderLifecycle(unittest.TestCase):
         victim.mkdir(mode=0o700)
         before = victim.stat()
         (self.paths.state / str(UID)).symlink_to(victim)
-        with self.assertRaises(OSError):
+        stderr = io.StringIO()
+        with mock.patch.object(helper.sys, "stderr", stderr):
             self.reconcile()
         self.assertEqual(victim.stat(), before)
+        self.assertIn(str(self.paths.state / str(UID)), stderr.getvalue())
 
     def test_root_and_non_numeric_configurations_are_rejected(self):
         for value in ("0", "-1", "alice", "4294967295"):
