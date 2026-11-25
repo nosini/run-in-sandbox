@@ -3692,6 +3692,51 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         self.cli("--headless", "--name", "cwd", ".", "/bin/true", cwd=self.game)
         self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
 
+    def test_reset_install_splits_no_save_name_and_follows_no_link(self):
+        secret = self.base / "host-folder"
+        secret.mkdir()
+        (secret / "id").write_text("host secret\n")
+        # A folder "a<newline>x" holding "id<newline>save": read line by
+        # line, the saves would be a, x/id and save -- and x a link of the
+        # game's to that host folder, so its id would move into rw/.
+        self.run_guest(f"ln -s {secret} /game/x; nl='\n'; mkdir \"/game/a${{nl}}x\"; "
+                       "echo odd > \"/game/a${nl}x/id${nl}save\"; touch /game/a /game/save; "
+                       "echo changed > /game/other", "--name", "odd")
+        capture = self.home / "game-sandboxes" / "odd"
+        result = self.cli("--reset-install", "odd", check=False)
+        self.assertTrue((secret / "id").is_file(), "a host file was moved into the sandbox")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((capture / "rw" / "x").exists())
+        self.assertEqual((capture / "rw" / "a\nx" / "id\nsave").read_text(), "odd\n")
+        self.assertTrue((capture / "rw" / "save").is_file())
+        self.assertFalse((capture / "rw" / "other").exists())
+        self.assertIn("kept: $'a\\nx/id\\nsave'", result.stdout)
+
+    def test_reset_install_moves_nothing_through_a_link(self):
+        # find follows no link, and the game is stopped while this runs; a
+        # folder above a save turning into one is refused all the same.
+        self.run_guest("mkdir -p /game/sub/saves; echo s > /game/sub/saves/1", "--name", "linked")
+        capture = self.home / "game-sandboxes" / "linked"
+        lib = ROOT / "sandbox-game"
+        script = self.base / "reset-with-link.sh"
+        # Swap the folder for a link between the look and the move, which
+        # find cannot see: the check before moving must.
+        secret = self.base / "host-folder"
+        (secret / "saves").mkdir(parents=True)
+        (secret / "saves" / "1").write_text("host secret\n")
+        script.write_text(
+            f"source <(sed -n '/^reset_install() {{/,/^}}/p' {lib})\n"
+            "stopped_sandbox() { :; }; reclaim() { :; }; confirm() { :; }; unlock_work() { :; }\n"
+            f"SANDBOXES={capture.parent}\n"
+            "find() { command find \"$@\"; local r=$?\n"
+            f"  [ -L {capture}/rw/sub ] || {{ rm -rf {capture}/rw/sub; ln -s {secret} {capture}/rw/sub; }}\n"
+            "  return $r; }\n"
+            "reset_install linked\n")
+        result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("is not a folder; not resetting", result.stderr)
+        self.assertEqual((secret / "saves" / "1").read_text(), "host secret\n")
+
     def test_list_reset_install_and_delete(self):
         (self.game / "www").mkdir()
         (self.game / "www" / "data.js").write_text("original\n")

@@ -390,33 +390,49 @@ delete_sandbox() {                    # $1 = NAME
 # happens to be called that stays hidden, rather than a save being lost.
 reset_install() {                     # $1 = NAME
     stopped_sandbox "$1" || return 1
-    local d="$SANDBOXES/$1" keep=() changed f
+    local d="$SANDBOXES/$1" keep=() changed=() f p top
+    local -A count=()
     reclaim "$d" || return 1          # all of rw/ readable, for the look below too
     # At any depth: rw/ holds only what the game changed, so this is quick,
     # and a save nested deeper than a guess would be gone for good.
-    mapfile -t keep < <(cd "$d/rw" && find . -mindepth 1 -iname '*save*' -print -prune |
-                        sed 's|^\./||')
+    # The game names these files, so a newline is just another character in
+    # them: the lists are NUL-separated. Split at newlines, a/<newline>x/save
+    # would read as a path x/save the game never made -- through a link x of
+    # its own to a host folder.
+    mapfile -d '' keep < <(cd "$d/rw" && find . -mindepth 1 -iname '*save*' -print0 -prune)
     # Files, links, the character devices overlayfs uses to mark a deletion,
     # and directories the game made and left empty -- outside the saves being
     # kept. Other directories are only there to hold those.
-    changed="$(cd "$d/rw" && find . -mindepth 1 \( ! -type d -o -empty \) | sed 's|^\./||' |
-        awk -v keep="$(printf '%s\n' ${keep[@]+"${keep[@]}"})" '
-            BEGIN { n = split(keep, k, "\n") }
-            { for (i = 1; i <= n; i++)
-                  if (k[i] != "" && ($0 == k[i] || index($0, k[i] "/") == 1)) next
-              print }')"
-    [ -n "$changed" ] || {
+    mapfile -d '' changed < <(cd "$d/rw" && find . -mindepth 1 -iname '*save*' -prune \
+                                  -o \( ! -type d -o -empty \) -print0)
+    [ "${#changed[@]}" -gt 0 ] || {
         echo "$1: nothing changed in its install folder${keep[0]:+, apart from its saves}"; return 0; }
     echo "$1: changes to its install folder, to be discarded:"
-    awk -F/ '{ n[$1]++ } END { for (t in n) printf "  %s (%d file%s)\n", t, n[t], (n[t] > 1 ? "s" : "") }' \
-        <<<"$changed" | sort
-    for f in ${keep[@]+"${keep[@]}"}; do echo "kept: $f (looks like a save)"; done
+    for f in "${changed[@]}"; do
+        top="${f#./}"; top="${top%%/*}"; count["$top"]=$(( ${count["$top"]:-0} + 1 ))
+    done
+    for top in "${!count[@]}"; do
+        printf '  %q (%d file%s)\n' "$top" "${count[$top]}" "$([ "${count[$top]}" -gt 1 ] && echo s)"
+    done | sort
+    for f in ${keep[@]+"${keep[@]}"}; do printf 'kept: %q (looks like a save)\n' "${f#./}"; done
+    # find did not follow links and the game is stopped, so none of the
+    # folders above a save is one. Checked again all the same, before anything
+    # moves: a move through one would carry a host file into rw/.
+    for f in ${keep[@]+"${keep[@]}"}; do
+        p="${f#./}"
+        while [[ "$p" == */* ]]; do
+            p="${p%/*}"
+            [ ! -L "$d/rw/$p" ] && [ -d "$d/rw/$p" ] || {
+                printf '%s: %q is not a folder; not resetting\n' "$1" "$d/rw/$p" >&2; return 1; }
+        done
+    done
     confirm "Discard them?" || { echo "left alone"; return 1; }
     unlock_work "$d"
     rm -rf -- "$d/rw.keep"
     for f in ${keep[@]+"${keep[@]}"}; do
-        mkdir -p "$d/rw.keep/$(dirname "$f")"
-        mv -- "$d/rw/$f" "$d/rw.keep/$f"
+        f="${f#./}"
+        [[ "$f" != */* ]] || mkdir -p -- "$d/rw.keep/${f%/*}"
+        mv -T -- "$d/rw/$f" "$d/rw.keep/$f"
     done
     rm -rf -- "$d/rw" "$d/work"
     if [ -d "$d/rw.keep" ]; then mv -- "$d/rw.keep" "$d/rw"; else mkdir "$d/rw"; fi
