@@ -212,7 +212,7 @@ def start_game(cmd, listener, restrict):
 
 def run_attached(argv, env, stdio, terminal):
     try:
-        os.setsid()
+        os.setsid()                     # then closing the ready pipe tells serve()
         if terminal:
             fcntl.ioctl(stdio[0], termios.TIOCSCTTY, 0)
         for target, fd in enumerate(stdio):
@@ -223,6 +223,8 @@ def run_attached(argv, env, stdio, terminal):
         os.execvpe(argv[0], argv, env)
     except OSError as e:
         os.write(2, f"sandbox-attach: {argv[0]}: {e.strerror}\n".encode())
+    except BaseException as e:          # never back into serve()'s loop
+        os.write(2, f"sandbox-attach: {argv[0]}: {e}\n".encode())
     os._exit(127)
 
 
@@ -239,26 +241,48 @@ def attach(conn):
     master = None
     try:
         req = json.loads(msg)
-        argv, extra = req["argv"], req.get("env", {})
-        if (flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC) or not argv
-                or not all(isinstance(a, str) for a in argv)
+        if not isinstance(req, dict):
+            raise ValueError("malformed request")
+        argv, extra = req.get("argv"), req.get("env", {})
+        size = req.get("size", [24, 80]) if req.get("terminal") else [0, 0]
+        if (flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC)
+                or not isinstance(argv, list) or not argv
+                or not all(isinstance(a, str) and "\0" not in a for a in argv)
+                or not isinstance(extra, dict)
                 or not all(isinstance(k, str) and isinstance(v, str) and k and "=" not in k
-                           for k, v in extra.items())):
+                           and "\0" not in k + v for k, v in extra.items())
+                or not isinstance(size, list) or len(size) != 2
+                or not all(type(n) is int and 0 <= n <= 0xFFFF for n in size)):
             raise ValueError("malformed request")
         env = {**os.environ, **extra}
         if req.get("terminal"):
             master, slave = os.openpty()
             fds.append(slave)
-            rows, cols = req.get("size", [24, 80])
+            rows, cols = size
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("4H", rows, cols, 0, 0))
             stdio = [slave] * 3
         elif len(fds) == 3:
             stdio = fds
         else:
             raise ValueError("malformed request")
-        child = os.fork()
+        # Back only once the child leads a process group of its own, so that a
+        # hangup passed on at once reaches it and nothing of serve()'s.
+        ready, done = os.pipe2(os.O_CLOEXEC)
+        try:
+            child = os.fork()
+        except BaseException:
+            os.close(ready)
+            os.close(done)
+            raise
         if child == 0:
             run_attached(argv, env, stdio, master is not None)
+        os.close(done)
+        try:
+            os.read(ready, 1)
+        except OSError:
+            pass                        # the child is still returned, to be tracked
+        finally:
+            os.close(ready)
         return child, master
     except BaseException:
         if master is not None:
@@ -347,19 +371,34 @@ def serve(listener, game):
                     conn, _ = listener.accept()
                 except OSError:
                     continue
+                # Whatever a request holds, or whatever fails once the child
+                # runs: the sandbox goes on, and nothing started is left behind.
+                child = done = None
                 try:
                     child, master = attach(conn)
-                    if master is not None:
-                        socket.send_fds(conn, [b"{}"], [master])
-                        os.close(master)
-                except (OSError, ValueError, KeyError, TypeError) as e:
+                    try:
+                        if master is not None:
+                            socket.send_fds(conn, [b"{}"], [master])
+                    finally:
+                        if master is not None:
+                            os.close(master)
+                    done = os.pidfd_open(child)
+                    sel.register(conn, selectors.EVENT_READ, ("client", child))
+                    try:
+                        sel.register(done, selectors.EVENT_READ, ("child", child))
+                    except BaseException:
+                        sel.unregister(conn)
+                        raise
+                except Exception as e:
                     if not isinstance(e, PermissionError):
                         print(f"sandbox-landlock: attach: {e}", file=sys.stderr)
                     conn.close()
+                    if done is not None:
+                        os.close(done)
+                    if child is not None:
+                        terminate([child], groups=True)
                     continue
                 clients[child] = conn
-                sel.register(conn, selectors.EVENT_READ, ("client", child))
-                sel.register(os.pidfd_open(child), selectors.EVENT_READ, ("child", child))
             elif kind == "client":
                 if clients.get(pid) is not key.fileobj:
                     continue                # its program ended in this round

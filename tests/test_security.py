@@ -16,6 +16,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -1170,6 +1171,29 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertNotIn("not a valid identifier", result.stderr)
         self.assertEqual(result.stdout.splitlines(),
                          ["WINEDLLPATH=/from-wineserver", "WINEPREFIX=/compat/pfx"])
+
+    def test_malformed_attach_requests_leave_the_sandbox_running(self):
+        name = "malformed-" + self.base.name
+        proc = self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        game = next(p for p in os.listdir("/proc") if p.isdigit() and
+                    Path(f"/proc/{p}/cmdline").read_bytes() == b"sleep\x0030\x00" and
+                    os.path.exists(f"/proc/{p}/root/run/sandbox-attach/socket"))
+        for request in (b"[]", b'{"argv": "true"}', b'{"argv": ["true"], "env": []}',
+                        b'{"argv": ["true"], "terminal": true, "size": [70000, 1]}',
+                        b'{"argv": ["true"], "terminal": true, "size": "big"}',
+                        b'{"argv": ["tr\\u0000ue"]}'):
+            with self.subTest(request=request), \
+                    socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as s:
+                s.connect(f"/proc/{game}/root/run/sandbox-attach/socket")
+                socket.send_fds(s, [request], [0, 1, 2])
+                s.settimeout(5)
+                try:
+                    answer = s.recv(100)
+                except ConnectionResetError:
+                    answer = b""
+                self.assertEqual(answer, b"")
+        self.assertIsNone(proc.poll())
+        self.assertEqual(self.attach(name, "--exec", "--", "true").returncode, 0)
 
     def test_game_cannot_use_the_attach_socket(self):
         # Only a process outside the sandbox may have something started in
