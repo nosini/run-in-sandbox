@@ -195,6 +195,7 @@ def main():
             self.defaults_window = None
             self.defaults_preferences = None
             self.pending = set()
+            self.locate_button = None
             self.refreshing = False
             self.search_pending, self.search_request = False, None
             self.window = Adw.ApplicationWindow(application=app, title="Sandbox Manager")
@@ -638,8 +639,9 @@ def main():
             files = self.section(self.overview, "Files")
             self.action(files, "Sandbox folder", str(self.library.capture(entry["name"])), "Open sandbox folder",
                         lambda *_: self.open_path(self.library.capture(entry["name"])))
-            self.action(files, "Game folder", "Open the installed game or locate an external game folder.",
-                        "Locate game", lambda *_: self.locate(entry))
+            self.locate_button = self.action(
+                files, "Game folder", "Open the installed game or locate an external game folder.",
+                "Locate game", lambda *_: self.locate(entry))
             row = self.rows.get(entry["name"])
             if entry["kind"] == "existing":
                 folder = row.folder if row and row.entry is entry else "present"
@@ -881,6 +883,10 @@ def main():
             self.maintenance.set_sensitive(not busy)
             self.install_row.set_sensitive(not busy)
             self.tools.set_sensitive(not busy)
+            if self.locate_button is not None:
+                # A Windows drive is writable by its game, which could swap it
+                # for a link while the manager opens it.
+                self.locate_button.set_sensitive(entry["kind"] != "windows" or not busy)
 
         def poll(self, force=False):
             if self.closed:
@@ -968,13 +974,30 @@ def main():
 
         def locate(self, entry):
             if entry["kind"] == "windows":
+                name = entry["name"]
+                if name in self.running or name in self.pending or \
+                        (name in self.processes and self.processes[name].poll() is None):
+                    self.toast("Stop this sandbox before opening its Windows drive")
+                    return
+                # Started meanwhile from the file manager, a shortcut or the
+                # command line, it holds sandbox-game's lock: the poll above
+                # may not have seen it yet.
                 try:
-                    # Never open a game-planted link or file on the host.
-                    drive = self.library.windows_drive(entry["name"])
-                except ValueError as error:
+                    lock = self.library.sandbox_lock(name)
+                except (OSError, ValueError) as error:
                     self.toast(error)
                     return
-                self.open_path(drive)
+                if lock is None:
+                    self.toast("Stop this sandbox before opening its Windows drive")
+                    return
+                try:
+                    # Never open a game-planted link or file on the host.
+                    drive = self.library.windows_drive(name)
+                    self.open_path(drive)
+                except ValueError as error:
+                    self.toast(error)
+                finally:
+                    os.close(lock)
                 return
             def selected(path):
                 self.work(lambda: self.library.reconnect(entry, path),

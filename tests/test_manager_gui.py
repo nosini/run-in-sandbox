@@ -310,6 +310,24 @@ def tick():
             opened = []
             manager.open_path = opened.append
             drive = manager.library.capture(manager.selected["name"]) / "compat/pfx/drive_c"
+            locate = button(manager.overview, "Locate game")
+            name = manager.selected["name"]
+            # A running sandbox's Windows drive is its game's to change.
+            manager.running.add(name)
+            manager.update_state()
+            assert not locate.get_sensitive()
+            manager.locate(manager.selected)
+            assert opened == [], opened
+            manager.running.discard(name)
+            manager.processes.pop(name, None)
+            manager.update_state()
+            # Started elsewhere and not polled yet: its lock says it runs.
+            held = manager.library.sandbox_lock(name)
+            assert held is not None
+            manager.locate(manager.selected)
+            os.close(held)
+            assert opened == [], opened
+            assert locate.get_sensitive()
             manager.locate(manager.selected)
             assert opened == [drive], opened
             drive.rename(drive.with_name("moved"))
