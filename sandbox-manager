@@ -170,6 +170,12 @@ def main():
                 self.manager.library.save_preferences(self.name, result)
                 self.manager.refresh_runtimes()  # launch_with may now choose Proton
                 self.state.mark_saved(result)
+                if result["scope"] == "clear":
+                    # The game's file is gone, so its own list of variables
+                    # is too: switching back must not offer it for saving
+                    # again. The other per-scope drafts live in the state,
+                    # which mark_saved just reset.
+                    self.env_text["game"] = ""
                 self.refresh()  # Default may now stand for another value
                 self.appearance.save(self.selected("appearance"))
                 if self.state.defaults_only:
@@ -632,11 +638,18 @@ def main():
                     changes.update(title=name.get_text().strip(), title_custom=True)
                 if args.get_text() != entry.get("arguments", ""):
                     changes["arguments"] = args.get_text()
-                try:
-                    self.library.update_entry(entry["name"], **changes)
-                    self.reload(entry["name"])
-                except (OSError, ValueError) as error:
-                    self.toast(error)
+                if not changes:
+                    return
+                # A refresh or folder search holds the library's lock over
+                # slow scans: save off the main thread, so the window stays
+                # responsive, and keep this from being submitted twice.
+                save_button.set_sensitive(False)
+                def done(updated, error):
+                    save_button.set_sensitive(True)
+                    if error:
+                        return  # work() already showed the toast
+                    self.reload(updated["name"])
+                self.work(lambda: self.library.update_entry(entry["name"], **changes), done)
             save_button = self.button(self.overview, "Save game details", save, "suggested-action")
             save_button.set_halign(Gtk.Align.END)
             self.build_shortcuts(entry)
@@ -772,24 +785,28 @@ def main():
                     select = Gtk.Button(label="Selected" if chosen else "Use for Play", valign=Gtk.Align.CENTER)
                     select.set_sensitive(not chosen)
                     def choose(*_, program=target):
-                        try:
-                            updated = self.library.update_entry(entry["name"], program=program)
-                        except (OSError, ValueError) as error:
-                            self.toast(error)
-                            return
-                        if token != self.programs_request or not self.selected \
-                                or self.selected["name"] != updated["name"]:
-                            return
-                        self.selected = updated
-                        self.entries = [updated if item["name"] == updated["name"] else item
-                                        for item in self.entries]
-                        shown = self.rows.get(updated["name"])
-                        if shown is not None:
-                            shown.entry = updated
-                        self.load_icon(updated)
-                        self.build_overview(updated)
-                        self.scan_programs(updated)
-                        self.update_state()
+                        # update_entry takes the library's lock, which a
+                        # refresh or folder search can hold over a slow scan:
+                        # choose off the main thread, once at a time.
+                        select.set_sensitive(False)
+                        def done(updated, error):
+                            select.set_sensitive(True)
+                            if error:
+                                return  # work() already showed the toast
+                            if token != self.programs_request or not self.selected \
+                                    or self.selected["name"] != updated["name"]:
+                                return
+                            self.selected = updated
+                            self.entries = [updated if item["name"] == updated["name"] else item
+                                            for item in self.entries]
+                            shown = self.rows.get(updated["name"])
+                            if shown is not None:
+                                shown.entry = updated
+                            self.load_icon(updated)
+                            self.build_overview(updated)
+                            self.scan_programs(updated)
+                            self.update_state()
+                        self.work(lambda: self.library.update_entry(entry["name"], program=program), done)
                     select.connect("clicked", choose)
                     row.add_suffix(select)
                     self.program_list.append(row)
@@ -803,17 +820,22 @@ def main():
             token = self.settings_request
             self.clear(self.settings_page)
             self.label(self.settings_page, "Loading settings…", "dim-label")
+            # reload() rebinds the description cache while a worker may be
+            # reading it, and a raced KeyError toasted a discarded answer:
+            # the worker sees only what was captured here, and loaded()
+            # writes back under the token it still holds.
+            key = (entry["name"], entry["selection"]) if entry.get("selection") else None
+            cached = self.descriptions.get(key) if key is not None else None
             def load():
-                key, description = None, None
+                description = None
                 if entry["kind"] == "windows":
                     request = dict(engine="proton", can_proton=False, dotnet=False)
-                elif entry.get("selection") and Path(entry["selection"]).exists():
-                    key = (entry["name"], entry["selection"])
-                    if key not in self.descriptions:
+                elif key is not None and Path(entry["selection"]).exists():
+                    if cached is None:
                         description = self.library.describe(entry["selection"], entry["name"])
                         request = dict(description)
                     else:
-                        request = dict(self.descriptions[key])
+                        request = dict(cached)
                 else:
                     request = dict(engine="", can_proton=False)
                 scopes = {"game": self.library.scope_settings(entry["name"]),
@@ -855,20 +877,22 @@ def main():
                 return
             pane.state.refresh_defaults(values)
             pane.updating = True
-            # The theme belongs to every dialog, so this pane must save the new one.
-            themes = ["system", "light", "dark"]
-            if self.appearance.saved_theme in themes:
-                pane.widgets["appearance"].set_selected(themes.index(self.appearance.saved_theme))
-            for key, _ in dialogs.REQUIREMENTS:
-                pane.widgets["require_" + key].set_active(key in pane.state.values["require"].split(","))
-            pane.widgets["fullscreen"].set_active(pane.state.fullscreen)
-            if pane.state.scope == "all":
-                pane.show_plain()
-            env_lines = "\n".join(values.get("env", "").split())
-            pane.env_text["all"] = env_lines
-            if pane.env_scope == "all":
-                pane.env_view.get_buffer().set_text(env_lines)
-            pane.updating = False
+            try:
+                # The theme belongs to every dialog, so this pane must save the new one.
+                themes = ["system", "light", "dark"]
+                if self.appearance.saved_theme in themes:
+                    pane.widgets["appearance"].set_selected(themes.index(self.appearance.saved_theme))
+                for key, _ in dialogs.REQUIREMENTS:
+                    pane.widgets["require_" + key].set_active(key in pane.state.values["require"].split(","))
+                pane.widgets["fullscreen"].set_active(pane.state.fullscreen)
+                if pane.state.scope == "all":
+                    pane.show_plain()
+                env_lines = "\n".join(values.get("env", "").split())
+                pane.env_text["all"] = env_lines
+                if pane.env_scope == "all":
+                    pane.env.get_buffer().set_text(env_lines)
+            finally:
+                pane.updating = False
             pane.refresh()
 
         def open_defaults(self):

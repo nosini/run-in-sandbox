@@ -491,6 +491,14 @@ class LibraryTests(unittest.TestCase):
         text = self.library.read_log(entry["name"])
         self.assertIn("Cannot read the launch log", text)
 
+    def test_a_folder_the_game_made_unreadable_reports_an_unreadable_log(self):
+        entry = self.library.create("game")
+        capture = self.library.capture(entry["name"])
+        self.library.log_path(entry["name"]).write_text("log")
+        capture.chmod(0)
+        self.addCleanup(capture.chmod, 0o700)
+        self.assertIn("Cannot read the launch log", self.library.read_log(entry["name"]))
+
     def test_preferences_saves_are_serialized_and_leave_no_stray_files(self):
         name = self.library.create("game")["name"]
         errors = []
@@ -1020,6 +1028,54 @@ class LibraryTests(unittest.TestCase):
             self.library.program_host(entry, "/game/play.exe")
         self.assertEqual(self.library.programs(entry), [])
 
+    def test_fuse_overlayfs_whiteout_hides_the_deleted_program(self):
+        entry = self.library.create("game")
+        lower = Path(entry["directory"]) / "play.exe"
+        lower.write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / ".wh.play.exe"
+        upper.parent.mkdir(parents=True)
+        upper.write_text("")
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
+    def test_fuse_overlayfs_opaque_folder_hides_the_lower_programs(self):
+        entry = self.library.create("game")
+        sub = Path(entry["directory"]) / "sub"
+        sub.mkdir()
+        (sub / "play.exe").write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / "sub"
+        upper.mkdir(parents=True)
+        (upper / ".wh..wh..opq").write_text("")
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/sub/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
+    def test_fuse_overlayfs_whiteout_of_a_folder_hides_the_program_below_it(self):
+        entry = self.library.create("game")
+        sub = Path(entry["directory"]) / "sub"
+        sub.mkdir()
+        (sub / "play.exe").write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / ".wh.sub"
+        upper.parent.mkdir(parents=True)
+        upper.write_text("")
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/sub/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
+    def test_an_unreadable_upper_folder_hides_its_programs_without_a_traceback(self):
+        entry = self.library.create("game")
+        sub = Path(entry["directory"]) / "sub"
+        sub.mkdir()
+        (sub / "play.exe").write_text("original")
+        upper = self.library.upper_layer(entry["name"]) / "sub"
+        upper.mkdir(parents=True)
+        upper.chmod(0)
+        self.addCleanup(upper.chmod, 0o700)
+        with self.assertRaises(ValueError):
+            self.library.program_host(entry, "/game/sub/play.exe")
+        self.assertEqual(self.library.programs(entry), [])
+
     def test_upper_layer_link_on_the_way_hides_the_original_program(self):
         entry = self.library.create("game")
         lower = Path(entry["directory"]) / "sub"
@@ -1073,7 +1129,7 @@ class LibraryTests(unittest.TestCase):
             popen.assert_not_called()
 
     def test_names_and_settings_cannot_escape_their_files(self):
-        for name in ("..", ".", "../other", "/other", "game\nother"):
+        for name in ("..", ".", "../other", "/other", "game\nother", "-game"):
             with self.assertRaises(ValueError):
                 self.library.capture(name)
         entry = self.library.create("game")
@@ -1851,6 +1907,17 @@ python3 -c 'import os,json; print(json.dumps([os.environ.get(k) for k in
         self.assertEqual([e["name"] for e in self.library.entries()], [entry["name"]])
         with self.assertRaises(ValueError):
             self.library.capture(".locks")
+
+    def test_valid_name_accepts_exactly_what_the_bash_one_does(self):
+        names = ["game", "Game-2", "a.b_c", "0start", "..hidden", "x", "a--b",
+                 "game-", "locks", "-game", "-", "", "game name", "game/other",
+                 "game\tother", "@game", "game@", ".", "..", ".locks"]
+        script = '. "$1/sandbox-game-lib" && valid_name "$2"'
+        for name in names:
+            with self.subTest(name=name):
+                bash = subprocess.run(["bash", "-c", script, "valid_name", str(ROOT), name],
+                                      capture_output=True).returncode == 0
+                self.assertEqual(core.valid_name(name), bash)
 
     def test_logs_live_in_the_sandbox_folder_and_older_ones_still_show(self):
         entry = self.library.create("game")

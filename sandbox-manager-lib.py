@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 
-NAME = re.compile(r"[A-Za-z0-9._-]+")
+NAME = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]*")
 # Where removable drives are mounted. See Library.folder_state.
 REMOVABLE_ROOTS = (Path("/run/media"), Path("/media"), Path("/mnt"))
 # Bound what an icon extractor can make the host buffer or decode.
@@ -40,7 +40,9 @@ def safe_resolve(path, strict=False):
 
 
 def valid_name(name):
-    # .locks holds sandbox-game's locks.
+    # A leading hyphen would look like an option to anything handed the
+    # name, exactly as sandbox-game-lib's valid_name refuses it; .locks
+    # holds sandbox-game's locks.
     return bool(NAME.fullmatch(name)) and name not in (".", "..", ".locks")
 
 
@@ -1294,6 +1296,23 @@ PY
                 return False
         return False
 
+    @staticmethod
+    def upper_whiteout(upper, relative):
+        """Whether the upper layer's whiteout marks hide RELATIVE's lower file.
+        fuse-overlayfs writes a .wh.<name> beside a deleted entry and a
+        .wh..wh..opq into a folder whose lower contents it hides; either one
+        on any component hides the file. The kernel overlay's own whiteouts
+        are 0:0 devices on the path itself, which the caller's checks catch."""
+        path = upper
+        parts = Path(relative).parts
+        for part in parts[:-1]:
+            if (path / (".wh." + part)).exists() or (path / ".wh..wh..opq").exists():
+                return True
+            path = path / part
+            if not path.exists():
+                return False
+        return (path / (".wh." + parts[-1])).exists() or (path / ".wh..wh..opq").exists()
+
     def program_host(self, entry, program):
         """Translate only files actually exposed as this sandbox's game or C: drive."""
         capture = self.capture(entry["name"])
@@ -1314,15 +1333,22 @@ PY
         if ".." in Path(relative).parts or Path(relative).is_absolute():
             raise ValueError("Select a program inside this sandbox")
         for root, path in candidates:
+            try:
+                present = path.is_file()
+                # A whiteout, a directory or a dangling link hides the lower file.
+                hidden = path.exists() or path.is_symlink()
+                if upper is not None and root == upper:
+                    hidden = hidden or self.upper_hides_parent(upper, relative) \
+                        or self.upper_whiteout(upper, relative)
+            except OSError:
+                # A folder the game made unreadable may be hiding the file.
+                break
             resolved = safe_resolve(path)
             root_resolved = safe_resolve(root)
-            if path.is_file() and resolved is not None and root_resolved is not None \
+            if present and resolved is not None and root_resolved is not None \
                     and resolved.is_relative_to(root_resolved):
                 return path
-            # A whiteout, a directory or a dangling link hides the lower file.
-            if path.exists() or path.is_symlink():
-                break
-            if upper is not None and root == upper and self.upper_hides_parent(upper, relative):
+            if hidden:
                 break
         raise ValueError("The selected program no longer exists in this sandbox")
 
@@ -1350,6 +1376,8 @@ PY
                 dirs[:] = [d for d in dirs if d.lower() not in
                            ("windows", "$recycle.bin", "system volume information")]
                 for filename in files:
+                    if root == rw and filename.startswith(".wh."):
+                        continue  # a whiteout mark, not a program
                     if not filename.lower().endswith(".exe"):
                         continue
                     path = Path(folder) / filename
@@ -1424,9 +1452,9 @@ PY
 
     def read_log(self, name):
         path = self.log_path(name)
-        if not path.exists():
-            path = self.old_log_path(name)
         try:
+            if not path.exists():
+                path = self.old_log_path(name)
             with path.open("rb") as stream:
                 stream.seek(0, 2)
                 size = stream.tell()

@@ -545,6 +545,32 @@ class Preferences:
                 own.pop(name, None)
         own.update({key: value for key, value in result.items()
                     if any(key in names for names in INHERITED.values())})
+        # The other keys as prefs_save wrote them, so a later clear or a
+        # defaults refresh reads back what the file now holds: a hidden key
+        # keeps its file's value, an empty protection choice goes back to
+        # inheriting, and an empty optional value stays in the file only
+        # where the defaults' own one would keep it there.
+        for key in PLAIN:
+            if key in result and key not in ("lan_allow", "hosts", "x11_exe"):
+                own[key] = result[key]
+        for key in SECURITY_CHOICES:
+            if key in result:
+                if result[key]:
+                    own[key] = result[key]
+                else:
+                    own.pop(key, None)
+        for key in ("lan_allow", "hosts", "x11_exe", "require"):
+            if key not in result:
+                continue
+            if result[key] or (self.scope == "game" and self.files.get("all", {}).get(key)):
+                own[key] = result[key]
+            else:
+                own.pop(key, None)
+        if "env" in result:
+            if result["env"] or own.get("env") == "":
+                own["env"] = result["env"]
+            else:
+                own.pop("env", None)
         if "gamescope_resolution" in result and "resolution" not in result.get("inherit", "").split(","):
             width, _, height = result["gamescope_resolution"].partition("x")
             own["gamescope_args"] = " ".join(
@@ -553,6 +579,9 @@ class Preferences:
     def refresh_defaults(self, values):
         """Take newly saved defaults without dropping edits made in this window."""
         inherited = [key for key in INHERITED if self.scope == "game" and self.inherits(key)]
+        # A game with no required protections of its own follows the defaults;
+        # one the user edited or saved here does not.
+        old_require = requirements_value(self.files.get("all", {}).get("require", ""))
         self.files["all"] = dict(values)
         self.saved_defaults = {key: values.get(key, "") for key in SECURITY_CHOICES}
         self.plain_values["all"] = plain_settings(values)
@@ -562,7 +591,8 @@ class Preferences:
         if self.scope == "game":
             for key in inherited:
                 self.choose(key, None)
-            if not self.files["game"].get("require"):
+            if "require" not in self.files.get("game", {}) \
+                    and self.values["require"] == old_require:
                 self.require_values["game"] = requirements_value(values.get("require", ""))
                 self.values["require"] = self.require_values["game"]
             self.choice_values["game"] = self.choice_state()
@@ -570,7 +600,7 @@ class Preferences:
             self.values.update(self.plain_values["all"])
             self.values.update(self.security_values["all"])
             self.values["require"] = self.require_values["all"]
-            self.apply_choices(self.choice_values["all"])
+            self.load_choices(self.choice_values["all"])
 
     def error(self):
         """Why the visible settings cannot be saved, or None."""

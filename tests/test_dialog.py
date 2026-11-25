@@ -75,6 +75,51 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.result()["separate_uid"], "")
         self.assertEqual(state.result()["seccomp"], "")
 
+    def test_clearing_a_game_after_saving_defaults_takes_the_new_defaults(self):
+        state = Preferences({"engine": "native", "values": {},
+                             "security": {"game": {}, "all": {}}})
+        state.set_scope("all")
+        state.values["net"] = "1"
+        state.values["require"] = "seccomp"
+        state.mark_saved(state.result())
+        state.set_scope("clear")
+        state.mark_saved({"scope": "clear"})
+        state.set_scope("game")
+        self.assertEqual(state.result()["net"], "1")
+        self.assertEqual(state.result()["require"], "seccomp")
+
+    def test_refresh_defaults_keeps_a_games_own_edited_or_saved_requirements(self):
+        defaults = {"require": "landlock", "seccomp": "enforce"}
+        request = {"engine": "native", "values": dict(defaults),
+                   "security": {"game": {}, "all": defaults}}
+        # Nothing of its own, nothing edited: the game follows the defaults.
+        state = Preferences(request)
+        state.refresh_defaults({"require": "limits", "seccomp": "log"})
+        self.assertEqual(state.values["require"], "limits")
+        # An unsaved edit of its own survives new defaults.
+        state = Preferences(request)
+        state.values["require"] = "seccomp"
+        state.refresh_defaults({"require": "limits", "seccomp": "log"})
+        self.assertEqual(state.values["require"], "seccomp")
+        # Saved for this game, even equal to the old defaults: still its own.
+        state = Preferences(request)
+        state.mark_saved({"scope": "game", "require": "landlock"})
+        state.refresh_defaults({"require": "limits", "seccomp": "log"})
+        self.assertEqual(state.values["require"], "landlock")
+
+    def test_refresh_defaults_applies_the_defaults_scopes_own_new_choices(self):
+        # This pane is showing the defaults' own scope when they are saved
+        # again elsewhere; it must take the new choices, not crash on a
+        # method that does not exist and leave the pane out of date.
+        state = Preferences({"engine": "native", "can_proton": True,
+                             "values": {"wayland": "1", "proton": "GE-Old"},
+                             "security": {"game": {}, "all": {"wayland": "1",
+                                                               "proton": "GE-Old"}}})
+        state.set_scope("all")
+        state.refresh_defaults({"wayland": "0", "proton": "GE-New"})
+        self.assertEqual(state.display, "x11")
+        self.assertEqual(state.values["proton"], "GE-New")
+
     def test_new_defaults_refresh_inherited_choices_without_clearing_game_edits(self):
         defaults = {"net": "0", "proton": "GE-Old", "seccomp": "enforce"}
         state = Preferences({"engine": "proton", "can_proton": True,
