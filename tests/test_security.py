@@ -3970,6 +3970,44 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                          ["/game/bin/", "/game/read me.txt"])
         self.assertEqual(tab(str(self.game), "/game/bin/g"), ["/game/bin/game.exe"])
 
+    def test_completion_treats_names_and_the_game_folder_as_data(self):
+        # A name or folder holding a command substitution is completed as
+        # written, never expanded while the candidate list is filtered.
+        if not shutil.which("bash"):
+            self.skipTest("bash is unavailable")
+        sandboxes = self.home / "game-sandboxes"
+        sandboxes.mkdir(parents=True)
+        odd = "$(touch PWNED)"
+        (sandboxes / odd).mkdir()
+        gamedir = self.base / "$(touch PWNED2)"
+        (gamedir / "bin").mkdir(parents=True)
+        def complete(*words):
+            script = r'''
+                _init_completion() {
+                    cur=${COMP_WORDS[COMP_CWORD]}
+                    prev=${COMP_WORDS[COMP_CWORD-1]}
+                    words=("${COMP_WORDS[@]}")
+                    cword=$COMP_CWORD
+                }
+                source "$1"
+                shift
+                COMP_WORDS=("$@")
+                COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+                COMP_LINE="${COMP_WORDS[*]}"; COMP_POINT=${#COMP_LINE}
+                _sandbox_game sandbox-game "${COMP_WORDS[COMP_CWORD]}" \
+                    "${COMP_WORDS[COMP_CWORD-1]}" 2>/dev/null
+                printf '%s\n' "${COMPREPLY[@]}"
+            '''
+            result = subprocess.run(
+                ["bash", "-c", script, "tab", str(ROOT / "completions" / "sandbox-game"), *words],
+                env=self.env, cwd=self.base, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.splitlines()
+        self.assertEqual(complete("sandbox-game", "--name", "$"), [odd])
+        self.assertFalse((self.base / "PWNED").exists(), "a sandbox name was run as a command")
+        self.assertEqual(complete("sandbox-game", str(gamedir), "/game/b"), ["/game/bin/"])
+        self.assertFalse((self.base / "PWNED2").exists(), "the game folder was run as a command")
+
     def prepare_dialog(self, form, launch_with=""):
         self.env["SANDBOX_DIALOG"] = str(ROOT / "tests" / "dialog_recorder.py")
         self.env["DIALOG_RECORD"] = str(self.base / "offered.json")

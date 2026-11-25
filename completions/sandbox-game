@@ -43,16 +43,43 @@ _sandbox_game_known()
 }
 
 # A word as typed -- quotes and backslashes and all -- as the shell will see
-# it, in REPLY. bash-completion 2.12 renamed this helper too, and made it
-# refuse anything that is not plainly a word.
+# it, in REPLY. Nothing in it is run or expanded: a name is only ever a name.
 _sandbox_game_dequote()
 {
-    if declare -F _comp_dequote >/dev/null; then
-        _comp_dequote "$1" || return
-        REPLY=${REPLY[0]-}
-    else
-        REPLY=$(dequote "$1")
-    fi
+    local word=$1 reply="" quote="" char i
+    for ((i = 0; i < ${#word}; i++)); do
+        char=${word:i:1}
+        if [[ $quote == "'" ]]; then
+            if [[ $char == "'" ]]; then quote=""; else reply+=$char; fi
+        elif [[ $quote == '"' ]]; then
+            if [[ $char == '"' ]]; then
+                quote=""
+            elif [[ $char == '\' ]] && ((i + 1 < ${#word})); then
+                ((i++)); reply+=${word:i:1}
+            else
+                reply+=$char
+            fi
+        elif [[ $char == "'" || $char == '"' ]]; then
+            quote=$char
+        elif [[ $char == '\' ]] && ((i + 1 < ${#word})); then
+            ((i++)); reply+=${word:i:1}
+        else
+            reply+=$char
+        fi
+    done
+    REPLY=$reply
+}
+
+# The candidates from $@ that start with the word being completed, added
+# literally. They are read as data, never as a wordlist for compgen -W, which
+# would expand command substitutions in a name it was given.
+_sandbox_game_matches()
+{
+    local cand
+    COMPREPLY=()
+    for cand in "$@"; do
+        [[ $cand == "$cur"* ]] && COMPREPLY+=("$cand")
+    done
 }
 
 # The command, as the sandbox sees it: /game/... is the game folder, and so is
@@ -120,20 +147,26 @@ _sandbox_game()
     [[ ${words[cword]} == "$prev="* ]] && split_here=1
     case $prev in
         --x11-backend)
-            COMPREPLY=($(compgen -W 'gamescope satellite' -- "$cur"))
+            _sandbox_game_matches gamescope satellite
             return ;;
         --require)
             # A comma-separated list: complete the word after the last comma.
-            local done=${cur%"${cur##*,}"}
-            COMPREPLY=($(compgen -P "$done" -W 'landlock scoped private-display limits audio seccomp all' \
-                -- "${cur##*,}"))
+            local done=${cur%"${cur##*,}"} cand
+            COMPREPLY=()
+            for cand in landlock scoped private-display limits audio seccomp all; do
+                [[ $cand == "${cur##*,}"* ]] && COMPREPLY+=("$done$cand")
+            done
             compopt -o nospace 2>/dev/null
             return ;;
         --stop)
-            COMPREPLY=($(compgen -W "$(_sandbox_game_running)" -- "$cur"))
+            local -a running
+            mapfile -t running < <(_sandbox_game_running)
+            _sandbox_game_matches ${running[@]+"${running[@]}"}
             return ;;
         --name | --delete | --reset-install)
-            COMPREPLY=($(compgen -W "$(_sandbox_game_known)" -- "$cur"))
+            local -a known
+            mapfile -t known < <(_sandbox_game_known)
+            _sandbox_game_matches ${known[@]+"${known[@]}"}
             return ;;
         --print-name)
             _sandbox_game_filedir -d
@@ -148,8 +181,9 @@ _sandbox_game()
                 if [[ $cur == [/~.]* ]]; then
                     _sandbox_game_filedir -d
                 else
-                    local IFS=$'\n'
-                    COMPREPLY=($(compgen -W "$(sandbox-game --list-proton 2>/dev/null)" -- "$cur"))
+                    local -a installs
+                    mapfile -t installs < <(sandbox-game --list-proton 2>/dev/null)
+                    _sandbox_game_matches ${installs[@]+"${installs[@]}"}
                 fi
                 return
             fi ;;
@@ -158,8 +192,9 @@ _sandbox_game()
                 if [[ $cur == [/~.]* ]]; then
                     _sandbox_game_filedir -d
                 else
-                    local IFS=$'\n'
-                    COMPREPLY=($(compgen -W "$(sandbox-game --list-nwjs 2>/dev/null)" -- "$cur"))
+                    local -a versions
+                    mapfile -t versions < <(sandbox-game --list-nwjs 2>/dev/null)
+                    _sandbox_game_matches ${versions[@]+"${versions[@]}"}
                 fi
                 return
             fi ;;
@@ -175,10 +210,10 @@ _sandbox_game()
     # --with-proton take an optional =VALUE; they are listed plain, and typing
     # the = gets the values completed.
     if [[ $cur == -* ]]; then
-        COMPREPLY=($(compgen -W '--wayland --wayland-x11 --x11-backend --x11-exe --gamescope --host-x11 --headless
-            --proton --mod-loaders --steam --hide-tray --mkxp --nwjs-version --pgmmv --dotnet --with-proton --net --allow-lan
-            --lan --mac-vendor --hosts --add-host --hosts-writable --ro --require --name --env --mangohud --hdr --list --stop
-            --stop-all --reset-install --delete --print-name --list-proton --list-nwjs --check --help' -- "$cur"))
+        _sandbox_game_matches --wayland --wayland-x11 --x11-backend --x11-exe --gamescope --host-x11 --headless \
+            --proton --mod-loaders --steam --hide-tray --mkxp --nwjs-version --pgmmv --dotnet --with-proton --net --allow-lan \
+            --lan --mac-vendor --hosts --add-host --hosts-writable --ro --require --name --env --mangohud --hdr --list --stop \
+            --stop-all --reset-install --delete --print-name --list-proton --list-nwjs --check --help
         return
     fi
     _sandbox_game_filedir -d                   # GAMEDIR
