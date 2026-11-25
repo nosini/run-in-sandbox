@@ -701,7 +701,7 @@ check_host() {
     local default_filter_status=0
     _check_filter "" || default_filter_status=$?
 
-    abi="$(python3 "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
+    abi="$(python3 -I "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
     if [ "$abi" -ge 6 ] 2>/dev/null; then
         _check_line ok landlock "ABI $abi: files, and signals and abstract sockets scoped"
     elif [ "$abi" -ge 1 ] 2>/dev/null; then
@@ -735,7 +735,7 @@ check_host() {
 
     if ! command -v gamescope >/dev/null; then
         _check_line '!!' gamescope "not installed: the default display needs it (--wayland does not)"
-    elif python3 "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
+    elif python3 -I "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null; then
         _check_line ok gamescope "installed; games under it cannot reach the desktop's compositor"
     else
         _check_line -- gamescope "installed, but this kernel's Landlock cannot keep games under it off the desktop's compositor"
@@ -832,7 +832,7 @@ check_host() {
 # choices -- display, sound, uid, seccomp mode -- count as well.
 requirement_failures() {
     local r abi
-    abi="$(python3 "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
+    abi="$(python3 -I "$(helper sandbox-landlock)" --abi 2>/dev/null || echo 0)"
     [[ "$abi" =~ ^[0-9]+$ ]] || abi=0
     for r in "$@"; do
         case "$r" in
@@ -851,7 +851,7 @@ requirement_failures() {
                     fi
                 fi
                 if [ "${LAUNCH:-0}" = 0 ] || { [ "$HEADLESS" = 0 ] && [ "$OUTER_DISPLAY" = 1 ]; }; then
-                    python3 "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null \
+                    python3 -I "$(helper sandbox-landlock)" --has-unix-connect 2>/dev/null \
                         || echo "private-display: this kernel's Landlock cannot keep the game off the desktop's compositor socket"
                 fi ;;
             limits)
@@ -1164,8 +1164,8 @@ except ValueError as error:
     sys.exit(f"{'--allow-lan' if kind == 'lan' else '--add-host'}: {error}")
 PY
 LAN_RULES="[]"; HOSTS_LINES=""
-[ "${#LAN_ALLOW[@]}" = 0 ] || LAN_RULES="$(python3 -c "$PREF_CHECK" lan "${LAN_ALLOW[@]}")" || exit 1
-[ "${#HOSTS_ADD[@]}" = 0 ] || HOSTS_LINES="$(python3 -c "$PREF_CHECK" hosts "${HOSTS_ADD[@]}")" || exit 1
+[ "${#LAN_ALLOW[@]}" = 0 ] || LAN_RULES="$(python3 -I -c "$PREF_CHECK" lan "${LAN_ALLOW[@]}")" || exit 1
+[ "${#HOSTS_ADD[@]}" = 0 ] || HOSTS_LINES="$(python3 -I -c "$PREF_CHECK" hosts "${HOSTS_ADD[@]}")" || exit 1
 [ "$#" -ge 1 ] || { echo "usage: sandbox-game [OPTIONS] GAMEDIR CMD... (see --help)" >&2; exit 1; }
 GAMEDIR="$(realpath "$1")"
 # bwrap's overlay only takes a folder, and its error for anything else ("Can't
@@ -1319,7 +1319,7 @@ mine() {
     reclaim "$CAP" && RECLAIMED=1
 }
 mkdir -p "$CAP/home" "$CAP/rw" "$CAP/work" "$CAP/merged"
-python3 - "$CAP/source.json" "$GAMEDIR" <<'PY'
+python3 -I - "$CAP/source.json" "$GAMEDIR" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -1933,7 +1933,7 @@ PY
         OURS="$(echo '    // added by sandbox-game: the game is bind-mounted at /game'
                 echo '    "gameFolder": "/game",'; mkxp_preload)"
         if [ -f "$MKXP/mkxp.json" ] \
-           && python3 -c "$MKXP_MERGE" "$MKXP/mkxp.json" <<<"$OURS" > "$CAP/mkxp.json"; then
+           && python3 -I -c "$MKXP_MERGE" "$MKXP/mkxp.json" <<<"$OURS" > "$CAP/mkxp.json"; then
             :
         else
             [ ! -f "$MKXP/mkxp.json" ] || echo "sandbox-game: warning: no settings found" \
@@ -3285,7 +3285,7 @@ elif [ "$SEPARATE_UID" = systemd ]; then
     # reports its pid.
     MANAGED_NET=()
     if [ "$NET" = 1 ]; then
-        NET_SPEC="$(python3 -c "$NET_HELPER" "" "$DNS_ADDR" "" "$PASTA_BIN" "$MAC" \
+        NET_SPEC="$(python3 -I -c "$NET_HELPER" "" "$DNS_ADDR" "" "$PASTA_BIN" "$MAC" \
                     "$LAN_ALL" "$LAN_RULES" 18>&-)" || {
             echo "could not work out the sandbox's network rules; not starting the game" >&2; exit 1; }
         MANAGED_NET=( --net "$NET_SPEC" )
@@ -3491,7 +3491,7 @@ else
     rm -rf "$FIFOS"
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
-    if [ -n "$CHILD" ] && python3 -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
+    if [ -n "$CHILD" ] && python3 -I -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
                                     "$MAC" "$LAN_ALL" "$LAN_RULES" 18>&-; then
         printf x >&13
     else

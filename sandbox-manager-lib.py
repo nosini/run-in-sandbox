@@ -568,7 +568,7 @@ renpy=0; dotnet=0; windows=0
 if renpy_without_wayland "$R_GAMEDIR"; then renpy=1; fi
 if is_dotnet "$R_GAMEDIR"; then dotnet=1; fi
 if has_windows_exe "$R_GAMEDIR"; then windows=1; fi
-python3 - "$R_GAMEDIR" "$R_ENGINE" "$renpy" "$dotnet" "$windows" <<'PY'
+python3 -I - "$R_GAMEDIR" "$R_ENGINE" "$renpy" "$dotnet" "$windows" <<'PY'
 import json, sys
 d, engine, renpy, dotnet, windows = sys.argv[1:]
 print(json.dumps(dict(directory=d, engine=engine, renpy_x11=renpy == "1",

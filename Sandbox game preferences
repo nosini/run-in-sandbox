@@ -43,7 +43,7 @@ elif [ -f "$HOME/game-sandboxes/$NAME/managed-uid" ]; then UID_BACKEND=systemd; 
 
 # JSON is data, never shell code. Folder names and values need no escaping by
 # hand, and all controls keep their values while switching between runtimes.
-REQUEST="$(python3 - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$NWJS_VERSIONS" "$OWN_SETTINGS" "$DOTNET_APP" "$UID_BACKEND" \
+REQUEST="$(python3 -I - "$BASE" "$R_ENGINE" "$CAN_PROTON" "$RENPY_X11" "$RES" "$PROTONS" "$NWJS_VERSIONS" "$OWN_SETTINGS" "$DOTNET_APP" "$UID_BACKEND" \
     "$CFGDIR/games/$NAME" "$CFGDIR/defaults" \
     launch_with "$(cfg_get launch_with auto)" wayland "$(cfg_get wayland 0)" \
     wayland_x11 "$(cfg_wayland_x11)" x11_exe "$(cfg_get x11_exe '')" \

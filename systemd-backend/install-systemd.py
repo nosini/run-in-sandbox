@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Administrator setup, invoked by install.sh. Currently supports openSUSE RPMs."""
 import hashlib
 import importlib.machinery

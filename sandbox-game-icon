@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Extract a local PNG/ICO or PE icon as a small PNG; invoked inside bwrap.
 
 Reads the file from standard input, an already opened descriptor, or from the

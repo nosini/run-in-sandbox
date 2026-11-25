@@ -95,7 +95,7 @@ install_one() {
     install -Dm"$1" "$SRC/$2" "$3/$2"; say "installed $3/$2"
     if [ "$2" = eu.nosini.SandboxManager.desktop ]; then
         # Desktop launchers must also work when ~/.local/bin is not on PATH.
-        python3 - "$3/$2" "$BIN/sandbox-manager" <<'PY'
+        python3 -I - "$3/$2" "$BIN/sandbox-manager" <<'PY'
 from pathlib import Path
 import re
 import sys

@@ -223,6 +223,34 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                              ["--dns-forward", "169.254.1.1"]
                              + (["--dns-host", expected] if expected else []))
 
+class HostPythonTests(unittest.TestCase):
+    """Python the host runs is isolated (-I): never the current folder's modules."""
+
+    SCRIPTS = ("sandbox-game", "sandbox-game-lib", "Sandbox game", "Sandbox game preferences",
+               "Stop sandboxed game", "sandbox-attach", "sandbox-manager-lib.py", "install.sh",
+               "get-satellite.sh", "completions/sandbox-game", "completions/sandbox-attach")
+    PYTHON_SCRIPTS = ("sandbox-seccomp", "sandbox-landlock", "sandbox-uid", "sandbox-game-icon",
+                      "sandbox-game-dialog", "sandbox-manager", "systemd-backend/install-systemd.py")
+
+    def test_every_python3_run_is_isolated(self):
+        for name in self.SCRIPTS:
+            path = ROOT / name
+            if not path.exists():
+                continue
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if line.lstrip().startswith("#") or "needs python3" in line:
+                    continue
+                for match in re.finditer(r"\bpython3\b(?![-.\w])", line):
+                    if not re.match(r"""[")]*,? +"?-I\b""", line[match.end():]):
+                        self.fail(f"{name}:{number}: python3 without -I: {line.strip()}")
+
+    def test_python_helpers_are_isolated(self):
+        for name in self.PYTHON_SCRIPTS:
+            with self.subTest(name):
+                first = (ROOT / name).read_text().splitlines()[0]
+                self.assertEqual(first, "#!/usr/bin/env -S python3 -I")
+
+
 class SecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-",
@@ -260,12 +288,12 @@ class SecurityTests(unittest.TestCase):
                             "chown", "-hR", "0:0", str(uid.parent)],
                            env=self.env, capture_output=True, timeout=30)
 
-    def cli(self, *args, check=True):
+    def cli(self, *args, check=True, cwd=None):
         # No terminal on stdin, or anything that asks first (--delete,
         # --reset-install) would wait for an answer that never comes.
         result = subprocess.run([str(ROOT / "sandbox-game"), *map(str, args)],
                                 env=self.env, capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, timeout=15)
+                                stdin=subprocess.DEVNULL, timeout=15, cwd=cwd)
         # A failed launch says why: CalledProcessError would keep stderr to itself.
         if check and result.returncode != 0:
             self.fail(f"sandbox-game exited {result.returncode}:\n{result.stderr}")
@@ -3651,6 +3679,18 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
                                                                  "stopped", "stuck"])
         self.assertEqual(procs["stuck"].wait(timeout=5), -9)
         self.assertIsNone(procs["reused"].poll(), "a PID no longer a sandbox's was killed")
+
+    def test_launch_from_the_game_folder_imports_nothing_from_it(self):
+        # Nautilus runs its scripts in the selected folder, and so may you:
+        # cd Game && sandbox-game . -- Python run as "python3 -" or "-c"
+        # would look there for json, tempfile and pathlib before the
+        # standard library, and run the game's own on the host.
+        marker = self.base / "hijacked"
+        for module in ("json", "tempfile", "pathlib", "re", "ipaddress", "subprocess"):
+            (self.game / f"{module}.py").write_text(
+                f"open({str(marker)!r}, 'a').write({module!r} + '\\n')\n")
+        self.cli("--headless", "--name", "cwd", ".", "/bin/true", cwd=self.game)
+        self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
 
     def test_list_reset_install_and_delete(self):
         (self.game / "www").mkdir()

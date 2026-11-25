@@ -184,7 +184,7 @@ find_nwjs() {                         # $1 = auto | version | path -> build dir
 # rank_launchers takes them.
 elf_programs() {
     [ "$#" -gt 0 ] || return 0
-    python3 - "$@" <<'PY'
+    python3 -I - "$@" <<'PY'
 import os, sys
 MACHINES = {"x86_64": 62, "aarch64": 183, "riscv64": 243, "ppc64le": 21, "i686": 3, "i386": 3}
 host = MACHINES.get(os.uname().machine)
@@ -521,7 +521,7 @@ prefs_save() (
     out="$1"
     # Only fields belonging to the selected engine are returned. Hidden fields
     # come from the file being written, so they never copy across config scopes.
-    parsed="$(python3 - "$out" <<'PY'
+    parsed="$(python3 -I - "$out" <<'PY'
 import json, re, sys
 values = json.loads(sys.argv[1])
 keys = {"scope", "launch_with", "wayland", "host_x11", "gamescope", "mangohud", "hdr",

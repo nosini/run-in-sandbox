@@ -76,7 +76,7 @@ SEL="$(realpath "$SEL")"
 pick() {                                       # $1 = dir to strip, $@ = paths
     local dir="$1" rel; shift
     [ "$#" -eq 1 ] && { printf '%s\n' "$1"; return; }
-    rel="$(python3 -c 'import json,sys; json.dump({"items": sys.argv[1:]}, sys.stdout)' \
+    rel="$(python3 -I -c 'import json,sys; json.dump({"items": sys.argv[1:]}, sys.stdout)' \
         "${@#"$dir"/}" | dialog pick --title="Pick launcher")"
     [ -n "$rel" ] && printf '%s\n' "$dir/$rel"
 }
@@ -207,7 +207,7 @@ EOF
         set -e
         export PULSE_PROP_OVERRIDE="application.name=$1"
         casefold=; [ ! -f /nwjs-casefold.js ] || casefold=1
-        [ ! -f "$2/package.json" ] || python3 -c "$3" "$2/package.json" "$1" "$casefold" || true
+        [ ! -f "$2/package.json" ] || python3 -I -c "$3" "$2/package.json" "$1" "$casefold" || true
         d=/tmp/nwrun
         for f in /nwjs/*; do
             b=${f##*/}; [ "$b" = nw ] || [ "$b" = "$1" ] || ln -sf "$f" "$d/$b"
