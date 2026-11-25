@@ -456,6 +456,169 @@ vm.runInContext(source, context);
     def test_unused_inside_helper_is_gone(self):
         self.assertNotIn("function inside(", read("nwjs-casefold.js"))
 
+    def test_duplicate_fold_definition_is_gone(self):
+        # Two fold() declarations sat in one scope; the second wins through
+        # hoisting, and the first was dead.
+        self.assertEqual(read("nwjs-casefold.js").count("function fold("), 1)
+
+
+class CasefoldBackslashAndAsyncTests(ScriptTestCase):
+    """nwjs-casefold.js with Windows-style paths that need no case folding,
+    and with calls that fail after changing a folder."""
+
+    HARNESS = r"""
+    const real = require("fs");
+    const path = require("path");
+    const url = require("url");
+    const util = require("util");
+    const vm = require("vm");
+    const os = require("os");
+
+    const source = real.readFileSync(process.argv[2], "utf8");
+    const root = real.mkdtempSync(path.join(os.tmpdir(), "casefold-test-"));
+    process.on("exit", () => real.rmSync(root, { recursive: true, force: true }));
+    real.mkdirSync(path.join(root, "img/pictures"), { recursive: true });
+    real.writeFileSync(path.join(root, "img/pictures/b.png"), "PNGDATA");
+    real.mkdirSync(path.join(root, "save"));
+    real.writeFileSync(path.join(root, "save/Old.sav"), "OLD");
+
+    // A hand of fs whose async writes can be made to fail after their
+    // effect lands, and an image element recording what its src is set to.
+    const urls = [];
+    class FakeImage {
+        set src(v) { urls.push(String(v)); }
+        get src() { return ""; }
+    }
+    let writeError = null;
+    const fake = {};
+    for (const name of ["existsSync", "readdirSync", "readFileSync",
+                        "writeFileSync"]) {
+        if (typeof real[name] === "function") fake[name] = real[name].bind(real);
+    }
+    fake.constants = real.constants;
+    fake.promises = {};
+    fake.writeFile = function (...args) {
+        const callback = args[args.length - 1];
+        real.writeFileSync(args[0], args[1]);
+        callback(writeError);
+    };
+    fake.promises.writeFile = function (p, data) {
+        return new Promise((resolve, reject) => {
+            real.writeFileSync(p, data);
+            if (writeError) reject(writeError); else resolve();
+        });
+    };
+
+    const context = {
+        require: (id) => id === "fs" ? fake : id === "path" ? path
+                     : id === "url" ? url : id === "util" ? util : require(id),
+        nw: { __dirname: root },
+        location: { protocol: "chrome-extension:", host: "abc" },
+        document: { baseURI: "chrome-extension://abc/" },
+        HTMLImageElement: FakeImage,
+        process, Buffer, URL, Promise, Symbol, Map, Set, JSON, console,
+        globalThis: null,
+    };
+    context.globalThis = context;
+    vm.createContext(context);
+    vm.runInContext(source, context);
+
+    (async () => {
+        const result = {};
+        // A Windows-style path that needs no case folding still goes back
+        // with forward slashes, or it names no file at all.
+        try {
+            result.exactRead = fake.readFileSync(root + "\\img\\pictures\\b.png")
+                .toString();
+        } catch (error) {
+            result.exactRead = "ERR:" + error.code;
+        }
+        // The same for a write: the file must land in the folder, not as a
+        // literal save\new.sav beside it.
+        fake.writeFileSync(root + "\\save\\new.sav", "NEW");
+        result.writeLanded = real.existsSync(path.join(root, "save", "new.sav"));
+        result.writeLiteral = real.existsSync(root + "\\save\\new.sav");
+        // And for a URL: the resource is asked for again with forward
+        // slashes, while a plain one stays exactly as given.
+        const image = new context.HTMLImageElement();
+        image.src = "img\\pictures\\b.png";
+        result.urlExact = urls[urls.length - 1];
+        image.src = "img/pictures/b.png";
+        result.urlPlain = urls[urls.length - 1];
+        image.src = "img\\Pictures\\B.png";
+        result.urlFolded = urls[urls.length - 1];
+
+        // A write that fails after its effect lands still drops the folders
+        // it changed; the callback sees the same error, its throw included.
+        writeError = new Error("partial write");
+        try {
+            fake.writeFile(path.join(root, "save", "NEW.sav"), "NEW",
+                           function (error) {
+                result.writeError = error && error.message;
+                throw new Error("callback blew up");
+            });
+        } catch (error) {
+            result.writeThrew = error.message;
+        }
+        writeError = null;
+        try {
+            result.afterErrorWrite =
+                fake.readFileSync(path.join(root, "save", "New.SAV")).toString();
+        } catch (error) {
+            result.afterErrorWrite = "ERR:" + error.code;
+        }
+
+        // The promise form as well: the rejection is the caller's, and the
+        // folders are dropped anyway.
+        writeError = new Error("promise write failed");
+        try {
+            await fake.promises.writeFile(path.join(root, "save", "PROM.sav"),
+                                          "PROM");
+        } catch (error) {
+            result.promiseError = error.message;
+        }
+        writeError = null;
+        try {
+            result.afterPromiseWrite =
+                fake.readFileSync(path.join(root, "save", "Prom.SAV")).toString();
+        } catch (error) {
+            result.afterPromiseWrite = "ERR:" + error.code;
+        }
+        console.log(JSON.stringify(result));
+    })().catch((error) => { console.error(error); process.exit(1); });
+    """
+
+    def run_harness(self):
+        if not shutil.which("node"):
+            self.skipTest("node is unavailable")
+        harness = self.base / "harness.js"
+        harness.write_text(self.HARNESS, encoding="utf-8")
+        result = subprocess.run(["node", str(harness),
+                                 str(ROOT / "nwjs-casefold.js")],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_windows_backslash_paths_are_normalized_first(self):
+        got = self.run_harness()
+        self.assertEqual(got["exactRead"], "PNGDATA")
+        self.assertTrue(got["writeLanded"])
+        self.assertFalse(got["writeLiteral"],
+                         "the write made a literal save\\new.sav in the root")
+        self.assertEqual(got["urlExact"],
+                         "chrome-extension://abc/img/pictures/b.png")
+        self.assertEqual(got["urlPlain"], "img/pictures/b.png")
+        self.assertEqual(got["urlFolded"],
+                         "chrome-extension://abc/img/pictures/b.png")
+
+    def test_failed_async_calls_drop_the_folders_they_changed(self):
+        got = self.run_harness()
+        self.assertEqual(got["writeError"], "partial write")
+        self.assertEqual(got["writeThrew"], "callback blew up")
+        self.assertEqual(got["afterErrorWrite"], "NEW")
+        self.assertEqual(got["promiseError"], "promise write failed")
+        self.assertEqual(got["afterPromiseWrite"], "PROM")
+
 
 class CompletionTests(ScriptTestCase):
     def setUp(self):
@@ -468,7 +631,7 @@ class CompletionTests(ScriptTestCase):
         (self.cwd / "~otheruser" / "game" / "gamedata").mkdir(parents=True)
         (self.home / "game-sandboxes" / "mygame" / "gamedata").mkdir()
 
-    def complete(self, file, command, *words):
+    def complete(self, file, command, *words, path=SAFE_PATH):
         script = f"""
             source {shlex.quote(str(ROOT / "completions" / file))}
             _init_completion() {{
@@ -476,6 +639,14 @@ class CompletionTests(ScriptTestCase):
                 prev=${{COMP_WORDS[COMP_CWORD-1]}}
                 words=("${{COMP_WORDS[@]}}")
                 cword=$COMP_CWORD
+                split=false
+                # The -s splitter: an --opt=value word is divided at the
+                # first "=", prev keeping the option and cur the value.
+                if [[ $cur == --?*=* ]]; then
+                    prev=${{cur%%=*}}
+                    cur=${{cur#*=}}
+                    split=true
+                fi
                 return 0
             }}
             _filedir() {{
@@ -497,10 +668,15 @@ class CompletionTests(ScriptTestCase):
         result = subprocess.run(
             ["bash", "-c", script, "complete", *words],
             cwd=self.cwd,
-            env={**os.environ, "HOME": str(self.home), "PATH": SAFE_PATH},
+            env={**os.environ, "HOME": str(self.home), "PATH": path},
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
+
+    def one_dir_cwd(self):
+        """A cwd holding exactly one folder, for empty-word completions."""
+        self.cwd = self.base / "cleancwd"
+        (self.cwd / "gamedir1").mkdir(parents=True)
 
     def test_completion_init_receives_the_function_arguments(self):
         script = """
@@ -544,12 +720,14 @@ class CompletionTests(ScriptTestCase):
             COMP_WORDS=(sandbox-attach --na)
             COMP_CWORD=1
             _sandbox_attach sandbox-attach --na --name
+            printf '%s\\n' "${{COMPREPLY[@]}}"
         """
         result = subprocess.run(
             ["bash", "-c", script, "init",
              str(ROOT / "completions/sandbox-attach")],
             env={**os.environ, "PATH": SAFE_PATH}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["--name"])
         self.assertEqual(record.read_text(encoding="utf-8").splitlines(),
                          ["-s", "--", "sandbox-attach", "--na", "--name"])
 
@@ -573,10 +751,12 @@ class CompletionTests(ScriptTestCase):
         self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
                                        "sandbox-game", "--reset-install", "my"),
                          ["mygame"])
-        # --stop and --name do parse =NAME, so both spellings complete.
+        # --stop and --name do parse =NAME, so both spellings complete. The
+        # -s split hands over cur=NAME alone, and that is all COMPREPLY may
+        # carry: readline replaces only the value after "=".
         self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
                                        "sandbox-game", "--name=my"),
-                         ["--name=mygame"])
+                         ["mygame"])
 
     def test_tilde_expansion_does_not_mangle_another_users_path(self):
         self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
@@ -605,7 +785,8 @@ class CompletionTests(ScriptTestCase):
                                        "sandbox-attach", "program", "-"),
                          ["-gamedir"])
 
-        # --name=PREFIX split by -s sets prev=--name and cur=PREFIX with skip=0.
+        # --name=PREFIX split by -s sets prev=--name and cur=PREFIX with
+        # skip=0.
         stubbin = self.base / "attach-bin"
         stubbin.mkdir()
         self.write_exec(stubbin / "sandbox-attach",
@@ -617,6 +798,7 @@ class CompletionTests(ScriptTestCase):
                 prev=--name
                 words=(sandbox-attach --name=my)
                 cword=1
+                split=true
                 return 0
             }}
             _filedir() {{ COMPREPLY=(); }}
@@ -629,6 +811,260 @@ class CompletionTests(ScriptTestCase):
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["mygame"])
+
+    def test_finished_option_value_completes_the_next_word(self):
+        # A finished --opt=val word is not an option waiting for its value:
+        # the word after it is GAMEDIR or another option, never the same
+        # option's values again.
+        self.one_dir_cwd()
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--gamescope=-f", ""),
+                         ["gamedir1"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--x11-backend=satellite", ""),
+                         ["gamedir1"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--env=A=1", ""),
+                         ["gamedir1"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name=foo", ""),
+                         ["gamedir1"])
+        # GAMEDIR after plain options as well.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--wayland", "--mangohud", ""),
+                         ["gamedir1"])
+        # --name=foo --<TAB> completes the -- flags, not --name's values.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name=foo", "--"),
+                         ["--wayland", "--wayland-x11", "--x11-backend", "--x11-exe",
+                          "--gamescope", "--host-x11", "--headless", "--proton",
+                          "--mod-loaders", "--steam", "--hide-tray", "--mkxp",
+                          "--nwjs-version", "--pgmmv", "--dotnet", "--with-proton",
+                          "--net", "--allow-lan", "--lan", "--mac-vendor", "--hosts",
+                          "--add-host", "--hosts-writable", "--ro", "--require",
+                          "--name", "--env", "--mangohud", "--hdr", "--list", "--stop",
+                          "--stop-all", "--reset-install", "--delete", "--print-name",
+                          "--list-proton", "--list-nwjs", "--check", "--help"])
+
+    def test_split_option_value_completes_the_value_alone(self):
+        # With the -s split, readline replaces only the value after "=",
+        # so COMPREPLY must carry the value alone; offering --name=... again
+        # would insert --name=--name=mygame.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name=my"),
+                         ["mygame"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name="),
+                         ["mygame"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--x11-backend=sat"),
+                         ["satellite"])
+        # The space-separated spelling completes the same value whole.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name", "my"),
+                         ["mygame"])
+
+    def test_split_option_value_completes_host_paths(self):
+        # --proton=DIR and --nwjs-version=DIR take a path as their value;
+        # with the word split, the value alone names it.
+        pa_dir = self.base / "pa-dir"
+        pa_dir.mkdir()
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", f"--proton={self.base}/pa"),
+                         [str(pa_dir)])
+        nwjs_dir = self.base / "nwjs-dir"
+        nwjs_dir.mkdir()
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game",
+                                       f"--nwjs-version={self.base}/nw"),
+                         [str(nwjs_dir)])
+        # A path value that names nothing completes no runner either.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--proton=/path"),
+                         [])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--nwjs-version=/path"),
+                         [])
+
+    def test_was_split_spelling_of_the_split_flag(self):
+        # bash-completion 2.12 renamed _init_completion to _comp_initialize
+        # and the split flag to was_split, set to "set".
+        script = f"""
+            source {shlex.quote(str(ROOT / "completions/sandbox-game"))}
+            _comp_initialize() {{
+                cur=my
+                prev=--name
+                words=(sandbox-game --name=my)
+                cword=1
+                was_split=set
+                return 0
+            }}
+            _filedir() {{ COMPREPLY=(); }}
+            _sandbox_game sandbox-game --name=my
+            printf '%s\\n' "${{COMPREPLY[@]}}"
+        """
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={**os.environ, "HOME": str(self.home), "PATH": SAFE_PATH},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["mygame"])
+
+    def test_earlier_option_equals_does_not_poison_a_later_one(self):
+        # An --opt=val earlier in the line must not make a later
+        # space-separated --opt <TAB> look like the = spelling again.
+        self.one_dir_cwd()
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game",
+                                       "--gamescope=-f", "--gamescope", ""),
+                         ["gamedir1"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game",
+                                       "--delete=x", "--delete", ""),
+                         ["mygame"])
+
+    def test_inside_completion_dequotes_the_typed_word(self):
+        # After the first Tab inserts "sub\ dir/", the second Tab must look
+        # up "sub dir/" or it finds nothing to list.
+        game = self.base / "game"
+        sub = game / "sub dir"
+        sub.mkdir(parents=True)
+        (sub / "file").write_text("", encoding="utf-8")
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", str(game), "sub\\ dir/"),
+                         ["sub dir/file"])
+
+    def test_put_takes_two_files_and_eats_option_shaped_words(self):
+        # --put swallows the two words after it as FILE and DEST, whatever
+        # they look like: --name after --put is its FILE, not the sandbox
+        # list, and nothing comes after DEST.
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "--name", "-"),
+                         ["-gamedir"])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "--name", "my"),
+                         [])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "-g"),
+                         ["-gamedir"])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "x", "y", ""),
+                         [])
+
+    def test_attach_names_and_options_are_completed_as_data(self):
+        # A sandbox name is only ever a name: the candidates are read as
+        # data, never as a wordlist for compgen -W, which would expand a
+        # command substitution in a name it was given.
+        stubbin = self.base / "attach-bin"
+        stubbin.mkdir()
+        gotcha = self.base / "gotcha"
+        crafted = f"$(id>{shlex.quote(str(gotcha))})"
+        self.write_exec(stubbin / "sandbox-attach",
+                        "#!/bin/bash\n"
+                        "printf 'NAME PID\\n'\n"
+                        f"printf '%s\\n' 'mygame 123' "
+                        f"{shlex.quote(crafted + ' 456')} '* 789'\n")
+        path = str(stubbin) + ":" + SAFE_PATH
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--name", "", path=path),
+                         ["mygame", crafted, "*"])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--name", "my", path=path),
+                         ["mygame"])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "-", path=path),
+                         ["--name", "--list", "--shell", "--exec", "--put", "--help"])
+        self.assertFalse(gotcha.exists(),
+                         "a command substitution in a sandbox name ran on Tab")
+
+
+class RealBashCompletionTests(ScriptTestCase):
+    """The completions driven by bash-completion itself: its -s splitter
+    divides an --opt=value word, so only the value may be offered.
+
+    Skipped unless /usr/share/bash-completion/bash_completion exists or
+    SANDBOX_BASH_COMPLETION names one; any unpacked release works for the
+    latter.
+    """
+
+    def setUp(self):
+        super().setUp()
+        completion = os.environ.get(
+            "SANDBOX_BASH_COMPLETION",
+            "/usr/share/bash-completion/bash_completion")
+        if not Path(completion).is_file():
+            self.skipTest(f"no bash-completion at {completion}")
+        self.bash_completion = completion
+        self.home = self.base / "home"
+        self.cwd = self.base / "cwd"
+        (self.home / "game-sandboxes" / "mygame").mkdir(parents=True)
+        (self.cwd / "-gamedir").mkdir(parents=True)
+
+    def complete(self, file, command, *words, path=SAFE_PATH):
+        script = f"""
+            source {shlex.quote(str(self.bash_completion))}
+            source {shlex.quote(str(ROOT / "completions" / file))}
+            COMP_WORDS=("$@")
+            COMP_CWORD=$(( ${{#COMP_WORDS[@]}} - 1 ))
+            COMP_LINE="${{COMP_WORDS[*]}}"; COMP_POINT=${{#COMP_LINE}}
+            # As complete -F calls it: the command, the word being completed
+            # and the one before, so a cur beginning with "-" is not read as
+            # one of _init_completion's own options.
+            {command} "${{COMP_WORDS[0]}}" "${{COMP_WORDS[COMP_CWORD]}}" "${{COMP_WORDS[COMP_CWORD-1]}}"
+            if (( ${{#COMPREPLY[@]}} )); then
+                printf '%s\\n' "${{COMPREPLY[@]}}"
+            fi
+        """
+        result = subprocess.run(
+            ["bash", "-c", script, "complete", *words],
+            cwd=self.cwd,
+            env={**os.environ, "HOME": str(self.home), "PATH": path},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()
+
+    def test_option_value_is_completed_alone(self):
+        # readline has "=" among its word breaks, so it replaces only the
+        # value: the option must not be offered a second time.
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name=my"),
+                         ["mygame"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--x11-backend=sat"),
+                         ["satellite"])
+
+    def test_finished_option_value_word_starts_a_new_argument(self):
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--name=foo", "--na"),
+                         ["--name"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game",
+                                       "--gamescope=-f", "--gamescope", "--way"),
+                         ["--wayland", "--wayland-x11"])
+        self.assertEqual(self.complete("sandbox-game", "_sandbox_game",
+                                       "sandbox-game", "--delete=x", "--delete", ""),
+                         ["mygame"])
+
+    def test_attach_values_through_the_real_splitter(self):
+        stubbin = self.base / "attach-bin"
+        stubbin.mkdir()
+        self.write_exec(stubbin / "sandbox-attach",
+                        "#!/bin/bash\nprintf 'NAME PID\\nmygame 123\\n'")
+        path = str(stubbin) + ":" + SAFE_PATH
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--name=m", path=path),
+                         ["mygame"])
+        # --put takes the two words after it as FILE and DEST, --name among
+        # them: the sandbox list is not what it wants there, and nothing at
+        # all comes after DEST.
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "--name", "my",
+                                       path=path),
+                         [])
+        self.assertEqual(self.complete("sandbox-attach", "_sandbox_attach",
+                                       "sandbox-attach", "--put", "x", "y", "",
+                                       path=path),
+                         [])
 
 
 class SharedLibTests(ScriptTestCase):

@@ -105,7 +105,7 @@ _sandbox_game_value_matches()
 # typed. Anything else absolute is the host's /usr and the like.
 _sandbox_game_inside()
 {
-    local REPLY root base prefix m r
+    local REPLY root base prefix m r word
     _sandbox_game_dequote "$1" || return
     # Only "~" and "~/..." are this shell's home. Replacing every leading
     # tilde would turn ~otheruser/game into $HOMEotheruser/game; leave a
@@ -119,10 +119,15 @@ _sandbox_game_inside()
             fi ;;
     esac
     root=$(realpath -- "$REPLY" 2>/dev/null) || return
-    if [[ $cur == /game || $cur == /game/* ]]; then
-        base=$root${cur#/game} prefix=/game
-    elif [[ $cur == /* ]]; then
-        if [[ /game/ == "$cur"* ]]; then
+    # The word being completed arrives as typed, quotes and backslashes and
+    # all -- as the last Tab inserted it: "sub\ dir/" is looked up as
+    # "sub dir/", or the next level never comes.
+    _sandbox_game_dequote "$cur"
+    word=$REPLY
+    if [[ $word == /game || $word == /game/* ]]; then
+        base=$root${word#/game} prefix=/game
+    elif [[ $word == /* ]]; then
+        if [[ /game/ == "$word"* ]]; then
             COMPREPLY=(/game/)
             compopt -o nospace 2>/dev/null
         else
@@ -130,7 +135,7 @@ _sandbox_game_inside()
         fi
         return
     else
-        base=$root/$cur prefix=
+        base=$root/$word prefix=
     fi
     local IFS=$'\n'
     local -a matches
@@ -179,23 +184,24 @@ _sandbox_game()
         return
     fi
 
-    # An option's value. --opt=value arrives as prev=--opt and cur=value, or
-    # as one --opt=value word.
+    # An option's value. --opt=value arrives as prev=--opt and cur=value once
+    # bash-completion's -s splitter has divided the word, or as one
+    # --opt=value word. A finished --opt=value word before the cursor is
+    # neither: its option already has a value, and this word is a new
+    # argument. bash-completion 2.12 calls the split flag was_split, set to
+    # "set"; older _init_completion -s calls it split, set to "true".
     local current=${words[cword]} opt=$prev value=$cur prefix="" split_here=0
-    if [[ $current == --*=* ]]; then
+    if [[ ${was_split-} == set || ${split-} == true ]]; then
+        # The splitter took the "=" off prev and left cur the value, and
+        # readline replaces only that part: COMPREPLY carries the value
+        # alone, never the option again.
+        split_here=1
+    elif [[ $current == --*=* && $cur == "$current" ]]; then
+        # No splitter divided the word, so the whole of it is replaced.
         opt=${current%%=*}
         value=${current#*=}
         prefix="${opt}="
         split_here=1
-    elif [[ $prev == --*=* ]]; then
-        opt=${prev%%=*}
-        value=$cur
-        split_here=1
-    elif [[ $prev == --* ]]; then
-        opt=$prev
-        # bash-completion's -s splitter may leave cur as the value while prev
-        # has lost the "=". The line still says whether it was typed.
-        [[ ${COMP_LINE:0:COMP_POINT} == *"$prev="* ]] && split_here=1
     fi
     case $opt in
         --x11-backend)

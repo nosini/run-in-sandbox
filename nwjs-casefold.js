@@ -69,26 +69,6 @@
         return e;
     }
 
-    // The path segments as they are on disk, or null when they already are,
-    // or when not even case-blind matching finds them.
-    function fold(parts) {
-        let dir = root, changed = false;
-        const out = [];
-        for (const p of parts) {
-            const e = entries(dir);
-            if (!e) return null;
-            let n = p;
-            if (!e.names.has(p)) {
-                n = e.lower.get(p.toLowerCase());
-                if (n === undefined) return null;
-                changed = true;
-            }
-            out.push(n);
-            dir = path.join(dir, n);
-        }
-        return changed ? out : null;
-    }
-
     // Windows games write paths with backslashes. On the Linux side they are
     // separators too, not characters in a file name.
     function normalize(p) {
@@ -198,9 +178,13 @@
     // case is ignored. Everything else, including descriptors, Buffers and
     // URLs, is handed back as it was.
     function fixPath(p) {
+        // Within the app, backslashes become "/" first: a path that needs no
+        // case folding still goes back naming its file, not "img\pictures".
+        // A path elsewhere stays as it was.
         const full = insidePath(p);
         if (full === null || full === root) return p;
-        const cwd = path.resolve(normalize(p));
+        p = normalize(p);
+        const cwd = path.resolve(p);
         try {
             if (exists(full)) return full === cwd ? p : full;
         } catch (_) {
@@ -215,9 +199,12 @@
     // are reused, so a save written as SAVE/OLD.SAV changes Save/old.sav
     // instead of making a second file that readdir may return either way.
     function fixWrite(p) {
+        // Within the app, backslashes become "/" first here too, so a save
+        // named save\new.sav lands in the save folder, not beside it.
         const full = insidePath(p);
         if (full === null || full === root) return p;
-        const cwd = path.resolve(normalize(p));
+        p = normalize(p);
+        const cwd = path.resolve(p);
         const parts = path.relative(root, full).split(path.sep);
         const name = parts.pop();
         const found = foldPrefix(parts);
@@ -263,7 +250,11 @@
                                   || p.includes("\\") || p.includes("\0"))) return url;
             const target = path.join(root, ...parts);
             if (!withinRoot(target)) return url;
-            if (exists(target)) return url;
+            // There as written: handed back untouched when it arrived in
+            // URL form already, and rebuilt with "/" when backslashes had
+            // to be turned into separators -- a non-special scheme keeps a
+            // backslash in the path, which the app cannot load.
+            if (exists(target)) return value === url ? url : u.href;
         } catch (_) {
             return url;
         }
@@ -306,8 +297,10 @@
         return drop;
     }
 
-    // Finish a wrapped call: drop the folders it changed once it has worked,
-    // for the sync, callback and promise forms alike.
+    // Finish a wrapped call: drop the folders it changed once it has ended,
+    // for the sync, callback and promise forms alike. A failed call may
+    // still have written or changed a folder, so the folders go however it
+    // ended, and the error is the caller's either way.
     function finish(name, original, args, self, drop) {
         const forget = () => forgetDirs(drop);
         const last = args[args.length - 1];
@@ -320,8 +313,11 @@
             }
         }
         if (typeof last === "function") {
+            // Dropped before the callback runs, so a callback that throws
+            // holds nothing back either, and the callback sees the same
+            // error it would without this.
             args[args.length - 1] = function (error, ...rest) {
-                if (!error) forget();
+                forget();
                 return last.call(this, error, ...rest);
             };
             return original.apply(self, args);
@@ -329,7 +325,7 @@
         const result = original.apply(self, args);
         if (result && typeof result.then === "function") {
             return result.then((value) => { forget(); return value; },
-                               (error) => { throw error; });
+                               (error) => { forget(); throw error; });
         }
         forget();
         return result;

@@ -1,8 +1,9 @@
 # bash completion for sandbox-attach                       -*- shell-script -*-
 # Installed to ~/.local/share/bash-completion/completions/ by install.sh.
 # Completes the options, running sandboxes after --name, and files for the
-# program to run or for --put (host paths in the tools folder or a sandbox's
-# home and overlay/rw/ are translated by sandbox-attach itself).
+# program to run or for --put's FILE and DEST (host paths in the tools folder
+# or a sandbox's home and overlay/rw/ are translated by sandbox-attach
+# itself).
 
 _sandbox_attach_filedir()
 {
@@ -11,6 +12,38 @@ _sandbox_attach_filedir()
     else
         _filedir
     fi
+}
+
+# Running sandboxes, as `sandbox-attach --list` names them.
+_sandbox_attach_running()
+{
+    sandbox-attach --list 2>/dev/null | awk 'NR > 1 && NF >= 2 { print $1 }'
+}
+
+# The candidates from $@ that start with the word being completed, added
+# literally. They are read as data, never as a wordlist for compgen -W, which
+# would expand command substitutions in a name it was given.
+_sandbox_attach_matches()
+{
+    local cand
+    COMPREPLY=()
+    for cand in "$@"; do
+        [[ $cand == "$cur"* ]] && COMPREPLY+=("$cand")
+    done
+}
+
+# Like _sandbox_attach_matches, for an option value: the word being completed
+# may be only the value, or the whole --name=value.
+_sandbox_attach_value_matches()
+{
+    local prefix=$1 match=$2 cand word
+    shift 2
+    COMPREPLY=()
+    for cand in "$@"; do
+        [[ $cand == "$match"* ]] || continue
+        word=$prefix$cand
+        COMPREPLY+=("$word")
+    done
 }
 
 _sandbox_attach()
@@ -24,35 +57,56 @@ _sandbox_attach()
 
     # Options run up to -- or to the program to run. After either, every word
     # is an argument to that program, this command's options included.
-    local i skip=0 dashdash=0 at=-1
+    local i skip=0 dashdash=0 at=-1 valueof="" putend=-1
     for ((i = 1; i < cword; i++)); do
         if ((skip)); then ((skip--)); continue; fi
         case ${words[i]} in
-            --name) skip=1 ;;
-            --put) skip=2 ;;
+            --name) skip=1; valueof=--name ;;
+            --put) skip=2; valueof=--put; putend=$((i + 2)) ;;
             --) dashdash=1; break ;;
             -*) ;;
             *) at=$i; break ;;
         esac
     done
+    if ((putend >= 0 && cword > putend)); then
+        # --put has its FILE and DEST; it takes no program after them.
+        return
+    fi
     if ((dashdash || at >= 0)); then
         _sandbox_attach_filedir
         return
     fi
 
-    if ((skip)) || [[ $prev == --name ]]; then
-        # The current word is the value of an option: sandbox names after
-        # --name (including --name=NAME split by -s), host paths for --put.
-        if [[ $prev == --name ]]; then
-            COMPREPLY=($(compgen -W "$(sandbox-attach --list 2>/dev/null |
-                awk 'NR > 1 && NF >= 2 { print $1 }')" -- "$cur"))
+    # The value of an option whose words are still being typed: --put
+    # swallows the two after it as FILE and DEST, whatever they look like,
+    # so --name following --put is a file, not the sandbox list.
+    if ((skip)); then
+        if [[ $valueof == --name ]]; then
+            local -a running
+            mapfile -t running < <(_sandbox_attach_running)
+            _sandbox_attach_matches ${running[@]+"${running[@]}"}
         else
             _sandbox_attach_filedir
         fi
         return
     fi
+    # --name=NAME typed as one word: bash-completion's -s splitter hands it
+    # over as prev=--name and cur=NAME (split, or was_split in 2.12+), or it
+    # arrives whole.
+    local current=${words[cword]}
+    if [[ $current == --name=* ]]; then
+        local -a running
+        mapfile -t running < <(_sandbox_attach_running)
+        if [[ ${was_split-} == set || ${split-} == true ]]; then
+            _sandbox_attach_matches ${running[@]+"${running[@]}"}
+        else
+            _sandbox_attach_value_matches "--name=" "${current#--name=}" \
+                ${running[@]+"${running[@]}"}
+        fi
+        return
+    fi
     if [[ $cur == -* ]]; then
-        COMPREPLY=($(compgen -W '--name --list --shell --exec --put --help' -- "$cur"))
+        _sandbox_attach_matches --name --list --shell --exec --put --help
         return
     fi
     _sandbox_attach_filedir
