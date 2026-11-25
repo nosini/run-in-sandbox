@@ -52,7 +52,7 @@ def show(mode, title, text):
     except OSError:
         pass
     try:
-        subprocess.run(["notify-send", title, text[:500]], stderr=subprocess.DEVNULL)
+        subprocess.run(["notify-send", "--", title, text[:500]], stderr=subprocess.DEVNULL)
     except OSError:
         pass
 
@@ -169,6 +169,8 @@ def main():
                 self.state.mark_saved(result)
                 self.refresh()  # Default may now stand for another value
                 self.appearance.save(self.selected("appearance"))
+                if self.state.defaults_only:
+                    self.manager.defaults_saved()
                 self.error_note.set_visible(False)
                 self.notify("Defaults saved" if self.state.defaults_only else "Settings saved")
             except (OSError, ValueError) as error:
@@ -189,6 +191,8 @@ def main():
             # until the library is refreshed, or an installer may have changed them.
             self.proton_list, self.nwjs_list, self.descriptions, self.program_lists = None, None, {}, {}
             self.proton_lock = threading.Lock()
+            # Only the newest selection may fill the settings and programs pages.
+            self.settings_request, self.programs_request = 0, 0
             self.installers = set()
             self.last_poll = 0
             self.selected = None
@@ -447,6 +451,8 @@ def main():
             selected_name = select or (self.selected or {}).get("name")
             request = object()
             self.reload_request = request
+            self.settings_request += 1
+            self.programs_request += 1
             # Started by whichever reload shows the library next, so a reload
             # requested meanwhile does not drop the search.
             self.search_pending = self.search_pending or search
@@ -735,6 +741,8 @@ def main():
                 return self.nwjs_list
 
         def scan_programs(self, entry, rescan=False):
+            self.programs_request += 1
+            token = self.programs_request
             if entry["kind"] != "windows":
                 self.clear(self.program_list)
                 self.program_list.append(Gtk.Label(label="Launchers in an existing game are selected when you press Play.",
@@ -742,6 +750,8 @@ def main():
                 self.install_row.set_visible(entry.get("engine") == "proton")
                 return
             def loaded(programs, error):
+                if token != self.programs_request:
+                    return
                 if error:
                     return
                 self.program_lists[entry["name"]] = programs
@@ -758,11 +768,23 @@ def main():
                     select = Gtk.Button(label="Selected" if chosen else "Use for Play", valign=Gtk.Align.CENTER)
                     select.set_sensitive(not chosen)
                     def choose(*_, program=target):
-                        entry["program"] = program
-                        self.library.save_entry(entry)
-                        self.load_icon(entry)
-                        self.build_overview(entry)
-                        self.scan_programs(entry)
+                        try:
+                            updated = self.library.update_entry(entry["name"], program=program)
+                        except (OSError, ValueError) as error:
+                            self.toast(error)
+                            return
+                        if token != self.programs_request or not self.selected \
+                                or self.selected["name"] != updated["name"]:
+                            return
+                        self.selected = updated
+                        self.entries = [updated if item["name"] == updated["name"] else item
+                                        for item in self.entries]
+                        shown = self.rows.get(updated["name"])
+                        if shown is not None:
+                            shown.entry = updated
+                        self.load_icon(updated)
+                        self.build_overview(updated)
+                        self.scan_programs(updated)
                         self.update_state()
                     select.connect("clicked", choose)
                     row.add_suffix(select)
@@ -773,16 +795,21 @@ def main():
             self.work(lambda: self.library.programs(entry), loaded)
 
         def build_settings(self, entry):
+            self.settings_request += 1
+            token = self.settings_request
             self.clear(self.settings_page)
             self.label(self.settings_page, "Loading settings…", "dim-label")
             def load():
+                key, description = None, None
                 if entry["kind"] == "windows":
                     request = dict(engine="proton", can_proton=False, dotnet=False)
                 elif entry.get("selection") and Path(entry["selection"]).exists():
                     key = (entry["name"], entry["selection"])
                     if key not in self.descriptions:
-                        self.descriptions[key] = self.library.describe(entry["selection"], entry["name"])
-                    request = dict(self.descriptions[key])
+                        description = self.library.describe(entry["selection"], entry["name"])
+                        request = dict(description)
+                    else:
+                        request = dict(self.descriptions[key])
                 else:
                     request = dict(engine="", can_proton=False)
                 scopes = {"game": self.library.scope_settings(entry["name"]),
@@ -793,21 +820,52 @@ def main():
                                protons=self.protons(), nwjs_versions=self.nwjs_versions(),
                                uid_backend=self.library.uid_backend(entry["name"]),
                                game_settings=(self.library.config / "games" / entry["name"]).exists())
-                return request
-            def loaded(request, error):
+                return request, key, description
+            def loaded(answer, error):
+                if token != self.settings_request:
+                    return
                 if not self.selected or self.selected["name"] != entry["name"]:
                     return
+                request, key, description = answer if answer is not None else ({}, None, None)
                 self.clear(self.settings_page)
                 if error:
                     self.label(self.settings_page, str(error))
                     return
+                if key is not None and description is not None:
+                    self.descriptions[key] = description
                 self.preferences = PreferencePane(self, request, name=entry["name"])
                 self.settings_page.append(self.preferences.body)
-                if entry["kind"] == "existing":
-                    entry["engine"] = self.preferences.state.engine
-                    self.install_row.set_visible(entry["engine"] == "proton")
-                    self.tools.set_visible(entry["engine"] == "proton")
+                engine = self.preferences.state.engine
+                self.install_row.set_visible(engine == "proton")
+                self.tools.set_visible(entry["kind"] == "windows" or engine == "proton")
             self.work(load, loaded)
+
+        def defaults_saved(self):
+            """Bring an open game's settings pane up to date with saved defaults."""
+            pane = getattr(self, "preferences", None)
+            if pane is None or pane.state.defaults_only:
+                return
+            try:
+                values = self.library.scope_settings(None, defaults=True)
+            except (OSError, ValueError):
+                return
+            pane.state.refresh_defaults(values)
+            pane.updating = True
+            # The theme belongs to every dialog, so this pane must save the new one.
+            themes = ["system", "light", "dark"]
+            if self.appearance.saved_theme in themes:
+                pane.widgets["appearance"].set_selected(themes.index(self.appearance.saved_theme))
+            for key, _ in dialogs.REQUIREMENTS:
+                pane.widgets["require_" + key].set_active(key in pane.state.values["require"].split(","))
+            pane.widgets["fullscreen"].set_active(pane.state.fullscreen)
+            if pane.state.scope == "all":
+                pane.show_plain()
+            env_lines = "\n".join(values.get("env", "").split())
+            pane.env_text["all"] = env_lines
+            if pane.env_scope == "all":
+                pane.env_view.get_buffer().set_text(env_lines)
+            pane.updating = False
+            pane.refresh()
 
         def open_defaults(self):
             if self.defaults_window is not None:
@@ -858,7 +916,11 @@ def main():
 
         def update_log(self):
             if self.selected:
-                text = self.library.read_log(self.selected["name"])
+                try:
+                    text = self.library.read_log(self.selected["name"])
+                except OSError as error:
+                    text = f"Cannot read the launch log: {error}"
+                text = text.replace("\x00", "\ufffd")
                 buffer = self.log_view.get_buffer()
                 old = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
                 if old != text:

@@ -624,6 +624,11 @@ PY
     if [ "${#check[@]}" -gt 0 ] && ! err="$("$SANDBOX" "${check[@]}" --name "$NAME" --print-name / 2>&1 >/dev/null)"; then
         printf 'Not saved:\n%s\n' "$err" >&2; exit 1
     fi
+    # One writer per target, outside games/ so preference listings do not see it.
+    case "${RESULT[scope]}" in all) lock_name=defaults ;; *) lock_name="game-$NAME" ;; esac
+    mkdir -p "$CFGDIR/.locks" || { echo "Cannot create $CFGDIR/.locks" >&2; exit 1; }
+    exec 9>"$CFGDIR/.locks/$lock_name" || { echo "Cannot lock $NAME" >&2; exit 1; }
+    flock 9 || { echo "Cannot lock $NAME" >&2; exit 1; }
     if [ "${RESULT[scope]}" = clear ]; then
         rm -f -- "$CFGDIR/games/$NAME" || exit 1
         exit 0
@@ -696,6 +701,10 @@ PY
     optional="with_proton lan_allow hosts x11_exe x11_backend require"
     security="$SECURITY_PREF_KEYS"
     mkdir -p "$(dirname "$TARGET")" || { echo "Cannot create $(dirname "$TARGET")" >&2; exit 1; }
+    tmp="$(mktemp "$(dirname "$TARGET")/.$(basename "$TARGET").tmp.XXXXXX")" \
+        || { echo "Cannot write $TARGET" >&2; exit 1; }
+    trap 'rm -f -- "$tmp"' EXIT
+    trap 'rm -f -- "$tmp"; exit 1' HUP INT TERM
     {   echo "# sandbox-game preferences -- edit by hand or via the Nautilus script"
         for key in $bools; do
             [[ "$inherited" != *" $key "* ]] || continue
@@ -749,8 +758,10 @@ PY
                 printf '%s\n' "$line"
             done < "$TARGET"
         fi
-    } > "$TARGET.tmp" || { echo "Cannot write $TARGET" >&2; exit 1; }
-    mv -- "$TARGET.tmp" "$TARGET" || { echo "Cannot save $TARGET" >&2; exit 1; }
+    } > "$tmp" || { rm -f -- "$tmp"; echo "Cannot write $TARGET" >&2; exit 1; }
+    mv -- "$tmp" "$TARGET" || { rm -f -- "$tmp"; echo "Cannot save $TARGET" >&2; exit 1; }
+    tmp=""
+    trap - EXIT HUP INT TERM
 )
 
 # How sandbox-game --stop and sandbox-attach, which must agree, find a sandbox

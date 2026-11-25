@@ -1,4 +1,5 @@
 """Preference policy and GTK signal tests; GUI tests need a display server."""
+import io
 import itertools
 import os
 import runpy
@@ -54,6 +55,53 @@ class PreferencePolicyTests(unittest.TestCase):
         self.assertEqual(state.result()["seccomp"], "log")
         state.set_scope("all")
         self.assertEqual(state.result()["seccomp_policy"], "denylist")
+
+    def test_clearing_a_game_resets_its_drafts_to_inherited_defaults(self):
+        game = {"net": "1", "separate_uid": "0", "seccomp": "log",
+                "wayland": "0", "host_x11": "1"}
+        defaults = {"net": "0", "separate_uid": "systemd", "seccomp": "enforce",
+                    "wayland": "1", "host_x11": "0"}
+        state = Preferences({"engine": "native", "game_settings": True,
+                             "values": {**defaults, **game},
+                             "security": {"game": game, "all": defaults}})
+        state.set_scope("clear")
+        state.mark_saved({"scope": "clear"})
+        self.assertEqual(state.files["game"], {})
+        self.assertFalse(state.request["game_settings"])
+        state.set_scope("game")
+        self.assertEqual(state.result()["net"], "0")
+        self.assertEqual(state.display, "wayland")
+        self.assertIn("display", state.result()["inherit"].split(","))
+        self.assertEqual(state.result()["separate_uid"], "")
+        self.assertEqual(state.result()["seccomp"], "")
+
+    def test_new_defaults_refresh_inherited_choices_without_clearing_game_edits(self):
+        defaults = {"net": "0", "proton": "GE-Old", "seccomp": "enforce"}
+        state = Preferences({"engine": "proton", "can_proton": True,
+                             "values": dict(defaults),
+                             "security": {"game": {}, "all": defaults}})
+        self.assertTrue(state.inherits("proton"))
+        state.values["net"] = "1"
+        state.refresh_defaults({"net": "0", "proton": "GE-New", "seccomp": "log"})
+        self.assertTrue(state.inherits("proton"))
+        self.assertEqual(state.values["proton"], "GE-New")
+        self.assertEqual(state.values["net"], "1")
+        self.assertEqual(state.saved_defaults["seccomp"], "log")
+        self.assertIn("Log only", state.security_choices("seccomp")[0][1])
+
+    def test_dialog_text_keeps_backslashes_and_newlines_but_not_nuls(self):
+        self.assertEqual(MODULE["clean_text"](r"C:\newgame"), r"C:\newgame")
+        self.assertEqual(MODULE["clean_text"]("one\ntwo"), "one\ntwo")
+        self.assertEqual(MODULE["clean_text"]("a\x00b"), "a\ufffdb")
+
+    def test_log_text_replaces_nuls_and_reports_an_unreadable_stream(self):
+        self.assertEqual(MODULE["read_log_text"](io.BytesIO(b"a\x00b\n")), "a\ufffdb\n")
+
+        class Unreadable:
+            def read(self):
+                raise OSError("permission denied")
+
+        self.assertIn("Cannot read the launch log", MODULE["read_log_text"](Unreadable()))
 
     def test_inherited_security_choices_stay_unset_despite_merged_defaults(self):
         state = Preferences({"values": {"separate_uid": "systemd", "seccomp": "log"},

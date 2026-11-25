@@ -261,6 +261,20 @@ def plain_value(key, value):
     return value
 
 
+def clean_text(text):
+    """Dialog text as GTK accepts it: real newlines stay, embedded NULs do not."""
+    return text.replace("\x00", "\ufffd")
+
+
+def read_log_text(stream):
+    """A log stream decoded for a text view, or an error message when unreadable."""
+    try:
+        data = stream.read()
+    except OSError as error:
+        return f"Cannot read the launch log: {error}"
+    return clean_text(data.decode("utf-8", errors="replace"))
+
+
 REQUIREMENTS = (
     ("landlock", "Filesystem restrictions (Landlock): the game will not start without them"),
     ("scoped", "Signal and abstract socket scoping (Landlock ABI 6): the game will not start without it"),
@@ -518,6 +532,12 @@ class Preferences:
             return
         if self.scope == "clear":
             self.files["game"] = {}
+            self.plain_values["game"] = plain_settings(self.files.get("all", {}))
+            self.security_values["game"] = {key: "" for key in SECURITY_CHOICES}
+            self.require_values["game"] = requirements_value(
+                self.files.get("all", {}).get("require", ""))
+            self.choice_values["game"] = self.scope_choices("game")
+            self.request["game_settings"] = False
             return
         own = self.files[self.scope]
         for key in result.get("inherit", "").split(","):
@@ -529,6 +549,28 @@ class Preferences:
             width, _, height = result["gamescope_resolution"].partition("x")
             own["gamescope_args"] = " ".join(
                 (["-W", width, "-H", height] if height else []) + (["-f"] if result["gamescope_fullscreen"] == "1" else []))
+
+    def refresh_defaults(self, values):
+        """Take newly saved defaults without dropping edits made in this window."""
+        inherited = [key for key in INHERITED if self.scope == "game" and self.inherits(key)]
+        self.files["all"] = dict(values)
+        self.saved_defaults = {key: values.get(key, "") for key in SECURITY_CHOICES}
+        self.plain_values["all"] = plain_settings(values)
+        self.security_values["all"] = {key: values.get(key, "") for key in SECURITY_CHOICES}
+        self.require_values["all"] = requirements_value(values.get("require", ""))
+        self.choice_values["all"] = self.scope_choices("all")
+        if self.scope == "game":
+            for key in inherited:
+                self.choose(key, None)
+            if not self.files["game"].get("require"):
+                self.require_values["game"] = requirements_value(values.get("require", ""))
+                self.values["require"] = self.require_values["game"]
+            self.choice_values["game"] = self.choice_state()
+        elif self.scope == "all":
+            self.values.update(self.plain_values["all"])
+            self.values.update(self.security_values["all"])
+            self.values["require"] = self.require_values["all"]
+            self.apply_choices(self.choice_values["all"])
 
     def error(self):
         """Why the visible settings cannot be saved, or None."""
@@ -573,11 +615,12 @@ class Preferences:
             self.display = "wayland" if self.display == "wayland-x11" and "wayland" in self.displays else "x11"
 
     def set_scope(self, scope):
-        self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
-        self.require_values[self.security_scope] = self.values["require"]
-        self.plain_values[self.security_scope] = {key: self.values[key] for key in PLAIN}
-        if self.security_scope in self.choice_values:
-            self.choice_values[self.security_scope] = self.choice_state()
+        if self.scope != "clear":
+            self.security_values[self.security_scope] = {key: self.values[key] for key in SECURITY_CHOICES}
+            self.require_values[self.security_scope] = self.values["require"]
+            self.plain_values[self.security_scope] = {key: self.values[key] for key in PLAIN}
+            if self.security_scope in self.choice_values:
+                self.choice_values[self.security_scope] = self.choice_state()
         self.scope = scope
         if scope != "clear":
             self.security_scope = scope
@@ -727,7 +770,7 @@ class Dialog:
             self.window.set_default_widget(self.pick_button)
             self.window.set_focus(self.listbox)
         else:
-            text = request.get("text", "")
+            text = clean_text(request.get("text", ""))
             if mode == "log":
                 self.window.set_default_size(960, 600)
                 view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
@@ -1116,13 +1159,13 @@ def main():
         return 0
     Adw.init()
     appearance = Appearance(Adw)
-    request = {"title": args.title, "text": args.text.replace("\\n", "\n")}
+    request = {"title": args.title, "text": clean_text(args.text)}
     if args.mode in ("preferences", "pick"):
         request.update(json.load(sys.stdin))
     elif args.mode == "log":
         # Game output can use a Windows encoding. Bypass stdin's locale/error
         # policy so undecodable bytes never become surrogates handed to GTK.
-        request["text"] = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        request["text"] = read_log_text(sys.stdin.buffer)
     result = 1
     app = Gtk.Application(application_id="eu.nosini.SandboxGame.Dialog", flags=Gio.ApplicationFlags.NON_UNIQUE)
 

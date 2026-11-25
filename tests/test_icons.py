@@ -172,6 +172,113 @@ class IconTests(unittest.TestCase):
         self.assertEqual(library.icon(entry), icon)
         self.assertEqual(icon.stat().st_mtime_ns, stamp)
 
+    def test_malformed_group_icon_is_skipped_instead_of_failing_the_file(self):
+        data = executable()
+        struct.pack_into("<I", data, 0x2B4, 2)  # RT_GROUP_ICON payload shorter than its header
+        self.assertEqual(self.extract(data), ("ico", []))
+
+    def test_size_prepared_clamps_even_when_the_decoder_reports_more_than_max(self):
+        class Loader:
+            def __init__(self):
+                self.sizes = []
+                self.prepared = None
+
+            def connect(self, signal, callback):
+                self.prepared = callback
+
+            def write(self, data):
+                self.prepared(self, icons.MAX_SIZE + 1, icons.MAX_SIZE + 1)
+
+            def close(self):
+                pass
+
+            def set_size(self, width, height):
+                self.sizes.append((width, height))
+
+            def get_pixbuf(self):
+                return None
+
+        class PixbufLoader:
+            loader = Loader()
+
+            @classmethod
+            def new_with_type(cls, kind):
+                return cls.loader
+
+        class GdkPixbuf:
+            pass
+
+        GdkPixbuf.PixbufLoader = PixbufLoader
+        loader = PixbufLoader.loader
+        with self.assertRaises(ValueError):
+            icons.decode(GdkPixbuf, "png", PNG)
+        self.assertEqual(loader.sizes, [(128, 128)])
+
+
+class ManagerIconTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def icon_library(self):
+        helpers = self.base / "helpers"
+        helpers.mkdir()
+        (helpers / "sandbox-game-icon").write_text("")
+        library = manager.Library(ROOT / "sandbox-game", helpers, ROOT / "Sandbox game",
+                                  home=self.base, config=self.base / "config")
+        entry = library.create("game")
+        for name in ("a.exe", "b.exe"):
+            (Path(entry["directory"]) / name).write_bytes(b"MZ")
+        return library, entry
+
+    @staticmethod
+    def finished(code, output=b""):
+        return subprocess.CompletedProcess([], code, output, b"")
+
+    def test_extractor_tmpfs_is_sized_before_it_is_mounted(self):
+        library, entry = self.icon_library()
+        with patch.object(library, "_run_icon", return_value=self.finished(manager.Library.NO_ICON)) as run:
+            self.assertIsNone(library.icon(entry))
+        words = run.call_args.args[0]
+        index = words.index("--tmpfs")
+        self.assertEqual(words[index - 2:index + 2],
+                         ["--size", str(manager.ICON_TMPFS_BYTES), "--tmpfs", "/tmp"])
+
+    def test_oversized_stdout_is_killed_and_bounded(self):
+        script = "import sys; sys.stdout.buffer.write(b'x' * (2 * 1024 * 1024))"
+        result = manager.Library._run_icon([sys.executable, "-I", "-c", script], subprocess.DEVNULL)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertGreater(len(result.stdout), 0)
+        self.assertLessEqual(len(result.stdout), manager.MAX_ICON_PNG_BYTES + 64 * 1024)
+
+    def test_non_png_stdout_is_never_written_or_negative_cached(self):
+        library, entry = self.icon_library()
+        capture = library.capture(entry["name"])
+        with patch.object(library, "_run_icon", return_value=self.finished(0, b"not a png")) as run:
+            self.assertIsNone(library.icon(entry))
+            self.assertEqual(run.call_count, 2)
+        self.assertFalse((capture / "icon.json").exists())
+        self.assertFalse((capture / "icons").exists())
+
+    def test_valid_png_stdout_is_cached(self):
+        library, entry = self.icon_library()
+        with patch.object(library, "_run_icon", return_value=self.finished(0, PNG)) as run:
+            icon = library.icon(entry)
+            self.assertEqual(icon.read_bytes(), PNG)
+            run.assert_called_once()
+        with patch.object(library, "_run_icon") as run:
+            self.assertEqual(library.icon(entry), icon)
+            run.assert_not_called()
+
+    def test_a_retryable_failure_does_not_stop_a_later_candidate(self):
+        library, entry = self.icon_library()
+        with patch.object(library, "_run_icon",
+                          side_effect=[self.finished(1), self.finished(0, PNG)]) as run:
+            icon = library.icon(entry)
+        self.assertEqual(icon.read_bytes(), PNG)
+        self.assertEqual(run.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

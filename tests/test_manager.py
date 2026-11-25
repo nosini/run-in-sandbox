@@ -5,9 +5,12 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
+import threading
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +20,18 @@ loader = importlib.machinery.SourceFileLoader("manager_core", str(ROOT / "sandbo
 spec = importlib.util.spec_from_loader(loader.name, loader)
 core = importlib.util.module_from_spec(spec)
 loader.exec_module(core)
+
+
+def png_chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def icon_png(red=0):
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+            + png_chunk(b"IDAT", zlib.compress(bytes((0, red, 0, 255)))) + png_chunk(b"IEND", b""))
+
+
+PNG = icon_png()
 
 
 class LibraryTests(unittest.TestCase):
@@ -411,6 +426,123 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(updated["arguments"], "--x")
         self.assertNotIn("title_custom", core.read_json(self.library.capture("game") / "manager.json"))
 
+    def test_update_entry_serializes_read_modify_write(self):
+        self.library.capture("game").mkdir(parents=True)
+        shown, = self.library.entries()
+        original = self.library.load_entry
+        entered, second_loaded, release = threading.Event(), threading.Event(), threading.Event()
+        def load(capture, display=True):
+            if not display and threading.current_thread().name == "first":
+                entered.set()
+                release.wait(5)
+            elif not display and threading.current_thread().name == "second":
+                second_loaded.set()
+            return original(capture, display)
+        def update(name, **changes):
+            self.library.update_entry(shown["name"], **changes)
+        first = threading.Thread(target=update, args=("first",), kwargs={"arguments": "--x"},
+                                 name="first")
+        second = threading.Thread(target=update, args=("second",), kwargs={"title": "Renamed",
+                                                                          "title_custom": True},
+                                  name="second")
+        with patch.object(self.library, "load_entry", side_effect=load):
+            first.start()
+            self.assertTrue(entered.wait(5))
+            second.start()
+            second_loaded.wait(0.2)
+            release.set()
+            first.join(10)
+            second.join(10)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        saved = self.library.entry(shown["name"])
+        self.assertEqual(saved["arguments"], "--x")
+        self.assertEqual(saved["title"], "Renamed")
+        self.assertTrue(saved["title_custom"])
+
+    def test_symlink_loops_are_skipped_without_losing_the_library(self):
+        healthy = self.library.create("healthy")
+        loop = self.home / "loop"
+        loop.mkdir()
+        (loop / "a").symlink_to(loop / "b")
+        (loop / "b").symlink_to(loop / "a")
+        capture = self.library.capture("broken")
+        capture.mkdir()
+        core.atomic_write(capture / "manager.json", json.dumps({
+            "title": "Broken", "kind": "existing", "directory": str(loop / "a"),
+            "selection": str(loop / "a")}))
+        search = self.home / "Games"
+        self.library.save_game_folders([loop / "a", search])
+        self.assertEqual(self.library.game_folders(), [search])
+        broken = self.library.entry("broken")
+        self.assertEqual(self.library.installation(broken), "external")
+        entries = {entry["name"]: entry for entry in self.library.refresh()}
+        self.assertIn(healthy["name"], entries)
+        self.assertIn("broken", entries)
+
+    def test_log_reading_replaces_nuls_and_reports_unreadable_files(self):
+        entry = self.library.create("game")
+        log = self.library.log_path(entry["name"])
+        log.write_bytes(b"before\x00after")
+        text = self.library.read_log(entry["name"])
+        self.assertEqual(text, "before\ufffdafter")
+        self.assertNotIn("\x00", text)
+        log.unlink()
+        log.mkdir()
+        text = self.library.read_log(entry["name"])
+        self.assertIn("Cannot read the launch log", text)
+
+    def test_preferences_saves_are_serialized_and_leave_no_stray_files(self):
+        name = self.library.create("game")["name"]
+        errors = []
+        def save(key):
+            try:
+                self.library.save_preferences(name, {"scope": "game", key: "1"})
+            except Exception as error:  # recorded for the assertion below
+                errors.append(error)
+        threads = [threading.Thread(target=save, args=(key,)) for key in ("net", "hdr")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(20)
+        self.assertEqual(errors, [])
+        values = self.library.scope_settings(name)
+        self.assertEqual((values.get("net"), values.get("hdr")), ("1", "1"))
+        games = self.library.config / "games"
+        self.assertEqual(sorted(path.name for path in games.iterdir()), [name])
+        self.assertFalse(list(games.glob(".*.tmp.*")))
+
+    def test_preferences_save_waits_for_the_target_lock(self):
+        name = self.library.create("game")["name"]
+        locks = self.library.config / ".locks"
+        locks.mkdir(parents=True)
+        fd = os.open(locks / f"game-{name}", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        started, finished = threading.Event(), threading.Event()
+        def save():
+            started.set()
+            self.library.save_preferences(name, {"scope": "game", "net": "1"})
+            finished.set()
+        thread = threading.Thread(target=save)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        self.assertFalse(finished.wait(0.3))
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        self.assertTrue(finished.wait(20))
+        thread.join(10)
+        self.assertEqual(self.library.scope_settings(name)["net"], "1")
+
+    def test_notification_fallback_marks_an_option_like_title_as_data(self):
+        import runpy
+        module = runpy.run_path(str(ROOT / "sandbox-manager"))
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 2 if len(calls) == 1 else 0, b"", b"")
+        with patch("subprocess.run", side_effect=run):
+            module["show"]("error", "-weird-title", "body")
+        self.assertEqual(calls[-1], ["notify-send", "--", "-weird-title", "body"])
+
     def test_search_location_paths_are_checked_without_the_disk(self):
         self.assertEqual(self.library.game_folder_path(" ~/Games "), Path.home() / "Games")
         for text in ("", "relative", "/a\0b"):
@@ -418,7 +550,7 @@ class LibraryTests(unittest.TestCase):
                 self.library.game_folder_path(text)
 
     def icon_library(self):
-        """A library whose icon helper never runs: subprocess.run is patched in each test."""
+        """A library whose icon extractor never runs: _run_icon is patched in each test."""
         helpers = self.home / "helpers"
         helpers.mkdir()
         (helpers / "sandbox-game-icon").write_text("")
@@ -437,61 +569,66 @@ class LibraryTests(unittest.TestCase):
         library, entry = self.icon_library()
         metadata = library.capture(entry["name"]) / "icon.json"
         for failure in (OSError("no bwrap"), self.finished(1), self.finished(-11)):
-            with self.subTest(failure=failure), patch("subprocess.run", side_effect=[failure]) as run:
+            expectation = patch.object(library, "_run_icon", side_effect=failure) \
+                if isinstance(failure, BaseException) \
+                else patch.object(library, "_run_icon", return_value=failure)
+            with self.subTest(failure=failure), expectation as run:
                 self.assertIsNone(library.icon(entry))
-                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_count, 1 if isinstance(failure, OSError) else 2)
                 self.assertFalse(metadata.exists())
         # Every file answered: that is remembered, and nothing runs again.
-        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)) as run:
+        with patch.object(library, "_run_icon", return_value=self.finished(library.NO_ICON)) as run:
             self.assertIsNone(library.icon(entry))
             self.assertEqual(run.call_count, 2)
         self.assertFalse(json.loads(metadata.read_text())["found"])
-        with patch("subprocess.run") as run:
+        with patch.object(library, "_run_icon") as run:
             self.assertIsNone(library.icon(entry))
             run.assert_not_called()
 
     def test_a_slow_file_does_not_stop_the_others_or_get_remembered(self):
         library, entry = self.icon_library()
         slow = subprocess.TimeoutExpired("bwrap", 5)
-        with patch("subprocess.run", side_effect=[slow, self.finished(library.NO_ICON)]) as run:
+        with patch.object(library, "_run_icon",
+                          side_effect=[slow, self.finished(library.NO_ICON)]) as run:
             self.assertIsNone(library.icon(entry))
             self.assertEqual(run.call_count, 2)
         self.assertFalse((library.capture(entry["name"]) / "icon.json").exists())
-        with patch("subprocess.run", side_effect=[slow, self.finished(0, b"png")]):
+        with patch.object(library, "_run_icon", side_effect=[slow, self.finished(0, PNG)]):
             path = library.icon(entry)
-        self.assertEqual(path.read_bytes(), b"png")
+        self.assertEqual(path.read_bytes(), PNG)
 
     def test_updating_the_extractor_retries_a_cached_missing_icon(self):
         library, entry = self.icon_library()
-        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)):
+        with patch.object(library, "_run_icon", return_value=self.finished(library.NO_ICON)):
             self.assertIsNone(library.icon(entry))
         helper = library.helpers / "sandbox-game-icon"
         helper.write_text("updated decoder")
-        with patch("subprocess.run", return_value=self.finished(0, b"png")) as run:
-            self.assertEqual(library.icon(entry).read_bytes(), b"png")
+        with patch.object(library, "_run_icon", return_value=self.finished(0, PNG)) as run:
+            self.assertEqual(library.icon(entry).read_bytes(), PNG)
             run.assert_called_once()
 
     def test_deleted_and_outdated_icon_images_are_made_again(self):
         library, entry = self.icon_library()
-        with patch("subprocess.run", return_value=self.finished(0, b"first")):
+        with patch.object(library, "_run_icon", return_value=self.finished(0, icon_png(10))):
             first = library.icon(entry)
         first.unlink()
-        with patch("subprocess.run", return_value=self.finished(0, b"again")) as run:
-            self.assertEqual(library.icon(entry).read_bytes(), b"again")
+        with patch.object(library, "_run_icon", return_value=self.finished(0, icon_png(20))) as run:
+            self.assertEqual(library.icon(entry).read_bytes(), icon_png(20))
             run.assert_called_once()
         os.utime(Path(entry["directory"]) / "a.exe", ns=(1, 1))
-        with patch("subprocess.run", return_value=self.finished(0, b"changed")):
+        with patch.object(library, "_run_icon", return_value=self.finished(0, icon_png(30))):
             second = library.icon(entry)
         self.assertNotEqual(second, first)
         self.assertEqual(sorted(path.name for path in second.parent.iterdir()), [second.name])
 
     def test_icon_decoder_reads_the_checked_file_not_its_path(self):
         library, entry = self.icon_library()
-        with patch("subprocess.run", return_value=self.finished(library.NO_ICON)) as run:
+        with patch.object(library, "_run_icon", return_value=self.finished(library.NO_ICON)) as run:
             library.icon(entry)
         for call in run.call_args_list:
-            self.assertIsInstance(call.kwargs["stdin"], int)
-            self.assertFalse([word for word in call.args[0] if word.endswith(".exe")])
+            words, fd = call.args
+            self.assertIsInstance(fd, int)
+            self.assertFalse([word for word in words if word.endswith(".exe")])
         # A folder swapped for a link after listing: the opened file is outside.
         game = Path(entry["directory"])
         sub = game / "sub"
@@ -535,8 +672,8 @@ class LibraryTests(unittest.TestCase):
         capture = library.capture(entry["name"])
         def delete_then_answer(*args, **kwargs):
             shutil.rmtree(capture)
-            return self.finished(0, b"png")
-        with patch("subprocess.run", side_effect=delete_then_answer):
+            return self.finished(0, PNG)
+        with patch.object(library, "_run_icon", side_effect=delete_then_answer):
             self.assertIsNone(library.icon(entry))
         self.assertFalse(capture.exists())
 

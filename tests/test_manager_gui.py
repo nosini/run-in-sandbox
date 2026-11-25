@@ -150,6 +150,92 @@ sys.exit(code)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("Defaults window passed", result.stdout)
 
+    def test_saving_defaults_refreshes_an_open_game_pane(self):
+        try:
+            import gi
+            gi.require_version("Gtk", "4.0")
+            gi.require_version("Adw", "1")
+        except (ImportError, ValueError):
+            self.skipTest("GTK 4 and libadwaita are not installed")
+        script = r'''
+import runpy, sys, traceback
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gio, GLib
+module = runpy.run_path(sys.argv[1])
+stage = 0
+failure = []
+
+def tick():
+    global stage
+    app = Gio.Application.get_default()
+    if not app or not hasattr(app, "manager"):
+        return True
+    manager = app.manager
+    try:
+        if stage == 0:
+            entry = manager.library.create("Defaults refresh")
+            (manager.library.config / "games" / entry["name"]).unlink()
+            manager.reload(entry["name"])
+        elif stage == 1:
+            if not manager.selected or not hasattr(manager, "preferences"):
+                return True
+            pane = manager.preferences
+            assert pane.state.scope == "game"
+            assert pane.state.display == "wayland", pane.state.display
+            pane.widgets["net"].set_active(True)
+            app.activate_action("defaults", None)
+        elif stage == 2:
+            defaults = manager.defaults_preferences
+            if defaults is None:
+                return True
+            keys = [value for value, _ in defaults.choices["display"]]
+            defaults.widgets["display"].set_selected(keys.index("x11"))
+            defaults.widgets["appearance"].set_selected(2)
+            defaults.save()
+        elif stage == 3:
+            pane = manager.preferences
+            assert pane.state.display == "x11", pane.state.display
+            assert pane.selected("appearance") == "dark", pane.selected("appearance")
+            assert pane.widgets["net"].get_active(), "unsaved game edit was clobbered"
+            manager.defaults_window.close()
+            manager.window.close()
+            print("Defaults refresh passed", flush=True)
+            return False
+        stage += 1
+        return True
+    except BaseException:
+        failure.append(traceback.format_exc())
+        app.quit()
+        return False
+
+def expired():
+    failure.append("Timed out at defaults refresh stage " + str(stage))
+    app = Gio.Application.get_default()
+    if app:
+        app.quit()
+    return False
+GLib.timeout_add(100, tick)
+GLib.timeout_add_seconds(15, expired)
+code = module["main"]()
+if failure:
+    print("\n".join(failure), file=sys.stderr)
+    sys.exit(1)
+sys.exit(code)
+'''
+        with tempfile.TemporaryDirectory(prefix="manager-defaults-refresh-") as temporary:
+            env = {**os.environ, "HOME": temporary, "XDG_CONFIG_HOME": str(Path(temporary) / ".config"),
+                   "XDG_DATA_HOME": str(Path(temporary) / ".local/share")}
+            env.pop("PROTON_DIR", None)
+            config = Path(temporary) / ".config/sandbox-game"
+            config.mkdir(parents=True)
+            (config / "defaults").write_text("wayland=1\nhost_x11=0\n")
+            result = subprocess.run([sys.executable, "-c", script, str(ROOT / "sandbox-manager")],
+                                    env=env, capture_output=True, text=True, timeout=25)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Defaults refresh passed", result.stdout)
+
     def test_create_select_program_save_settings_and_confirm_delete(self):
         try:
             import gi
@@ -276,12 +362,16 @@ def tick():
             (prefix / "play.exe").write_text("game")
             manager.scan_programs(entry, rescan=True)
         elif stage == 2:
+            entry = manager.selected
             choices = [w for w in children(manager.program_list) if isinstance(w, Gtk.Button)
                        and w.get_label() == "Use for Play"]
             if not choices:
                 return True
+            # A fresh save elsewhere must not be overwritten by this stale snapshot.
+            manager.library.update_entry(entry["name"], arguments="--kept")
             choices[0].emit("clicked")
             assert manager.selected["program"] == "/compat/pfx/drive_c/Example/play.exe"
+            assert manager.library.entry(entry["name"])["arguments"] == "--kept"
             # Icons are extracted one at a time, and selecting a game asks for none.
             assert icon_calls and max(depth for _, depth in icon_calls) == 1, icon_calls
             name = manager.selected["name"]
@@ -351,10 +441,17 @@ def tick():
             button(dialog, "Cancel").emit("clicked")
             assert manager.library.capture(manager.selected["name"]).is_dir()
             manager.tabs.set_visible_child_name("logs")
-            manager.library.log_path(manager.selected["name"]).write_bytes(b"windows \xff log")
+            log_path = manager.library.log_path(manager.selected["name"])
+            log_path.write_bytes(b"windows \xff\x00 log")
             manager.update_log()
             buffer = manager.log_view.get_buffer()
-            assert "\ufffd" in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+            text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+            assert "\ufffd" in text and "\x00" not in text, repr(text)
+            log_path.unlink()
+            log_path.mkdir()
+            manager.update_log()
+            text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+            assert "Cannot read the launch log" in text, repr(text)
             manager.search.set_text("no matching game")
             manager.listbox.invalidate_filter()
             assert not manager.rows[manager.selected["name"]].get_child_visible()

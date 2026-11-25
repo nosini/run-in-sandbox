@@ -133,23 +133,26 @@ def pe_icons(reader):
     for _, target in directory(groups):
         if not target & 0x80000000:
             continue
-        group = leaf(target & 0x7FFFFFFF)
-        reserved, kind, count = struct.unpack_from("<HHH", group)
-        if reserved != 0 or kind != 1 or not 0 < count <= 64 or len(group) < 6 + count * 14:
-            continue
-        frames = []
-        for index in range(count):
-            entry = group[6 + index * 14:20 + index * 14]
-            width, height = entry[0] or 256, entry[1] or 256
-            frames.append((width * height, entry))
-        for _, entry in sorted(frames, key=lambda item: item[0], reverse=True):
-            identifier, = struct.unpack_from("<H", entry, 12)
-            try:
-                # The group's entry ends in a resource identifier instead of
-                # the file offset an ICO has.
-                yield single_ico(entry, leaf(child(icons, identifier)))
-            except ValueError:
+        try:
+            group = leaf(target & 0x7FFFFFFF)
+            reserved, kind, count = struct.unpack_from("<HHH", group)
+            if reserved != 0 or kind != 1 or not 0 < count <= 64 or len(group) < 6 + count * 14:
                 continue
+            frames = []
+            for index in range(count):
+                entry = group[6 + index * 14:20 + index * 14]
+                width, height = entry[0] or 256, entry[1] or 256
+                frames.append((width * height, entry))
+            for _, entry in sorted(frames, key=lambda item: item[0], reverse=True):
+                identifier, = struct.unpack_from("<H", entry, 12)
+                try:
+                    # The group's entry ends in a resource identifier instead of
+                    # the file offset an ICO has.
+                    yield single_ico(entry, leaf(child(icons, identifier)))
+                except (ValueError, struct.error):
+                    continue
+        except (ValueError, struct.error):
+            continue  # a malformed group must not hide the other icons
 
 
 def extract(stream):
@@ -174,7 +177,7 @@ def decode(GdkPixbuf, kind, data):
     def prepared(loader, width, height):
         # An exception here would be printed and ignored, so only record it.
         declared.append((width, height))
-        if 0 < width <= MAX_SIZE and 0 < height <= MAX_SIZE:
+        if width > 0 and height > 0:
             scale = min(1.0, 128 / max(width, height))
             loader.set_size(max(1, int(width * scale)), max(1, int(height * scale)))
     loader.connect("size-prepared", prepared)
@@ -198,6 +201,12 @@ def main():
     resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024,) * 2)
     resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    try:
+        # Glycin returns decoded pixels in a memfd: a 4096x4096 RGBA image is
+        # 64 MiB (128 MiB at 16 bits per channel), so cap above that.
+        resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024 * 1024,) * 2)
+    except (ValueError, OSError):
+        pass  # a lower hard limit already bounds file growth
     # A missing or broken GdkPixbuf says nothing about the file: not NO_ICON.
     import gi
     gi.require_version("GdkPixbuf", "2.0")

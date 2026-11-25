@@ -8,18 +8,35 @@ import json
 import hashlib
 import os
 import re
+import selectors
 import shlex
 import signal
 import stat
+import struct
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 
 NAME = re.compile(r"[A-Za-z0-9._-]+")
 # Where removable drives are mounted. See Library.folder_state.
 REMOVABLE_ROOTS = (Path("/run/media"), Path("/media"), Path("/mnt"))
+# Bound what an icon extractor can make the host buffer or decode.
+MAX_ICON_PNG_BYTES = 1024 * 1024
+MAX_ICON_STDERR_BYTES = 64 * 1024
+MAX_ICON_DIM = 512
+ICON_TIMEOUT = 5
+ICON_TMPFS_BYTES = 64 * 1024 * 1024
+
+
+def safe_resolve(path, strict=False):
+    """PATH resolved, or None when the filesystem cannot answer (a loop, EACCES)."""
+    try:
+        return Path(path).resolve(strict=strict)
+    except (OSError, RuntimeError):
+        return None
 
 
 def valid_name(name):
@@ -172,11 +189,12 @@ class Library:
     def update_entry(self, name, derive_title=False, **changes):
         """Change only these fields of the entry as saved now, keeping whatever
         else changed since it was shown: a game reconnected meanwhile, say."""
-        entry = {**self.load_entry(self.capture(name), display=False), **changes}
-        if derive_title:
-            entry["title"] = self.display_title(entry)
-        self.save_entry(entry)
-        return self.entry(name)
+        with self.lock:
+            entry = {**self.load_entry(self.capture(name), display=False), **changes}
+            if derive_title:
+                entry["title"] = self.display_title(entry)
+            self.save_entry(entry)
+            return self.entry(name)
 
     @staticmethod
     def display_title(entry):
@@ -206,7 +224,9 @@ class Library:
         """Describe where the installed game lives, independently of its runner."""
         directory = entry.get("directory", "")
         if directory:
-            if Path(directory).resolve().is_relative_to(self.capture(entry["name"]).resolve()):
+            folder = safe_resolve(directory)
+            capture = safe_resolve(self.capture(entry["name"]))
+            if folder is not None and capture is not None and folder.is_relative_to(capture):
                 return "sandbox"
             return "external"
         if entry.get("kind") == "windows":
@@ -244,7 +264,10 @@ class Library:
         paths = []
         for folder in folders:
             # Never create these folders.
-            path = str(self.game_folder_path(folder).resolve())
+            resolved = safe_resolve(self.game_folder_path(folder))
+            if resolved is None:
+                continue  # a broken path cannot be searched
+            path = str(resolved)
             if path not in paths:
                 paths.append(path)
         atomic_write(self.config / "game-folders.json", json.dumps({"folders": paths}, indent=2) + "\n")
@@ -293,15 +316,18 @@ class Library:
         """(folder, resolved) for the game folders and three levels below them:
         no symbolic links, nothing inside a sandbox."""
         visited, folders = {}, {}
-        captures = self.root.resolve()
+        captures = safe_resolve(self.root)
+        if captures is None:
+            return []
         pending = [(folder, 0) for folder in self.game_folders()]
         while pending:
             folder, depth = pending.pop()
             try:
                 if folder.is_symlink() or not folder.is_dir():
                     continue
-                resolved = folder.resolve()
-                if visited.get(resolved, 4) <= depth or resolved.is_relative_to(captures):
+                resolved = safe_resolve(folder)
+                if resolved is None or visited.get(resolved, 4) <= depth \
+                        or resolved.is_relative_to(captures):
                     continue
                 visited[resolved] = depth
                 folders.setdefault(resolved, folder)
@@ -348,13 +374,17 @@ class Library:
                     info = self.describe(selection, entry["name"])
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
                     continue
-                if info.get("engine") and Path(info["directory"]).resolve() == resolved:
-                    found[entry["name"]][str(selection)] = str(resolved)
+                if info.get("engine"):
+                    info_folder = safe_resolve(info["directory"])
+                    if info_folder is not None and info_folder == resolved:
+                        found[entry["name"]][str(selection)] = str(resolved)
         return found
 
     def reconnect(self, entry, selection):
         with self.lock:
-            selection = Path(selection).resolve(strict=True)
+            selection = safe_resolve(selection, strict=True)
+            if selection is None:
+                raise ValueError("The selected game folder is not available")
             info = self.describe(selection, entry["name"])
             if not info.get("engine"):
                 raise ValueError("No supported game was found. Select its launcher or game folder.")
@@ -380,7 +410,9 @@ class Library:
                     claims[folder] = claims.get(folder, 0) + 1
             for entry in entries:
                 if states.get(entry["name"]) != "missing" and entry.get("directory"):
-                    claims[str(Path(entry["directory"]).resolve())] = 2
+                    resolved = safe_resolve(entry["directory"])
+                    if resolved is not None:
+                        claims[str(resolved)] = 2
             for index, entry in enumerate(entries):
                 matches = found.get(entry["name"], {})
                 if len(matches) != 1:
@@ -420,7 +452,7 @@ class Library:
         capture = self.capture(entry["name"])
         try:
             capture = capture.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             return []
         roots = []
         directory = entry.get("directory", "")
@@ -429,13 +461,13 @@ class Library:
                 folder = Path(directory).resolve()
                 if folder.is_dir():
                     roots.append((folder, ()))
-            except OSError:
+            except (OSError, RuntimeError):
                 pass
         try:
             upper = self.upper_layer(entry["name"]).resolve()
             if upper.is_dir() and upper.is_relative_to(capture):
                 roots.append((upper, ()))
-        except OSError:
+        except (OSError, RuntimeError):
             pass
         try:
             self.windows_drive(entry["name"])
@@ -464,7 +496,7 @@ class Library:
                 # own name is still opened without following a link.
                 try:
                     relative = path.parent.resolve().relative_to(base.resolve()) / path.name
-                except (OSError, ValueError):
+                except (OSError, RuntimeError, ValueError):
                     continue
             if relative.parts:
                 return Path(anchor), tuple(parts), relative
@@ -512,7 +544,7 @@ class Library:
                 if not path.resolve().is_relative_to(anchor.joinpath(*parts).resolve()):
                     continue
                 safe.append(path)
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
         return safe[:32], roots
 
@@ -548,6 +580,81 @@ class Library:
             raise
 
     NO_ICON = 3  # sandbox-game-icon's status for a file without a usable icon
+
+    @staticmethod
+    def _run_icon(args, fd):
+        """Run the isolated extractor with both streams bounded and a timeout."""
+        process = subprocess.Popen(args, stdin=fd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        stdout, stderr = bytearray(), bytearray()
+        for stream, target, limit in ((process.stdout, stdout, MAX_ICON_PNG_BYTES),
+                                      (process.stderr, stderr, MAX_ICON_STDERR_BYTES)):
+            selector.register(stream, selectors.EVENT_READ, (target, limit))
+        deadline = time.monotonic() + ICON_TIMEOUT
+        oversized = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, ICON_TIMEOUT)
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    target, limit = key.data
+                    target += chunk
+                    if len(target) > limit:
+                        oversized = True
+                        break
+                if oversized:
+                    break
+            if oversized:
+                process.kill()
+                process.wait()
+                return subprocess.CompletedProcess(args, process.returncode, bytes(stdout), bytes(stderr))
+            try:
+                process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise
+            return subprocess.CompletedProcess(args, process.returncode, bytes(stdout), bytes(stderr))
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                stream.close()
+
+    @staticmethod
+    def valid_icon_png(data):
+        """Whether DATA is a bounded PNG with valid IHDR and IEND chunks."""
+        if not data or len(data) > MAX_ICON_PNG_BYTES or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False
+        offset, seen_ihdr = 8, False
+        while offset < len(data):
+            if offset + 12 > len(data):
+                return False
+            length = struct.unpack_from(">I", data, offset)[0]
+            kind = data[offset + 4:offset + 8]
+            end = offset + 12 + length
+            if length > MAX_ICON_PNG_BYTES or end > len(data):
+                return False
+            if not seen_ihdr:
+                if kind != b"IHDR" or length != 13:
+                    return False
+                width, height = struct.unpack_from(">II", data, offset + 8)
+                if not (0 < width <= MAX_ICON_DIM and 0 < height <= MAX_ICON_DIM):
+                    return False
+                seen_ihdr = True
+            if kind == b"IEND":
+                return seen_ihdr and length == 0 and end == len(data)
+            offset = end
+        return False
 
     def icon(self, entry):
         sources, roots = self.icon_files(entry)
@@ -590,11 +697,12 @@ class Library:
                 args = ["bwrap", "--unshare-all", "--unshare-user",
                         "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
                         "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib",
-                        "--symlink", "usr/lib64", "/lib64", "--dev", "/dev", "--tmpfs", "/tmp",
+                        "--symlink", "usr/lib64", "/lib64", "--dev", "/dev",
+                        "--size", str(ICON_TMPFS_BYTES), "--tmpfs", "/tmp",
                         "--proc", "/proc", "--setenv", "HOME", "/tmp",
                         "--ro-bind", str(helper), "/extract.py",
                         "--chdir", "/", "/usr/bin/python3", "-I", "/extract.py", "-"]
-                output = subprocess.run(args, stdin=fd, capture_output=True, check=False, timeout=5)
+                output = self._run_icon(args, fd)
             except subprocess.TimeoutExpired:
                 definite = False
                 continue  # this file may just be slow; the others still get a turn
@@ -603,13 +711,16 @@ class Library:
                 break  # no isolation available: keep the generic icon for now
             finally:
                 os.close(fd)
-            if output.returncode == 0 and output.stdout:
-                result = output.stdout
-                break
+            if output.returncode == 0:
+                if self.valid_icon_png(output.stdout):
+                    result = output.stdout
+                    break
+                definite = False
+                continue  # unexpected helper output is no proof about the file
             # No icon in it, or the helper's CPU limit ended it: that file's answer.
             if output.returncode not in (self.NO_ICON, 128 + signal.SIGXCPU, 128 + signal.SIGKILL):
                 definite = False
-                break
+                continue  # another candidate may still have a usable icon
         if result or definite:
             with self.lock:
                 capture = self.capture(entry["name"])
@@ -681,7 +792,9 @@ PY
         return json.loads(result.stdout)
 
     def add_existing(self, selection, name=None):
-        selection = Path(selection).resolve(strict=True)
+        selection = safe_resolve(selection, strict=True)
+        if selection is None:
+            raise ValueError("The selected game folder is not available")
         info = self.describe(selection, name or "unused")
         if not info["engine"]:
             raise ValueError("No supported game was found. Select its launcher or game folder.")
@@ -694,7 +807,9 @@ PY
                 capture = self.capture(name)
                 prior = read_json(capture / "manager.json") or read_json(capture / "source.json")
                 directory = prior.get("directory", "")
-                if not directory or Path(directory).resolve() == Path(info["directory"]).resolve():
+                prior_folder = safe_resolve(directory) if directory else None
+                info_folder = safe_resolve(info["directory"])
+                if not directory or (prior_folder is not None and prior_folder == info_folder):
                     if prior.get("kind") == "windows":
                         return {**prior, "name": name}
                     break
@@ -805,30 +920,41 @@ PY
         for match in re.finditer(r'^\s*XDG_([A-Z]+)_DIR="([^"\n]*)"', text, re.M):
             value = match[2]
             if value.startswith("$HOME"):
-                value = str(self.home.resolve()) + value[len("$HOME"):]
+                home = safe_resolve(self.home)
+                value = str(home if home is not None else self.home) + value[len("$HOME"):]
             if value.startswith("/"):
                 folders[match[1]] = Path(value)
         return folders
 
     def shared_folder(self, folder):
         """Folders that collect unrelated files: home, its parents and the XDG user folders."""
-        folder = folder.resolve()
-        home = self.home.resolve()
+        folder = safe_resolve(folder)
+        if folder is None:
+            return True  # fail closed: do not bind a folder that cannot be checked
+        home = safe_resolve(self.home)
+        if home is None:
+            return True
         if home.is_relative_to(folder) or folder in (Path("/tmp"), Path("/var/tmp")):
             return True
         folders = {home / name for name in ("Desktop", "Documents", "Downloads", "Music", "Pictures",
                                             "Public", "Templates", "Videos")}
         folders.update(self.user_dirs().values())
-        return any(folder == path.resolve() for path in folders)
+        for path in folders:
+            resolved = safe_resolve(path)
+            if resolved is not None and folder == resolved:
+                return True
+        return False
 
     def desktop_folder(self):
         """The desktop folder, or None without one. Never created here: a
         desktop set to home, as user-dirs.dirs turns it off, is none either."""
         folder = self.desktop or self.user_dirs().get("DESKTOP", self.home / "Desktop")
         try:
-            if folder.is_dir() and folder.resolve() != self.home.resolve():
+            resolved = folder.resolve()
+            home = self.home.resolve()
+            if folder.is_dir() and resolved != home:
                 return folder
-        except OSError:
+        except (OSError, RuntimeError):
             pass
         return None
 
@@ -1101,8 +1227,9 @@ PY
         # at once, and Proton, then the sandbox, exits with the program barely
         # started. Plain Wine, without that setting, waits for either.
         if installer is not None:
-            installer = Path(installer).resolve(strict=True)
-            if not installer.is_file() or installer.suffix.lower() not in (".exe", ".msi"):
+            installer = safe_resolve(installer, strict=True)
+            if installer is None or not installer.is_file() \
+                    or installer.suffix.lower() not in (".exe", ".msi"):
                 raise ValueError("Select a Windows .exe or .msi installer")
             # Installer media stay read-only; all installed files go into this sandbox.
             flags += self.installer_binds(installer)
@@ -1149,7 +1276,10 @@ PY
         if ".." in Path(relative).parts or Path(relative).is_absolute():
             raise ValueError("Select a program inside this sandbox")
         for root, path in candidates:
-            if path.is_file() and path.resolve().is_relative_to(root.resolve()):
+            resolved = safe_resolve(path)
+            root_resolved = safe_resolve(root)
+            if path.is_file() and resolved is not None and root_resolved is not None \
+                    and resolved.is_relative_to(root_resolved):
                 return path
             if path.exists():  # a whiteout or directory also hides the lower file
                 break
@@ -1167,8 +1297,12 @@ PY
         for root, prefix in roots:
             if not root.is_dir():
                 continue
-            if root == rw and not root.resolve().is_relative_to(capture.resolve()):
-                continue
+            if root == rw:
+                root_resolved = safe_resolve(root)
+                capture_resolved = safe_resolve(capture)
+                if root_resolved is None or capture_resolved is None \
+                        or not root_resolved.is_relative_to(capture_resolved):
+                    continue
             for folder, dirs, files in os.walk(root, followlinks=False):
                 dirs[:] = [d for d in dirs if d.lower() not in
                            ("windows", "$recycle.bin", "system volume information")]
@@ -1254,9 +1388,11 @@ PY
                 stream.seek(0, 2)
                 size = stream.tell()
                 stream.seek(max(0, size - 256 * 1024))
-                return stream.read().decode("utf-8", errors="replace")
+                return stream.read().decode("utf-8", errors="replace").replace("\x00", "\ufffd")
         except FileNotFoundError:
             return "No launch log yet."
+        except OSError as error:
+            return f"Cannot read the launch log: {error}"
 
     def stats(self, name):
         total = last = 0
