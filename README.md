@@ -298,7 +298,7 @@ working directory.
 | `SANDBOX_SEPARATE_UID=1` | `newuidmap`, `newgidmap`, `nsenter`, `setfacl`, `fuse-overlayfs` | `uidmap` on Debian and Ubuntu; see [A uid of its own](#a-uid-of-its-own) |
 | `--net` | `pasta` and `ip` | `passt` and `iproute2`; `pasta` is often already there as podman's network backend |
 | `--dotnet` | a .NET runtime | the distribution's package, or Microsoft's install script into `~/.dotnet` |
-| playback-only sound (`install.sh --restrict-audio`) | PipeWire with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
+| playback-only sound (`install.sh --restrict-audio`) | PipeWire 1.6.6 or later with `pipewire-pulse`, WirePlumber 0.5 with permission managers, a systemd user session | checked with PipeWire 1.6.9 and WirePlumber 0.5.17; the tests use `pactl`, `pacat` and `parec` (`pulseaudio-utils`) |
 
 `bwrap --overlay` is the preferred path and is compiled in on most
 distributions — check with `bwrap --help | grep overlay` — and `fuse-overlayfs`
@@ -1334,6 +1334,13 @@ modules**, which pipewire-pulse runs with its own rights outside the sandbox.
 `module-rtp-send`, `module-tunnel-sink` or `module-roc-sink` would carry audio —
 or anything encoded as audio — to any address on the network, from a game that
 has none; `module-native-protocol-tcp` would open the sound server to the LAN.
+
+`./install.sh --restrict-audio` needs PipeWire 1.6.6 or later. Before that
+version a Pulse client can overwrite its `pipewire.client.access` property
+(CVE-2026-5674), which bypasses the `sandbox-game` access class and every rule
+below. `install.sh --restrict-audio` warns while still installing it, since no
+restriction would be worse, and `sandbox-game --check` reports the running
+version.
 
 `./install.sh --restrict-audio` makes it playback only:
 

@@ -94,6 +94,47 @@ cfg_wayland_x11() {
 #   seccomp          the syscall filter refuses, rather than logs
 REQUIREMENTS="landlock scoped private-display limits audio seccomp"
 
+# The running PipeWire's version. The daemon is asked first, so a newer client
+# package cannot pass for it: pw-cli reports the core's version, pactl names
+# the server it reached, and pipewire --version is the last resort.
+pipewire_version() {
+    # Each answer is read whole and then searched: nothing closes a pipe
+    # early, so pipefail callers see no SIGPIPE, and a tool that fails or is
+    # missing only leaves the next one to ask.
+    local out="" version=""
+    if command -v pw-cli >/dev/null; then
+        out="$(pw-cli info 0 2>/dev/null)" || true
+        version="$(sed -n 's/.*core\.version[^0-9]*\([0-9][0-9.]*\).*/\1/p;T;q' <<< "$out")"
+    fi
+    if [ -z "$version" ] && command -v pactl >/dev/null; then
+        out="$(pactl info 2>/dev/null)" || true
+        version="$(sed -n 's/^Server Name: *PulseAudio (on PipeWire \([0-9][0-9.]*\)).*/\1/p;T;q' <<< "$out")"
+    fi
+    if [ -z "$version" ] && command -v pipewire >/dev/null; then
+        # The library it runs with, not the one it was built against.
+        out="$(pipewire --version 2>/dev/null)" || true
+        version="$(sed -n 's/^Linked with libpipewire \([0-9][0-9.]*\).*/\1/p;T;q' <<< "$out")"
+        [ -n "$version" ] || version="$(sed -n \
+            's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p;T;q' <<< "$out")"
+    fi
+    printf '%s\n' "${version%.}"
+}
+
+# Whether a dotted version is at least the minimum.
+pipewire_at_least() {                  # $1 = version, $2 = minimum
+    local i a b
+    local -a have need
+    IFS=. read -r -a have <<< "$1"
+    IFS=. read -r -a need <<< "$2"
+    for i in "${!need[@]}"; do
+        a="${have[i]:-0}"; b="${need[i]}"
+        a="${a//[^0-9]/}"; b="${b//[^0-9]/}"
+        (( 10#${a:-0} > 10#${b:-0} )) && return 0
+        (( 10#${a:-0} < 10#${b:-0} )) && return 1
+    done
+    return 0
+}
+
 # A list of them -- commas or blanks, "all" for all -- in R_REQUIRE, space
 # separated and in the order above. Fails, naming it, on one it does not know.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this

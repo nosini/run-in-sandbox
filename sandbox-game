@@ -703,6 +703,7 @@ EOF
 # available here by design.
 check_host() {
     local here rt out abi failed=0 nodes=()
+    local pulse_service="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/sandbox-pulse.service"
     rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     _check_line() { printf '  %s  %-12s %s\n' "$1" "$2" "$3"; [ "$1" != '!!' ] || failed=1; }
     # Each saved scope may choose another policy. Keep invalid preferences
@@ -774,6 +775,22 @@ check_host() {
         _check_line ok sound "playback only (sandbox-pulse)"
     else
         _check_line '!!' sound "the desktop's own sockets: games can record (./install.sh --restrict-audio)"
+    fi
+    out="$(pipewire_version)"
+    if [ -e "$pulse_service" ]; then
+        if [ -z "$out" ]; then
+            _check_line '!!' pipewire "version unknown: restricted sound needs PipeWire 1.6.6 or later (CVE-2026-5674)"
+        elif pipewire_at_least "$out" 1.6.6; then
+            _check_line ok pipewire "PipeWire $out: not affected by CVE-2026-5674"
+        else
+            _check_line '!!' pipewire "PipeWire $out is older than 1.6.6: a game can bypass restricted sound (CVE-2026-5674)"
+        fi
+    elif [ -z "$out" ]; then
+        _check_line -- pipewire "version unknown; restricted sound is not installed"
+    elif pipewire_at_least "$out" 1.6.6; then
+        _check_line -- pipewire "PipeWire $out; restricted sound is not installed"
+    else
+        _check_line -- pipewire "PipeWire $out is older than 1.6.6; restricted sound is not installed"
     fi
 
     for out in /dev/dri/renderD*; do [ ! -c "$out" ] || nodes+=( "${out##*/}" ); done
@@ -915,7 +932,17 @@ requirement_failures() {
                 # A uid of its own gets no sound at all without that server.
                 [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ] \
                     || { [ "${LAUNCH:-0}" = 1 ] && [ "$SEPARATE_UID" != 0 ]; } \
-                    || echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)" ;;
+                    || echo "audio: no playback-only sound server (./install.sh --restrict-audio sets one up)"
+                # Before 1.6.6 a game can leave the server's access class.
+                if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sandbox-pulse/native" ]; then
+                    local pw
+                    pw="$(pipewire_version)"
+                    if [ -z "$pw" ]; then
+                        echo "audio: cannot tell the PipeWire version; playback only needs 1.6.6 or later (CVE-2026-5674)"
+                    elif ! pipewire_at_least "$pw" 1.6.6; then
+                        echo "audio: PipeWire $pw is older than 1.6.6; a game can leave playback only (CVE-2026-5674)"
+                    fi
+                fi ;;
             seccomp)
                 [ "${SANDBOX_SECCOMP:-}" != log ] \
                     || echo "seccomp: SANDBOX_SECCOMP=log lets every call the filter blocks through" ;;

@@ -2302,8 +2302,8 @@ main().catch((error) => { console.error(error); process.exit(1); });
         # pasta's SELinux domain is reported only where SELinux is on.
         selinux = ["pasta-domain"] if os.access("/sys/fs/selinux/context", os.W_OK) else []
         self.assertEqual(list(marks), ["flock", "sandbox", "seccomp", "landlock", "limits", "sound",
-                                       "gpu", "gamescope", "wayland", "satellite", "network",
-                                       *selinux, "ntsync", "32-bit"], result.stdout)
+                                       "pipewire", "gpu", "gamescope", "wayland", "satellite",
+                                       "network", *selinux, "ntsync", "32-bit"], result.stdout)
         self.assertTrue(set(marks.values()) <= {"ok", "--", "!!"}, result.stdout)
         # Exit status 1 exactly when something a sandbox should have is missing:
         # here at least the playback-only server, the test runtime dir having none.
@@ -2311,6 +2311,50 @@ main().catch((error) => { console.error(error); process.exit(1); });
         self.assertEqual(result.returncode, 1)
         filtered = load_seccomp().socketcall_closable() or os.uname().machine != "x86_64"
         self.assertEqual(marks["seccomp"], "ok" if filtered else "--")
+
+    def test_check_reports_the_pipewire_version_for_restricted_audio(self):
+        (self.runtime / "sandbox-pulse").mkdir()
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(self.runtime / "sandbox-pulse" / "native"))
+        self.addCleanup(listener.close)
+        service = self.home / ".config/systemd/user/sandbox-pulse.service"
+        service.parent.mkdir(parents=True)
+        service.write_text("")
+        scripts = self.base / "check-pipewire"
+        scripts.mkdir()
+        for name in ("sandbox-game", "sandbox-game-lib", "sandbox-landlock"):
+            shutil.copy2(ROOT / name, scripts / name)
+        library = scripts / "sandbox-game-lib"
+        library.write_text(library.read_text() + '\npipewire_version() { printf "1.6.5\\n"; }\n')
+
+        def line():
+            result = subprocess.run([str(scripts / "sandbox-game"), "--check"], env=self.env,
+                                    capture_output=True, text=True, timeout=20)
+            return result, next(row for row in result.stdout.splitlines()
+                                if row.split()[1] == "pipewire")
+
+        result, old = line()
+        self.assertEqual(old.split()[0], "!!", old)
+        self.assertIn("1.6.5", old)
+        self.assertIn("older than 1.6.6", old)
+        self.assertIn("CVE-2026-5674", old)
+        # A launch that requires playback-only sound does not start on it.
+        launch = subprocess.run([str(scripts / "sandbox-game"), "--require", "audio",
+                                 "--headless", str(self.game), "/bin/true"], env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(launch.returncode, 0)
+        self.assertIn("PipeWire 1.6.5 is older than 1.6.6", launch.stderr)
+        library.write_text(library.read_text().replace('printf "1.6.5\\n"',
+                                                       'printf "1.6.6\\n"'))
+        result, current = line()
+        self.assertEqual(current.split()[0], "ok", current)
+        self.assertIn("1.6.6", current)
+        self.assertNotIn("older", current)
+        library.write_text(library.read_text().replace('printf "1.6.6\\n"',
+                                                       'printf "\\n"'))
+        result, unknown = line()
+        self.assertEqual(unknown.split()[0], "!!", unknown)
+        self.assertIn("unknown", unknown)
 
     def test_check_names_what_32_bit_wine_cannot_find(self):
         # Proton runs on the system's libraries: a 32-bit Wine driver that
@@ -5717,6 +5761,93 @@ print(json.dumps([before, original.read_text(), replacement_errno,
         self.assertRegex(self.cli("--list").stdout, rf"{name}.*running")
         self.cli("--stop", name)
         proc.communicate(timeout=10)
+
+
+class InstallScriptTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="sandbox-install-test-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.env = {**os.environ, "HOME": str(self.home),
+                    "XDG_CONFIG_HOME": str(self.home / ".config"),
+                    "XDG_DATA_HOME": str(self.home / ".local/share"),
+                    "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
+
+    def command(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return path
+
+    def test_restrict_audio_warns_about_old_pipewire_and_installs(self):
+        if os.geteuid() == 0:
+            self.skipTest("the per-user install refuses root")
+        self.command("pw-cli", 'printf "\\t* core.version = \\"1.6.5\\"\\n"')
+        self.command("pactl", "exit 1")
+        self.command("pipewire", "exit 1")
+        log = self.base / "install.args"
+        self.command("install", 'printf "%s\\n" "$@" > "$INSTALL_LOG"; exit 1')
+        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--restrict-audio"],
+                                text=True, env={**self.env, "INSTALL_LOG": str(log)},
+                                cwd=self.base, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("1.6.5", result.stderr)
+        self.assertIn("older than 1.6.6", result.stderr)
+        self.assertIn("CVE-2026-5674", result.stderr)
+        self.assertIn("game can bypass", result.stderr)
+        self.assertTrue(log.read_text(), "installation did not start after the warning")
+
+    def pipewire_version(self, pw_cli, pactl, pipewire):
+        for name, body in zip(("pw-cli", "pactl", "pipewire"), (pw_cli, pactl, pipewire)):
+            self.command(name, body)
+        # As a strict caller runs it: a pipe closed early or a tool failing
+        # would end that caller.
+        script = ("set -eo pipefail; shopt -s inherit_errexit\n"
+                  + (ROOT / "sandbox-game-lib").read_text()
+                  + '\nversion="$(pipewire_version)"; printf "%s\\n" "$version"\n')
+        result = subprocess.run(["bash", "-s"], input=script, text=True, env=self.env,
+                                capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_pipewire_version_comes_from_the_running_daemon(self):
+        self.assertEqual(self.pipewire_version(
+            'printf "\\t* core.version = \\"1.6.9\\"\\n"',
+            'printf "Server Name: PulseAudio (on PipeWire 1.6.8)\\n"',
+            'printf "Linked with libpipewire 1.6.7\\n"'), "1.6.9")
+        self.assertEqual(self.pipewire_version(
+            "exit 1", 'printf "Server Name: PulseAudio (on PipeWire 1.6.8)\\n"',
+            "exit 1"), "1.6.8")
+        self.assertEqual(self.pipewire_version(
+            "exit 1", "exit 1", 'printf "Linked with libpipewire 1.6.7\\n"'), "1.6.7")
+        self.assertEqual(self.pipewire_version("exit 1", "exit 1", "exit 1"), "")
+
+    def test_pipewire_version_survives_long_output_and_reads_the_linked_library(self):
+        # The match comes first and much more follows: nothing may close the
+        # pipe on the tool. pipewire --version names the library it was
+        # built against before the one it runs with.
+        self.assertEqual(self.pipewire_version(
+            'printf "\\t* core.version = \\"1.6.9\\"\\n"; seq 200000', "exit 1", "exit 1"),
+            "1.6.9")
+        self.assertEqual(self.pipewire_version(
+            "exit 1", "exit 1",
+            'printf "pipewire\\nCompiled with libpipewire 1.6.5\\n'
+            'Linked with libpipewire 1.6.11\\n"'), "1.6.11")
+
+    def test_pipewire_version_comparison_is_numeric(self):
+        script = (ROOT / "sandbox-game-lib").read_text() + (
+            '\nfor v in 1.6.5 1.6.6 1.6.10 1.7 2.0; do\n'
+            '    pipewire_at_least "$v" 1.6.6 && printf "%s yes\\n" "$v" '
+            '|| printf "%s no\\n" "$v"\ndone\n')
+        result = subprocess.run(["bash", "-s"], input=script, text=True, env=self.env,
+                                capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["1.6.5 no", "1.6.6 yes", "1.6.10 yes", "1.7 yes", "2.0 yes"])
 
 
 if __name__ == "__main__":

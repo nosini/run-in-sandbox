@@ -179,6 +179,18 @@ if [ -z "$SRC" ]; then
     SRC="$TMP"
 fi
 
+# Restricted sound relies on the daemon keeping a client to the access class
+# of the socket it came through. Older PipeWire lets a Pulse client overwrite
+# that class, and with it every rule that makes sound playback only.
+if [ "$AUDIO" = 1 ]; then
+    pw_version="$(. "$SRC/sandbox-game-lib"; pipewire_version)"
+    if [ -z "$pw_version" ]; then
+        warn "cannot determine the running PipeWire version; restricted sound needs PipeWire 1.6.6 or later, or a game can bypass it (CVE-2026-5674)"
+    elif ! (. "$SRC/sandbox-game-lib"; pipewire_at_least "$pw_version" 1.6.6); then
+        warn "PipeWire $pw_version is older than 1.6.6; until PipeWire is updated, a game can bypass the restricted sound (CVE-2026-5674)"
+    fi
+fi
+
 # ---- install ----------------------------------------------------------------
 if [ -n "$SYSTEMD_MODE" ]; then
     python3 -I "$SRC/systemd-backend/install-systemd.py" "$SYSTEMD_MODE" "$@"
