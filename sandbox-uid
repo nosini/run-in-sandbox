@@ -115,6 +115,80 @@ def fail(msg):
     sys.exit(1)
 
 
+def occupy_stdio():
+    """Leave nothing for internal pipes or sockets to mistake for a standard
+    descriptor: one that was closed before this started is /dev/null."""
+    for fd in (0, 1, 2):
+        try:
+            os.fstat(fd)
+        except OSError:
+            os.open(os.devnull, os.O_RDWR)
+
+
+def reset_exec_signals():
+    """Python ignores these and an ignored signal stays ignored across exec,
+    so the game would never be stopped by a closed pipe or an oversized file."""
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+        signal.signal(sig, signal.SIG_DFL)
+
+
+def resolve_executable(path):
+    """PATH as exec would find it: as given, or looked up on PATH."""
+    if not os.path.isabs(path) and os.sep not in path:
+        found = shutil.which(path)
+        if found:
+            path = found
+    return os.path.realpath(path)
+
+
+def exec_bwrap(argv, bwrap=None):
+    """BWRAP itself, with an empty environment: PID 1 must not inherit ours."""
+    bwrap = bwrap or resolve_executable(argv[0])
+    reset_exec_signals()
+    os.execve(bwrap, argv, {})
+
+
+def option_index(argv, option):
+    """Where OPTION comes in ARGV before bwrap's --, or None."""
+    for i, arg in enumerate(argv):
+        if arg == "--":
+            break
+        if arg == option:
+            return i
+    return None
+
+
+def valid_pid(pid):
+    return re.fullmatch(r"[1-9][0-9]*", str(pid)) is not None
+
+
+def reap_child(pid, grace=2):
+    """SIGTERM PID, then SIGKILL after GRACE, never blocking on a stuck one."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace
+    killed = False
+    while True:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return
+        except ChildProcessError:
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            if killed:
+                return
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            killed = True
+            deadline = now + grace
+        time.sleep(0.02)
+
+
 TRACE_START = time.monotonic()
 
 
@@ -402,6 +476,7 @@ def fuse_overlay(mp, lowers, upper, work, uid, gid):
             opts = ["lowerdir=" + ":".join(f"/proc/self/fd/{fd}" for fd in layers),
                     f"upperdir=/proc/self/fd/{upper}", f"workdir=/proc/self/fd/{work}",
                     f"squash_to_uid={uid}", f"squash_to_gid={gid}"]
+            reset_exec_signals()
             os.execvp("fuse-overlayfs", ["fuse-overlayfs", "-f", "-o", ",".join(opts),
                                          f"/dev/fd/{dev}"])
         except BaseException as e:
@@ -907,9 +982,11 @@ def relay_output(uid):
             try:
                 out = os.dup(fd)
                 close_others([r, out])
-                os.dup2(os.open("/dev/null", os.O_RDWR), 0)
-                os.dup2(0, 1)
-                os.dup2(0, 2)
+                devnull = os.open("/dev/null", os.O_RDWR)
+                for std in (0, 1, 2):
+                    os.dup2(devnull, std)
+                if devnull > 2:
+                    os.close(devnull)
                 while data := os.read(r, 65536):
                     while data:
                         data = data[os.write(out, data):]
@@ -994,7 +1071,7 @@ def inside_launch(cap, argv):
     relay_output(g_uid)
     # What it makes is then open to its group, and so to you (see share()).
     os.umask(0o002)
-    os.execv(argv[0], argv)
+    exec_bwrap(argv)
 
 
 # ---- the systemd backend ---------------------------------------------------
@@ -1276,12 +1353,19 @@ def managed_namespace(name):
 
 def idle_workers():
     """How many of nsresourced's workers wait for a connection, by their
-    process titles; None if none can be seen (proc mounted hidepid=)."""
+    process titles; None if none can be seen (proc mounted hidepid=). Only
+    root's count: the uid PID 1 has, which a container maps away from 0."""
+    try:
+        root = os.stat("/proc/1").st_uid
+    except OSError:
+        root = 0
     seen, idle = 0, 0
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
             continue
         try:
+            if os.stat(f"/proc/{pid}").st_uid != root:
+                continue                    # not nsresourced's: no say here
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 title = f.read(len(NSRESOURCE_WAITING))
         except OSError:
@@ -1309,6 +1393,7 @@ class WarmWorker:
         self.wanted = wanted
         self.sockets = []
         self.previous = None
+        self.deadline = None
 
     def __enter__(self):
         if self.wanted:
@@ -1317,13 +1402,21 @@ class WarmWorker:
 
     def hold(self):
         """Take the idle workers but one: the one just warmed, it is hoped."""
+        if self.deadline is None:
+            self.deadline = time.monotonic() + HELD_TIMEOUT
         idle = idle_workers()
         wanted = HELD_CONNECTIONS if idle is None else idle - 1
         for _ in range(max(0, min(wanted, HELD_MAX - len(self.sockets)))):
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self.close()
+                break
             s = None
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+                s.settimeout(remaining)
                 s.connect(NSRESOURCE)
+                s.settimeout(None)
             except OSError:
                 if s is not None:
                     s.close()
@@ -1331,15 +1424,21 @@ class WarmWorker:
                 break
             self.sockets.append(s)
         trace(f"{idle} nsresourced workers idle; holding {len(self.sockets)} connections")
-        if self.sockets and self.previous is None:
-            self.previous = signal.signal(signal.SIGALRM, lambda *_: self.close())
-            signal.setitimer(signal.ITIMER_REAL, HELD_TIMEOUT)
+        if self.sockets:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                self.close()
+            else:
+                if self.previous is None:
+                    self.previous = signal.signal(signal.SIGALRM, lambda *_: self.close())
+                signal.setitimer(signal.ITIMER_REAL, left)
 
     def __exit__(self, *exc):
         if self.previous is not None:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, self.previous)
             self.previous = None
+        self.deadline = None
         self.close()
 
     def close(self):
@@ -1628,6 +1727,7 @@ def managed_network(net):
                 libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
                 if os.getppid() != keeper_pid:
                     os._exit(0)
+                reset_exec_signals()
                 os.execv(net["pasta"], [
                     net["pasta"], "--quiet", "--foreground", "--config-net", "--netns-only",
                     "--netns", target, "--no-netns-quit",
@@ -1638,8 +1738,7 @@ def managed_network(net):
             while True:
                 sig = signal.sigwait(ends | {signal.SIGCHLD})
                 if sig != signal.SIGCHLD:
-                    os.kill(pasta, signal.SIGTERM)
-                    os.waitpid(pasta, 0)
+                    reap_child(pasta)
                     break
                 if os.waitpid(pasta, os.WNOHANG)[0]:
                     break
@@ -1686,14 +1785,14 @@ def managed_launch(cap, argv, net=None):
         os.makedirs(mounts, exist_ok=True)
     if net:
         # bwrap keeps the network namespace made here (see managed_network).
-        if "--unshare-all" not in argv:
+        at = option_index(argv, "--unshare-all")
+        if at is None:
             fail("managed-launch --net: the command does not unshare the network")
-        at = argv.index("--unshare-all") + 1
-        argv[at:at] = ["--share-net"]
+        argv[at + 1:at + 1] = ["--share-net"]
     # pasta runs from its folder too: sandbox-game names a copy after the game.
     # bwrap may be in a folder place() covers -- under a 0700 home -- so it is
     # delegated and put back before it is executed.
-    bwrap_bin = os.path.realpath(argv[0])
+    bwrap_bin = resolve_executable(argv[0])
     extra = [(bwrap_bin, False)]
     if net:
         extra.append((os.path.realpath(net["pasta"]), False))
@@ -1779,7 +1878,7 @@ def managed_launch(cap, argv, net=None):
             f.write(text)
     check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
     os.chdir("/")
-    os.execv(bwrap_bin, argv)
+    exec_bwrap(argv, bwrap_bin)
 
 
 def managed_adopt(cap):
@@ -1891,6 +1990,8 @@ def managed_owns(cap, pid):
     sandbox-game --stop and sandbox-attach tell this sandbox's outer bwrap
     from anything else (see sandbox_user in sandbox-game-lib). The game
     cannot write the record, nor make another namespace with that parent."""
+    if not valid_pid(pid):
+        return False
     try:
         fd = os.open(f"/proc/{pid}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
         try:
@@ -1911,6 +2012,8 @@ def managed_enter(pid, argv):
     so nsenter cannot drop our groups there: the way managed_launch() went,
     into the one nsresourced allocated, as its root and without groups, then
     on into PID's. Both are below one of ours, so we may enter them."""
+    if not valid_pid(pid):
+        fail(f"invalid process id: {pid}")
     me, group = os.getuid(), os.getgid()
     try:
         outer = os.open(f"/proc/{pid}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
@@ -1924,12 +2027,14 @@ def managed_enter(pid, argv):
         os.setresuid(me, me, me)
         os.close(outer)
         os.close(managed)
+        reset_exec_signals()
         os.execvp(argv[0], argv)
     except OSError as e:
         fail(f"cannot enter the sandbox of process {pid}: {e}")
 
 
 def main():
+    occupy_stdio()
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == "--inside":
         cap, rest = args[1], args[2:]
@@ -1975,6 +2080,7 @@ def main():
         if not rest:
             fail("run: no command")
         try:
+            reset_exec_signals()
             os.execvp(rest[0], rest)
         except OSError as e:
             fail(f"{rest[0]}: {e.strerror}")
@@ -2018,6 +2124,7 @@ def main():
             pass
         enter(lay)
         try:
+            reset_exec_signals()
             os.execvp(rest[0], rest)
         except OSError as e:
             fail(f"{rest[0]}: {e.strerror}")
@@ -2028,6 +2135,7 @@ def main():
     # in yours, root alone. This way the output relay (forked after that)
     # stays open to you, as bwrap and the rest of the sandbox are.
     os.environ["SANDBOX_UID_LAYOUT"] = json.dumps({**lay, "outer_uid": uid, "outer_gid": gid})
+    reset_exec_signals()
     os.execv(sys.executable, [sys.executable, "-I", os.path.realpath(__file__),
                               "--inside", cap, "--", *rest])
 

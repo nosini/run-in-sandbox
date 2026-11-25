@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_security                                # noqa: E402
@@ -126,6 +127,25 @@ __attribute__((force_align_arg_pointer)) void start(void) {
 
 def results(stdout):
     return {line.split()[0]: line.split()[1:] for line in stdout.splitlines() if line.strip()}
+
+
+class SeccompLowTests(unittest.TestCase):
+    """The denylist's quotactl_fd and the signals the filter's exec leaves."""
+
+    def setUp(self):
+        self.seccomp = test_security.load_seccomp()
+
+    def test_quotactl_fd_is_refused_like_quotactl(self):
+        blocked = self.seccomp.BLOCK[errno.EPERM]
+        self.assertIn("quotactl", blocked)
+        self.assertIn("quotactl_fd", blocked)
+
+    def test_sigpipe_and_sigxfsz_are_reset_before_exec(self):
+        with mock.patch.object(self.seccomp.signal, "signal") as reset:
+            self.seccomp.restore_signals()
+        self.assertEqual(reset.call_args_list, [
+            mock.call(self.seccomp.signal.SIGPIPE, self.seccomp.signal.SIG_DFL),
+            mock.call(self.seccomp.signal.SIGXFSZ, self.seccomp.signal.SIG_DFL)])
 
 
 class SeccompAllowlistTests(unittest.TestCase):

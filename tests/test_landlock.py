@@ -6,6 +6,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import os
 from pathlib import Path
+import signal
 import socket
 import stat
 import subprocess
@@ -140,6 +141,42 @@ class TruncatedMessageTests(unittest.TestCase):
                 os.fstat(fd)
 
 
+class OnDemandReopenTests(unittest.TestCase):
+    def test_a_new_gamescope_session_clears_the_earlier_window_close(self):
+        ondemand = make_ondemand(pid=None)
+        ondemand.closed_on = True
+        with mock.patch.object(LANDLOCK.os, "fork", return_value=12345), \
+                mock.patch.object(LANDLOCK.os, "pidfd_open", return_value=4321):
+            ondemand.start()
+        self.assertFalse(ondemand.closed_on)
+
+    def test_reopen_then_exit_1_is_not_masked_by_the_earlier_window(self):
+        class Finished(Exception):
+            def __init__(self, status):
+                self.status = status
+
+        def finished(status):
+            raise Finished(status)
+
+        ondemand = make_ondemand(pid=None)
+        ondemand.closed_on = True
+        with mock.patch.object(LANDLOCK.os, "fork", return_value=12345), \
+                mock.patch.object(LANDLOCK.os, "pidfd_open", side_effect=[4321, 99]):
+            ondemand.start()
+        key = mock.Mock(data=None, fileobj=99)
+        ondemand.sel.select = mock.Mock(return_value=[(key, LANDLOCK.selectors.EVENT_READ)])
+        status = 1 << 8                 # the game exited with status 1
+        with mock.patch.object(LANDLOCK.os, "pidfd_open", return_value=99), \
+                mock.patch.object(LANDLOCK.os, "waitpid", return_value=(777, status)), \
+                mock.patch.object(LANDLOCK.signal, "signal"), \
+                mock.patch.object(LANDLOCK, "terminate"), \
+                mock.patch.object(LANDLOCK, "finish", side_effect=finished) as finish:
+            with self.assertRaises(Finished) as caught:
+                ondemand.serve(777)
+        self.assertEqual(caught.exception.status, status)
+        finish.assert_called_once_with(status)
+
+
 class OnDemandFloodTests(unittest.TestCase):
     def test_accept_closes_clients_beyond_the_waiting_cap(self):
         ondemand = make_ondemand()
@@ -241,6 +278,46 @@ class OnDemandFloodTests(unittest.TestCase):
         self.assertTrue(waiting.closed)
         with self.assertRaises(OSError):
             os.fstat(pidfd)
+
+
+class RunAttachedTests(unittest.TestCase):
+    def test_sources_that_are_standard_descriptors_are_moved_before_dup2(self):
+        error = OSError(errno.EIO, os.strerror(errno.EIO))
+        with mock.patch.object(LANDLOCK.os, "setsid"), \
+                mock.patch.object(LANDLOCK.fcntl, "fcntl",
+                                  side_effect=[10, 11, 12]) as duplicate, \
+                mock.patch.object(LANDLOCK.os, "dup2") as dup2, \
+                mock.patch.object(LANDLOCK.os, "close") as close, \
+                mock.patch.object(LANDLOCK.os, "closerange"), \
+                mock.patch.object(LANDLOCK.os, "chdir"), \
+                mock.patch.object(LANDLOCK, "reset_signals"), \
+                mock.patch.object(LANDLOCK.os, "write"), \
+                mock.patch.object(LANDLOCK.os, "execvpe", side_effect=error), \
+                mock.patch.object(LANDLOCK.os, "_exit", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                LANDLOCK.run_attached(["cmd"], {}, [0, 1, 2], False)
+        self.assertEqual(duplicate.call_args_list, [
+            mock.call(fd, LANDLOCK.fcntl.F_DUPFD, 3) for fd in (0, 1, 2)])
+        self.assertEqual(dup2.call_args_list, [
+            mock.call(10, 0), mock.call(11, 1), mock.call(12, 2)])
+        self.assertEqual(close.call_args_list, [mock.call(10), mock.call(11), mock.call(12)])
+
+
+class FinishSignalTests(unittest.TestCase):
+    def test_finish_still_dies_by_sigpipe_when_python_ignores_it(self):
+        code = r"""
+import importlib.util, signal, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("sandbox_landlock_finish", sys.argv[1])
+module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(module)
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+module.finish(signal.SIGPIPE)
+"""
+        result = subprocess.run([sys.executable, "-I", "-c", code,
+                                 str(ROOT / "sandbox-landlock")],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, -signal.SIGPIPE, result.stderr)
 
 
 SERVE_WRAPPER = r"""

@@ -57,6 +57,7 @@ import ctypes
 import errno
 import glob
 import os
+import signal
 import struct
 import sys
 import tempfile
@@ -83,7 +84,7 @@ def act_errno(err):
 BLOCK = {
     EPERM: [
         # kernel log (KASLR leaks), dead or quota interfaces
-        "syslog", "uselib", "acct", "quotactl",
+        "syslog", "uselib", "acct", "quotactl", "quotactl_fd",
         # the kernel keyring
         "add_key", "keyctl", "request_key",
         # NUMA page placement
@@ -508,6 +509,13 @@ def load_program(program):
                  f"{os.strerror(ctypes.get_errno())}")
 
 
+def restore_signals():
+    """Python ignores these and an ignored signal stays ignored across exec,
+    so the game would never be stopped by a closed pipe or an oversized file."""
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+        signal.signal(sig, signal.SIG_DFL)
+
+
 def main():
     lib = load_lib()
     allowlist = policy() == "allowlist"
@@ -533,6 +541,7 @@ def main():
             if rc < 0:
                 sys.exit(f"sandbox-seccomp: cannot install the filter: {os.strerror(-rc)}")
         try:
+            restore_signals()
             os.execvp(sys.argv[1], sys.argv[1:])
         except OSError as e:
             sys.exit(f"sandbox-seccomp: {sys.argv[1]}: {e.strerror}")

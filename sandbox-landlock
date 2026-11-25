@@ -232,8 +232,19 @@ def run_attached(argv, env, stdio, terminal):
         os.setsid()                     # then closing the ready pipe tells serve()
         if terminal:
             fcntl.ioctl(stdio[0], termios.TIOCSCTTY, 0)
-        for target, fd in enumerate(stdio):
-            os.dup2(fd, target)
+        # A source that is 0, 1 or 2 would be clobbered by an earlier dup2:
+        # move it above those first, keeping the original until it is copied.
+        sources, temporary = list(stdio), []
+        try:
+            for i, fd in enumerate(sources):
+                if fd in (0, 1, 2):
+                    sources[i] = fcntl.fcntl(fd, fcntl.F_DUPFD, 3)
+                    temporary.append(sources[i])
+            for target, fd in enumerate(sources):
+                os.dup2(fd, target)
+        finally:
+            for fd in temporary:
+                os.close(fd)
         os.closerange(3, 1 << 20)
         os.chdir("/")
         reset_signals()
@@ -321,8 +332,8 @@ def finish(status):
     if os.WIFSIGNALED(status):
         sig = os.WTERMSIG(status)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        if sig in FORWARDED:
-            signal.signal(sig, signal.SIG_DFL)
+        # Also SIGPIPE and SIGXFSZ: ignored, they would not stop this process.
+        reset_signals()
         os.kill(os.getpid(), sig)
         os._exit(128 + sig)
     os._exit(os.waitstatus_to_exitcode(status))
@@ -701,7 +712,7 @@ class OnDemand:
             self.drop_waiting()
             return
         self.pid, self.pidfd, self.display = pid, pidfd, None
-        self.shown = self.served = False
+        self.shown = self.served = self.closed_on = False
 
     def drop_waiting(self):
         for client in self.waiting:

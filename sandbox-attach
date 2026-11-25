@@ -71,7 +71,8 @@ while [ "$#" -gt 0 ]; do
         --exec)   MODE="exec"; shift ;;
         --put)    [ "$#" -ge 3 ] || { echo "$SELF: --put needs FILE and DEST" >&2; usage 1 >&2; }
                   MODE=put; PUT=( "$2" "$3" ); shift 3 ;;
-        --name)   NAME="$2"; shift 2 ;;
+        --name)   [ "$#" -ge 2 ] || { echo "$SELF: --name needs NAME" >&2; usage 1 >&2; }
+                  NAME="$2"; shift 2 ;;
         --name=*) NAME="${1#--name=}"; shift ;;
         -h|--help) usage 0 ;;
         --)       shift; break ;;
@@ -424,7 +425,7 @@ esac
 # passes on signals, and exits as the program did. Only stdin, stdout and
 # stderr go in, never another descriptor of ours.
 read -r -d '' CLIENT <<'EOF' || true
-import fcntl, json, os, selectors, signal, socket, struct, sys, termios, tty
+import errno, fcntl, json, os, selectors, signal, socket, struct, sys, termios, tty
 path, argv = sys.argv[1], sys.argv[2:]
 conn = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 try:
@@ -453,6 +454,23 @@ def status_of(msg):
     return code if code >= 0 else 128 - code
 
 
+def write_all(fd, data):
+    """All of DATA to FD, through short writes; a closed PTY or stdout is
+    just the end of this direction, never a traceback."""
+    view = memoryview(data)
+    while view:
+        try:
+            written = os.write(fd, view)
+        except InterruptedError:
+            continue
+        except OSError:
+            return False
+        if written <= 0:
+            return False
+        view = view[written:]
+    return True
+
+
 if not terminal:
     def forward(sig, _frame):
         try:
@@ -469,7 +487,18 @@ if not fds:
     sys.exit("sandbox-attach: the sandbox gave no terminal")
 master = fds[0]
 wake_read, wake = os.pipe()
-signal.signal(signal.SIGWINCH, lambda *_: os.write(wake, b"x"))
+os.set_blocking(wake_read, False)
+os.set_blocking(wake, False)
+
+
+def wake_on_winch(*_):
+    try:
+        os.write(wake, b"x")
+    except OSError:                     # full pipe: a resize is already queued
+        pass
+
+
+signal.signal(signal.SIGWINCH, wake_on_winch)
 saved = termios.tcgetattr(0)
 tty.setraw(0, termios.TCSADRAIN)        # not TCSAFLUSH: keep what was typed ahead
 status = None
@@ -489,22 +518,28 @@ try:
             if key.data == "in":
                 data = os.read(0, 65536)
                 if data:
-                    os.write(master, data)
+                    write_all(master, data)
                 else:
                     sel.unregister(0)
             elif key.data == "out":
                 try:
                     data = os.read(master, 65536)
-                except OSError:             # EIO: nothing has it open any more
+                except OSError as e:            # EIO: nothing has it open any more
+                    if e.errno not in (errno.EIO, errno.EBADF):
+                        raise
                     data = b""
                 if data:
-                    os.write(1, data)
+                    if not write_all(1, data):
+                        output = False
                 else:
                     output = False
             elif key.data == "size":
-                os.read(wake_read, 64)
-                fcntl.ioctl(master, termios.TIOCSWINSZ,
-                            fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+                try:
+                    os.read(wake_read, 64)
+                    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+                except OSError:
+                    pass
             else:
                 status = status_of(conn.recv(4096))
                 sel.unregister(conn)
