@@ -1119,6 +1119,58 @@ chmod +x /compat/pfx/drive_c/Test/play.exe
         self.assertEqual(reader.returncode, 0, reader.stderr)
         self.assertEqual(reader.stdout.splitlines(), ["b'\\x7fELF'", "root refused"])
 
+    def test_attached_programs_cannot_reach_their_starter(self):
+        # An attached Windows program runs what the game's prefix and
+        # wineserver hand it, in the starter's own Landlock domain. The
+        # starter, which every later attach goes through, stays out of reach:
+        # no tracing it, no reading its descriptors or environment.
+        name = "starter-" + self.base.name
+        self.launch_named(name, "/bin/sh", "-c", "echo ready; exec sleep 30")
+        result = self.attach(name, "--exec", "--", "python3", "-c", (
+            "import ctypes, os\n"
+            "me = str(os.getpid())\n"
+            "starter = next(p for p in os.listdir('/proc') if p.isdigit() and p != me and\n"
+            "               open(f'/proc/{p}/cmdline', 'rb').read().startswith(\n"
+            "                   b'python3\\0-I\\0/run/sandbox-landlock\\0'))\n"
+            "for what in ('environ', 'fd'):\n"
+            "    try:\n"
+            "        (os.listdir if what == 'fd' else lambda p: open(p, 'rb').read())(\n"
+            "            f'/proc/{starter}/{what}')\n"
+            "        print(what, 'reached')\n"
+            "    except OSError:\n"
+            "        print(what, 'refused')\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "print('ptrace', 'refused' if libc.ptrace(16, int(starter), 0, 0) < 0 else 'reached')\n"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["environ refused", "fd refused", "ptrace refused"])
+
+    def test_a_wineserver_environment_cannot_break_an_attach(self):
+        # Proton's settings come from the sandbox's wineserver, whose
+        # environment the game chooses: a name no shell can export there must
+        # not stop the attach, nor reach the program.
+        inner = (ROOT / "sandbox-attach").read_text().split("\nINNER='", 1)[1].split("\n'\n", 1)[0]
+        fake = self.base / "wineserver"
+        shutil.copyfile("/bin/sleep", fake)
+        fake.chmod(0o755)
+        server = subprocess.Popen(["env", "WINE-BAD=1", "WINEDLLPATH=/from-wineserver",
+                                   str(fake), "30"])
+        self.addCleanup(server.wait)
+        self.addCleanup(server.kill)
+        for _ in range(50):
+            if Path(f"/proc/{server.pid}/comm").read_text().strip() == "wineserver":
+                break
+            time.sleep(0.05)
+        probe = re.sub(r"\n    wine\)\n.*?;;\n", '\n    wine) env | grep -E "^WINE" | sort ;;\n',
+                       inner, flags=re.S)
+        self.assertNotEqual(probe, inner)
+        result = subprocess.run(["/bin/bash", "-c", probe, "sandbox-attach", "wine", "x.exe"],
+                                env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+                                timeout=10)
+        self.assertNotIn("not a valid identifier", result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["WINEDLLPATH=/from-wineserver", "WINEPREFIX=/compat/pfx"])
+
     def test_game_cannot_use_the_attach_socket(self):
         # Only a process outside the sandbox may have something started in
         # the domain above the game's; the game may not remove the socket

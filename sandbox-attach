@@ -235,13 +235,20 @@ set -e
 mode="$1"; shift
 if [ "$mode" = wine ]; then
     donor="$(pgrep -x wineserver 2>/dev/null | head -n1 || true)"
-    [ -z "$donor" ] || while IFS= read -r -d "" kv; do
-        case "${kv%%=*}" in
+    # Read whole first: a wineserver that exits meanwhile leaves none of it.
+    vars=()
+    [ -z "$donor" ] || { mapfile -d "" -t vars < "/proc/$donor/environ"; } 2>/dev/null || vars=()
+    # Only names a shell can export: the game names them.
+    for kv in ${vars[@]+"${vars[@]}"}; do
+        name="${kv%%=*}"
+        [[ "$kv" == *=* && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        case "$name" in
             PATH|DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|\
             WINE*|PROTON*|STEAM_COMPAT_*|LD_LIBRARY_PATH|\
             PULSE_*|SDL_*|DXVK_*|VKD3D_*|MESA_*|__*) export "$kv" ;;
         esac
-    done < "/proc/$donor/environ"
+    done
+    unset vars name kv
 fi
 : "${HOME:=/home/$(id -un)}"; export HOME
 : "${PATH:=/usr/bin:/bin}"; export PATH
