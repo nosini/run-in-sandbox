@@ -274,9 +274,6 @@ selinux_has_type() {
         && printf '%s' "system_u:object_r:$1:s0" 2>/dev/null > /sys/fs/selinux/context
 }
 
-# .locks is where the locks are kept, not a sandbox.
-valid_name() { [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] && [ "$1" != . ] && [ "$1" != .. ] && [ "$1" != .locks ]; }
-
 # One prefix/overlay may only have one owner, including during startup before
 # bwrap exists, and nothing may launch it while --delete or --reset-install
 # changes it. Taken on descriptor 18 and held until this script ends:
@@ -315,9 +312,22 @@ confirm() {
     [[ "$answer" == [yY]* ]]
 }
 
-# Overlayfs leaves work/work at mode 0000; nothing can be removed under it
-# until that is undone. A capture not moved to overlay/ yet keeps its own.
-unlock_work() { chmod -R u+rwx "$1/overlay/work" "$1/work" 2>/dev/null || true; }
+# Overlayfs leaves work/work at mode 0000, and a game can leave folders of its
+# own just as closed. Nothing below one can be read or removed until it is
+# opened again. Only folders are opened, and never through a link; u+rwX adds
+# the execute bit to a file only when it already had one, so a save keeps its
+# mode.
+unlock_dirs() {                       # $@ = folders to open below
+    local p
+    for p in "$@"; do
+        if [ ! -L "$p" ] && [ -d "$p" ]; then
+            chmod -R u+rwX -- "$p" 2>/dev/null || true
+        fi
+    done
+}
+
+# A capture not moved to overlay/ yet keeps its own work/.
+unlock_work() { unlock_dirs "$1/overlay/work" "$1/work"; }
 
 # A capture from before the layers moved keeps rw/ and work/ directly in it;
 # both belong in overlay/, which holds nothing else. Renamed, never copied:
@@ -398,7 +408,9 @@ delete_sandbox() {                    # $1 = NAME
     confirm "Delete $d ($(du -sh "$d" 2>/dev/null | cut -f1 || true)) -- saves, settings and Wine prefix with it?" || {
         echo "left alone"; return 1; }
     reclaim "$d" || return 1
-    unlock_work "$d"
+    # Every folder, not just the overlay's workdir: a game can leave its own
+    # 000 folders anywhere under the capture.
+    unlock_dirs "$d"
     rm -rf -- "$d"
     echo "deleted $1"
     [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox-game/games/$1" ] \
@@ -425,6 +437,9 @@ reset_install() {                     # $1 = NAME
         return 1; }
     rw="$d/overlay/rw"
     [ -e "$rw" ] || [ -L "$rw" ] || rw="$d/rw"
+    # A folder the game closed must not stop the look below, nor the removal
+    # after it. Opening them adds no execute bit to a save file.
+    unlock_dirs "$d/overlay/rw" "$d/overlay/work" "$d/rw" "$d/work" "$d/overlay/rw.keep"
     # At any depth: overlay/rw/ holds only what the game changed, so this is quick,
     # and a save nested deeper than a guess would be gone for good.
     # The game names these files, so a newline is just another character in
@@ -506,15 +521,19 @@ probe_limits() {
     # over as written. Older versions neither expand nor know the switch.
     # Not piped into grep -q: under pipefail, grep leaving at the first match
     # can kill systemd-run with SIGPIPE, and the switch would be left out.
-    [[ "$(systemd-run --help 2>/dev/null)" == *--expand-environment* ]] \
+    [[ "$(systemd-run --help 2>/dev/null 4<&- 5<&- 6<&- 7<&- 8<&- 9<&- \
+            14<&- 18>&- 19<&- 20<&- 21<&-)" == *--expand-environment* ]] \
         && SCOPE+=( --expand-environment=no )
+    # None of the launcher's own descriptors (hosts, seccomp, the sandbox
+    # lock) belongs in the scope or in a daemon it starts.
     command -v systemd-run >/dev/null \
         && UNLIMITED="$("${SCOPE[@]}" "${LIMITS[@]}" -- /bin/sh -c '
             d="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)"
             for c do
                 v="$(cat "$d/$c.max" 2>/dev/null)" || v=max
                 [ "${v%% *}" != max ] || printf "%s " "$c"
-            done' sh "${controllers[@]}" 2>/dev/null)" \
+            done' sh "${controllers[@]}" 2>/dev/null \
+            4<&- 5<&- 6<&- 7<&- 8<&- 9<&- 14<&- 18>&- 19<&- 20<&- 21<&-)" \
         || return 1
     UNLIMITED="${UNLIMITED% }"
 }
@@ -1333,10 +1352,12 @@ lock_sandbox "$NAME" || { echo "'$NAME' is already running" >&2; exit 1; }
 case "${SANDBOX_SEPARATE_UID:-}" in
     1) SEPARATE_UID=1 ;;
     systemd) SEPARATE_UID=systemd ;;
+    0) SEPARATE_UID=0 ;;
     "") SEPARATE_UID=0
         if [ -f "$CAP/uid" ]; then SEPARATE_UID=1
         elif [ -f "$CAP/managed-uid" ]; then SEPARATE_UID=systemd; fi ;;
-    *) SEPARATE_UID=0 ;;
+    *) echo "sandbox-game: invalid SANDBOX_SEPARATE_UID='${SANDBOX_SEPARATE_UID}' (use 0, 1 or systemd)" >&2
+       exit 1 ;;
 esac
 if [ "$SEPARATE_UID" = systemd ] || { [ "$SEPARATE_UID" != 1 ] && [ -f "$CAP/uid" ]; }; then
     UIDHELPER="$(helper sandbox-uid)"
@@ -1414,6 +1435,11 @@ elif [ "$SEPARATE_UID" != systemd ] && [ -f "$CAP/managed-uid" ]; then
     rm -f "$CAP/managed-uid"
 fi
 mkdir -p "$CAP/home" "$CAP/overlay/rw" "$CAP/overlay/work" "$CAP/merged"
+# Whether this game has run here before, decided before exec_bit can put its
+# own executable copy into overlay/rw/.
+CAP_HAD_DATA=0
+[ -z "$(find "$CAP/home" "$CAP/overlay/rw" "$CAP/compat" -mindepth 1 -print -quit 2>/dev/null)" ] \
+    || CAP_HAD_DATA=1
 python3 -I - "$CAP/source.json" "$GAMEDIR" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
@@ -1438,21 +1464,31 @@ rm -f "$CAP/.stopped"                 # left by a --stop that raced an exit
 # /proc/self/exe would name the loader, and Godot finds its .pck from there.
 # Anything else -- a data file selected by mistake -- is left to fail.
 exec_bit() {                          # $1 = the command's /game/... path
-    local rel="${1#/game/}" host copy stamp dir part parts visible tmp line interp="" arg="" ours=0
+    local rel="${1#/game/}" host copy stamp dir part parts visible tmp line interp="" arg="" ours=0 mine_first=0
     [[ "/$rel/" != *//* && "/$rel/" != */./* && "/$rel/" != */../* ]] || return 0
     host="$GAMEDIR/$rel"; copy="$CAP/overlay/rw/$rel"
     stamp="$CAP/exec-copies/$(printf '%s' "$rel" | sha256sum | cut -c1-32)"
     [ -f "$host" ] && [ ! -L "$host" ] && [[ "$(realpath -- "$host")" == "$GAMEDIR/"* ]] || return 0
     # overlay/rw/ is the game's to write in: a link it put on the way to the copy
     # would lead every look, chmod and rm below out to a host file. (It is
-    # not running: the lock above is held.)
+    # not running: the lock above is held.) Under a uid of its own it may also
+    # be closed to us until the capture is taken back, so look with mine first.
     dir="$CAP/overlay/rw"
+    if [ "$SEPARATE_UID$RECLAIMED" = 10 ] \
+       && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then mine_first=1; fi
     if [ "$rel" != "${rel##*/}" ]; then
         IFS=/ read -r -d "" -a parts < <(printf "%s" "${rel%/*}") || true   # a newline is just another character in a name
         for part in "${parts[@]}"; do
             dir="$dir/$part"
             [ ! -L "$dir" ] || return 0
+            if [ "$SEPARATE_UID$RECLAIMED" = 10 ] && [ -e "$dir" ] \
+               && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then mine_first=1; fi
         done
+    fi
+    if [ "$SEPARATE_UID$RECLAIMED" = 10 ]; then
+        if [ -f "$copy" ] && [ ! -L "$copy" ] && [ ! -r "$copy" ]; then mine_first=1; fi
+        if [ -e "$stamp" ] && [ ! -r "$stamp" ]; then mine_first=1; fi
+        if [ "$mine_first" = 1 ]; then mine && exec_bit "$1"; return 0; fi
     fi
     if [ -f "$stamp" ] && [ -f "$copy" ] && [ ! -L "$copy" ] \
        && [ "$(stat -c '%s %Y' -- "$copy")" = "$(cat -- "$stamp")" ]; then ours=1; fi
@@ -1471,7 +1507,7 @@ exec_bit() {                          # $1 = the command's /game/... path
     else
         visible="$host"
     fi
-    [ ! -x "$visible" ] || return 0
+    [ ! -x "$visible" ] && [ -r "$visible" ] || return 0
     if [ "$(head -c 2 -- "$visible")" = '#!' ] || [[ "$rel" == *.sh ]]; then
         IFS= read -r line < "$visible" || true
         line="${line%$'\r'}"
@@ -1526,7 +1562,128 @@ CHDIR=/game
 # has to reach it. Each launch gets a folder of its own, holding links to the
 # sockets it binds. They sit apart from sandbox-game/, the folder of pasta's
 # copies, which --net delegates whole under the systemd backend.
+# Everything cleanup() may have to undo is named here, before the first thing
+# that can create it: the EXIT trap is already active when the runtime sockets,
+# the security context and the fuse overlays are made.
+OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PASTA_BIN=""
+PLAY_START=""; FIFOS=""; BW=""; WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+HOSTS_TMP=""; CLEANED=0
 RUNTIME_SOCKETS=""; SOCKET_BIND=""
+
+remove_runtime_sockets() {
+    [ -z "$RUNTIME_SOCKETS" ] || {
+        rm -rf -- "$RUNTIME_SOCKETS"
+        rmdir -- "${RUNTIME_SOCKETS%/*}" 2>/dev/null || true
+        RUNTIME_SOCKETS=""
+    }
+}
+end_security_context() {
+    [ -n "$WL_CONTEXT_HELPER" ] || return 0
+    local fd="$WL_CONTEXT_FD"
+    exec {fd}>&-
+    wait "$WL_CONTEXT_HELPER" 2>/dev/null || true
+    WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
+}
+# Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
+# when the mount goes away. That is deliberate while mounted -- it holds
+# in-flight temporary files and nothing should look inside -- but afterwards it
+# is just an inaccessible directory you own, and it is what makes the whole
+# capture folder refuse to delete in a file manager until you chmod it by hand.
+# It is disposable once unmounted, so take it away.
+# (Under a subordinate uid it is fuse-overlayfs's, not closed, and the whole
+# capture the sandbox's anyway: --delete takes care of it. The systemd
+# backend's overlayfs leaves one of yours, as here.)
+unwork() {
+    [ "$SEPARATE_UID" != 1 ] && [ -d "$CAP/overlay/work/work" ] || return 0
+    chmod u+rwx "$CAP/overlay/work/work" 2>/dev/null || return 0
+    rm -rf "$CAP/overlay/work/work" 2>/dev/null || true
+}
+# fuse-overlayfs's throwaway layer for Proton, never while still mounted.
+rm_proton_layer() {
+    [ -n "$PROTON_LAYER" ] && [ -d "$PROTON_LAYER" ] || return 0
+    ! mountpoint -q "$PROTON_LAYER/merged" || return 0
+    chmod -R u+rwx "$PROTON_LAYER" 2>/dev/null || true
+    rm -rf "$PROTON_LAYER" 2>/dev/null || true
+    PROTON_LAYER=""
+}
+cleanup() {
+    [ "$CLEANED" = 0 ] || return 0
+    CLEANED=1
+    local m p exe n w
+    # A still-running bwrap holds the fuse mounts of the NET path; end it
+    # before fusermount, which would otherwise fail with EBUSY.
+    if [ -n "$BW" ]; then
+        w="$BW"; BW=""
+        kill -TERM "$w" 2>/dev/null || true
+        n=0
+        while [ "$n" -lt 40 ] && kill -0 "$w" 2>/dev/null; do
+            sleep 0.05; n=$((n + 1))
+        done
+        pkill -KILL -P "$w" 2>/dev/null || true
+        kill -KILL "$w" 2>/dev/null || true
+        wait "$w" 2>/dev/null || true
+    fi
+    for m in "${CLEANUP[@]}"; do
+        fusermount3 -u "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
+    done
+    CLEANUP=()
+    unwork
+    rm_proton_layer
+    remove_runtime_sockets
+    end_security_context
+    if [ -n "$FIFOS" ]; then rm -rf -- "$FIFOS"; FIFOS=""; fi
+    if [ -n "$HOSTS_TMP" ]; then rm -f -- "$HOSTS_TMP"; HOSTS_TMP=""; fi
+    # --net: pasta outlives the game unless told otherwise; see "network".
+    if [ -n "$PASTA_PID" ]; then
+        p="$(cat "$PASTA_PID" 2>/dev/null || true)"
+        # Its pid may have gone and the number been reused. Only a process
+        # still running one of the copied pasta binaries is ours to end.
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ -n "$PASTA_BIN" ]; then
+            exe="$(readlink -- "/proc/$p/exe" 2>/dev/null || true)"
+            if [ "$exe" = "$PASTA_BIN" ] || [ "$exe" = "$PASTA_BIN.avx2" ] \
+               || [ "$exe" = "$PASTA_BIN (deleted)" ] || [ "$exe" = "$PASTA_BIN.avx2 (deleted)" ] \
+               || [ "/proc/$p/exe" -ef "$PASTA_BIN" ] \
+               || [ "/proc/$p/exe" -ef "$PASTA_BIN.avx2" ]; then
+                kill "$p" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$PASTA_PID"; PASTA_PID=""
+    fi
+    # Under a uid of its own, what the game changed in its own folder, copied
+    # up with that folder's permissions, is opened to you again: see share in
+    # sandbox-uid.
+    if [ -n "$PLAY_START" ] && [ "$SEPARATE_UID" = 1 ]; then
+        "$UIDHELPER" share "$CAP" || true
+    fi
+    # The systemd backend's record describes a launch that is running; --stop
+    # and sandbox-attach have found theirs by the time this one is over.
+    if [ "$SEPARATE_UID" = systemd ]; then
+        rm -f "$CAP/.managed-userns"
+    fi
+    # One line per launch -- start, seconds played -- for --list. Here rather
+    # than after the game, so a crash or a --stop still counts.
+    if [ -n "$PLAY_START" ]; then
+        printf '%s %s\n' "$PLAY_START" "$(( $(date +%s) - PLAY_START ))" >> "$CAP/playtime"
+        PLAY_START=""
+    fi
+    return 0
+}
+trap cleanup EXIT
+# A signal still runs the same cleanup, then the signal itself exits so the
+# status says what happened -- and, for a game the user closed, so does the
+# scope around it.
+# shellcheck disable=SC2317  # called from the signal traps below
+on_signal() {                         # $1 = signal, $2 = status if re-raise fails
+    trap - INT TERM HUP EXIT
+    cleanup
+    trap - "$1"
+    kill -s "$1" "$$"
+    exit "$2"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+
 runtime_socket() {                    # $1 = socket; sets SOCKET_BIND
     local src="$1" dir
     SOCKET_BIND="$src"
@@ -1547,14 +1704,6 @@ runtime_socket() {                    # $1 = socket; sets SOCKET_BIND
         return 1; }
     SOCKET_BIND="$dir"
 }
-remove_runtime_sockets() {
-    [ -z "$RUNTIME_SOCKETS" ] || {
-        rm -rf -- "$RUNTIME_SOCKETS"
-        rmdir -- "${RUNTIME_SOCKETS%/*}" 2>/dev/null || true
-        RUNTIME_SOCKETS=""
-    }
-}
-trap remove_runtime_sockets EXIT
 
 # ---- proton ----------------------------------------------------------------
 # A Proton is any directory holding an executable `proton` script -- that test
@@ -2291,6 +2440,15 @@ if [ "$HOSTS" = 1 ]; then
             }' "$1"
     }
     if [ "$HOSTS_RW" = 1 ]; then
+        # Under a uid of its own the file is the sandbox's; take the capture
+        # back before reading or replacing it. A game's chmod 000 must not
+        # stop the launch either way.
+        if [ "$SEPARATE_UID$RECLAIMED" = 10 ]; then
+            mine || { echo "sandbox-game: cannot take $NAME's hosts file back from the sandbox's uid" >&2
+                      exit 1; }
+        fi
+        [ ! -e "$CAP/hosts" ] || [ -L "$CAP/hosts" ] || [ -r "$CAP/hosts" ] \
+            || chmod u+r -- "$CAP/hosts" 2>/dev/null || true
         [ -f "$CAP/hosts" ] || cat /etc/hosts > "$CAP/hosts" 2>/dev/null || : > "$CAP/hosts"
         { hosts_block
           hosts_inherited "$CAP/hosts"
@@ -2314,7 +2472,13 @@ SH
                      --perms 0555 --ro-bind-data 4 /run/sandbox-bin/pkexec )
         SANDBOX_PATH="/run/sandbox-bin:$SANDBOX_PATH"
     else
-        exec 5< <(hosts_block; hosts_inherited /etc/hosts 2>/dev/null || true)
+        # A file, not a process substitution: a host /etc/hosts larger than a
+        # pipe buffer cannot block, and no child is left holding the lock.
+        HOSTS_TMP="$(mktemp)" || exit 1
+        { hosts_block; hosts_inherited /etc/hosts 2>/dev/null || true; } > "$HOSTS_TMP" || {
+            rm -f -- "$HOSTS_TMP"; HOSTS_TMP=""; exit 1; }
+        exec 5< "$HOSTS_TMP"
+        rm -f -- "$HOSTS_TMP"; HOSTS_TMP=""
         HOSTS_ARGS=( --ro-bind-data 5 /etc/hosts )
     fi
 fi
@@ -2584,12 +2748,12 @@ fi
 # shortcuts' name, which KDE's taskbar matches. With none to be had the
 # desktop's own socket stays; that it is missing is no cause for a warning
 # where it never was, but a compositor that has it and fails to give one is.
-WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
 security_context() {
     local line rc
     coproc WL_CONTEXT {
         exec python3 -I -c "$WAYLAND_CLIENT"$'\n'"$SECURITY_CONTEXT" \
-            "$WL_HOST" "$RT" "sandbox-game-$NAME" "$NAME.$$" 2>/dev/null
+            "$WL_HOST" "$RT" "sandbox-game-$NAME" "$NAME.$$" 2>/dev/null \
+            4<&- 5<&- 18>&-
     }
     WL_CONTEXT_HELPER="$WL_CONTEXT_PID"; WL_CONTEXT_FD="${WL_CONTEXT[1]}"
     if read -r line <&"${WL_CONTEXT[0]}" && [[ "$line" == "ready /"* ]]; then
@@ -2600,13 +2764,6 @@ security_context() {
     WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
     [ "$rc" = 3 ] || echo "sandbox-game: warning: the desktop's compositor offers a security context" \
         "but did not make one${line:+ ($line)}; the game gets the desktop's own Wayland socket" >&2
-}
-end_security_context() {
-    [ -n "$WL_CONTEXT_HELPER" ] || return 0
-    local fd="$WL_CONTEXT_FD"
-    exec {fd}>&-
-    wait "$WL_CONTEXT_HELPER" 2>/dev/null || true
-    WL_CONTEXT_HELPER=""; WL_CONTEXT_FD=""
 }
 
 # ---- environment, display and devices --------------------------------------
@@ -2771,66 +2928,6 @@ if [ "$HEADLESS" = 0 ] && command -v gsettings >/dev/null \
 fi
 
 # ---- overlay for the game's own install dir --------------------------------
-OVERLAY_ARGS=(); CLEANUP=(); PROTON_LAYER=""; PASTA_PID=""; PLAY_START=""
-# Overlayfs creates workdir/work itself, at mode 0000, and leaves it behind
-# when the mount goes away. That is deliberate while mounted -- it holds
-# in-flight temporary files and nothing should look inside -- but afterwards it
-# is just an inaccessible directory you own, and it is what makes the whole
-# capture folder refuse to delete in a file manager until you chmod it by hand.
-# It is disposable once unmounted, so take it away.
-# (Under a subordinate uid it is fuse-overlayfs's, not closed, and the whole
-# capture the sandbox's anyway: --delete takes care of it. The systemd
-# backend's overlayfs leaves one of yours, as here.)
-unwork() {
-    [ "$SEPARATE_UID" != 1 ] && [ -d "$CAP/overlay/work/work" ] || return 0
-    chmod u+rwx "$CAP/overlay/work/work" 2>/dev/null || return 0
-    rm -rf "$CAP/overlay/work/work" 2>/dev/null || true
-}
-# fuse-overlayfs's throwaway layer for Proton, never while still mounted.
-rm_proton_layer() {
-    [ -n "$PROTON_LAYER" ] && [ -d "$PROTON_LAYER" ] || return 0
-    ! mountpoint -q "$PROTON_LAYER/merged" || return 0
-    chmod -R u+rwx "$PROTON_LAYER" 2>/dev/null || true
-    rm -rf "$PROTON_LAYER" 2>/dev/null || true
-}
-cleanup() {
-    local m
-    for m in "${CLEANUP[@]}"; do
-        fusermount3 -u "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
-    done
-    unwork
-    rm_proton_layer
-    remove_runtime_sockets
-    end_security_context
-    # --net: pasta outlives the game unless told otherwise; see "network".
-    if [ -n "$PASTA_PID" ]; then
-        local p; p="$(cat "$PASTA_PID" 2>/dev/null || true)"
-        # Already gone, if it crashed: under set -e a failing kill would end
-        # the cleanup here, playtime and exit status with it.
-        [[ ! "$p" =~ ^[0-9]+$ ]] || kill "$p" 2>/dev/null || true
-        rm -f "$PASTA_PID"
-    fi
-    # Under a uid of its own, what the game changed in its own folder, copied
-    # up with that folder's permissions, is opened to you again: see share in
-    # sandbox-uid.
-    if [ -n "$PLAY_START" ] && [ "$SEPARATE_UID" = 1 ]; then
-        "$UIDHELPER" share "$CAP" || true
-    fi
-    # The systemd backend's record describes a launch that is running; --stop
-    # and sandbox-attach have found theirs by the time this one is over.
-    if [ "$SEPARATE_UID" = systemd ]; then
-        rm -f "$CAP/.managed-userns"
-    fi
-    # One line per launch -- start, seconds played -- for --list. Here rather
-    # than after the game, so a crash or a --stop still counts.
-    if [ -n "$PLAY_START" ]; then
-        printf '%s %s\n' "$PLAY_START" "$(( $(date +%s) - PLAY_START ))" >> "$CAP/playtime"
-        PLAY_START=""
-    fi
-    return 0
-}
-trap cleanup EXIT
-
 # Prefer bwrap's built-in --overlay; many distro builds compile it out, so fall
 # back to a pre-mounted fuse-overlayfs that we bind into the sandbox.
 # Proton gets one too, whose writes are thrown away: Valve's builds lock
@@ -2842,7 +2939,7 @@ fuse_overlay() {                     # lower, upper, work, mountpoint
     # cannot add options or expose an unintended host directory. These fds
     # belong only to this command; bwrap and the game never inherit them.
     fuse-overlayfs -o lowerdir=/proc/self/fd/14,upperdir=/proc/self/fd/15,workdir=/proc/self/fd/16 \
-        "$4" 14<"$1" 15<"$2" 16<"$3" 18>&-
+        "$4" 14<"$1" 15<"$2" 16<"$3" 4<&- 5<&- 18>&-
 }
 # Under a uid of its own, sandbox-uid mounts these itself (see there), from
 # the same options, whatever this bwrap supports.
@@ -2888,8 +2985,7 @@ if [ -e /etc/machine-id ]; then
         # A game that already ran here may have keyed something to the real
         # id -- some encrypt their saves with it -- so it keeps seeing that.
         # Delete the file to give such a game a fresh one.
-        if [ -n "$(find "$CAP/home" "$CAP/overlay/rw" "$CAP/compat" -mindepth 1 -print -quit 2>/dev/null)" ] \
-           && [ -r /etc/machine-id ]; then
+        if [ "$CAP_HAD_DATA" = 1 ] && [ -r /etc/machine-id ]; then
             cp /etc/machine-id "$CAP/machine-id"
         else
             printf '%s\n' "$(tr -d - < /proc/sys/kernel/random/uuid)" > "$CAP/machine-id"
@@ -2897,10 +2993,16 @@ if [ -e /etc/machine-id ]; then
     fi
     ID_ARGS+=( --ro-bind "$CAP/machine-id" /etc/machine-id )
 fi
-# bwrap reads these from the fds, so no file is left behind for them.
-exec 7<<<localhost
-[ ! -e /etc/hostname ] || ID_ARGS+=( --ro-bind-data 7 /etc/hostname )
-exec 8< <(cat /proc/sys/kernel/random/uuid)
+# bwrap reads these from the fds, so no file is left behind for them. FD 7
+# stays closed when there is no /etc/hostname to bind over. The boot id is
+# read here rather than through a process substitution: bwrap gets a regular
+# file, and no child is left holding the launcher's descriptors.
+if [ -e /etc/hostname ]; then
+    exec 7<<<localhost
+    ID_ARGS+=( --ro-bind-data 7 /etc/hostname )
+fi
+IFS= read -r SANDBOX_BOOT_ID < /proc/sys/kernel/random/uuid
+exec 8<<<"$SANDBOX_BOOT_ID"
 ID_ARGS+=( --ro-bind-data 8 /proc/sys/kernel/random/boot_id )
 # Each covered with an empty file. Only what any user can read is worth
 # hiding; the rest (DMI serials, most VPD pages) is root-only already. Among
@@ -3037,7 +3139,7 @@ if [ "$NET" = 1 ]; then
     done
     # cleanup() ends pasta with the game, by the pid it writes here; labeled
     # for pasta's domain, which may write no other file.
-    PASTA_PID="$(mktemp -p "$RT/sandbox-game" "$NAME-pasta.pid.XXXXXX")"
+    PASTA_PID="$(mktemp -p "$RT/sandbox-game" -- "$NAME-pasta.pid.XXXXXX")"
     if [ -n "$PASTA_TYPE" ] && ! chcon -t sandbox_pasta_pid_t "$PASTA_PID" 2>/dev/null; then
         echo "sandbox-game: note: could not label $PASTA_PID sandbox_pasta_pid_t;" \
             "pasta may not be able to write it" >&2
@@ -3187,19 +3289,28 @@ block = {4: ["0.0.0.0/8"] + ([] if lan else [
 host_addresses = {4: [], 6: []}
 has_v6 = False
 ether = set()
-out = subprocess.run([ip, "-j", "addr", "show", "scope", "global"],
+out = subprocess.run([ip, "-j", "addr", "show"],
                      capture_output=True, text=True, check=True).stdout
 for link in json.loads(out):
     if link.get("link_type") == "ether":
         ether.add(link.get("ifname"))
+    loopback = link.get("link_type") == "loopback"
     for a in link.get("addr_info", []):
         if not a.get("prefixlen"):
             continue
+        scope = a.get("scope")
+        # Host-scope addresses are loopback's own; refusing them would break
+        # nothing but the sandbox's own localhost.
+        if scope == "host" or loopback or scope not in ("global", "site", "link"):
+            continue
         own = ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}")
         host_addresses[own.version].append(str(own.ip))
-        if link.get("link_type") == "ether" and not lan:
+        if link.get("link_type") == "ether" and not lan and scope != "link":
             block[own.version].append(str(own.network))
-        has_v6 = has_v6 or own.version == 6
+        # Only a global IPv6 address means the host has IPv6 to carry: every
+        # IPv4-only host still has fe80:: link-local addresses.
+        if own.version == 6 and scope == "global":
+            has_v6 = True
 # An address's own prefix can be narrower than its network: a DHCPv6 address
 # is a /128, its /64 arrives as a route. So the networks a card reaches
 # directly are the LAN as well, in any table. Not those behind a router on
@@ -3621,7 +3732,16 @@ fi
 # already means killing it takes the sandbox with it.
 PLAY_START="$(date +%s)"
 if [ "$NET" = 0 ] || [ "$SEPARATE_UID" = systemd ]; then
-    "${BWRAP[@]}" "$@" 18>&- && rc=0 || rc=$?
+    # Backgrounded and waited on so trapped signals (INT, TERM, HUP) interrupt
+    # wait immediately instead of deferring cleanup until the game exits.
+    if [ -e /proc/self/fd/0 ]; then
+        "${BWRAP[@]}" "$@" <&0 18>&- &
+    else
+        "${BWRAP[@]}" "$@" 18>&- &
+    fi
+    BW=$!
+    wait "$BW" && rc=0 || rc=$?
+    BW=""
 else
     # FIFOs, opened in the same order on both ends: bwrap's info pipe first,
     # then its go pipe. A byte down the go pipe lets the game start; bwrap
@@ -3633,12 +3753,19 @@ else
     "${BWRAP[@]}" "$@" 18>&- 10>"$FIFOS/info" 11<"$FIFOS/go" &
     BW=$!
     exec 12<"$FIFOS/info" 13>"$FIFOS/go"
-    rm -rf "$FIFOS"
+    rm -rf "$FIFOS"; FIFOS=""
     CHILD="$(grep -o '"child-pid": *[0-9]*' <&12 | grep -o '[0-9]*$' || true)"
     exec 12<&-
     if [ -n "$CHILD" ] && python3 -I -c "$NET_HELPER" "$CHILD" "$DNS_ADDR" "$PASTA_PID" "$PASTA_BIN" \
                                     "$MAC" "$LAN_ALL" "$LAN_RULES" 18>&-; then
-        printf x >&13
+        # A subshell, so a bwrap that has already gone lets SIGPIPE end only
+        # that write: the launcher goes on to its cleanup and exit status.
+        if ! ( printf x >&13 ) 2>/dev/null; then
+            echo "could not set up the sandbox's network; not starting the game" >&2
+            [ -z "$CHILD" ] || kill -KILL "$CHILD" 2>/dev/null || true
+            pkill -KILL -P "$BW" 2>/dev/null || true
+            kill -KILL "$BW" 2>/dev/null || true
+        fi
     else
         echo "could not set up the sandbox's network; not starting the game" >&2
         [ -z "$CHILD" ] || kill -KILL "$CHILD" 2>/dev/null || true
@@ -3647,8 +3774,9 @@ else
     fi
     exec 13>&-
     wait "$BW" && rc=0 || rc=$?
+    BW=""
 fi
-cleanup; trap - EXIT
+cleanup; trap - EXIT INT TERM HUP
 if [ -n "$PROTON" ]; then keep_registry || true; fi
 # Ended by --stop: that was asked for, not a crash.
 if [ -e "$CAP/.stopped" ]; then rm -f "$CAP/.stopped"; rc=0; fi

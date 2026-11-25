@@ -847,6 +847,78 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(self.bound("bwrap", "--bind", str(real / "a" / "b" / "home"), "/x"), "")
         self.assertEqual(self.bound("bwrap", "--ro-bind", str(linked), "/x"), "")
 
+    def test_bound_capture_stops_at_the_option_terminator(self):
+        real = self.base / "home" / "game-sandboxes" / "real" / "home"
+        real.mkdir(parents=True)
+        spoof = self.base / "home" / "game-sandboxes" / "spoof" / "home"
+        spoof.mkdir(parents=True)
+        # The game's own arguments after -- cannot name a capture of their own.
+        self.assertEqual(self.bound(
+            "bwrap", "--bind", str(real), "/home", "--", "--bind", str(spoof), "/x"), "real")
+        self.assertEqual(self.bound("bwrap", "--", "--bind", str(spoof), "/x"), "")
+        # A -- that is an option's value is not that terminator.
+        self.assertEqual(self.bound(
+            "bwrap", "--setenv", "KEY", "--", "--bind", str(real), "/x"), "real")
+        self.assertEqual(self.bound(
+            "bwrap", "--bind", "--", str(real), "--bind", str(real), "/x"), "real")
+
+    def test_bound_capture_rejects_an_invalid_name(self):
+        home = self.base / "home"
+        (home / "game-sandboxes").mkdir(parents=True)
+        for name in ("..", ".locks", "-option", "a/b"):
+            source = home / "game-sandboxes" / name / "home"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            self.assertEqual(self.bound("bwrap", "--bind", str(source), "/home"), "",
+                             name)
+
+    def test_names_are_valid_and_never_escape(self):
+        def derive(*paths):
+            script = (f'. {ROOT / "sandbox-game-lib"}\n'
+                      'for p do derive_name "$p"; printf "%s\\n" "$R_NAME"; '
+                      'valid_name "$R_NAME" || echo INVALID; done\n')
+            return subprocess.run(["bash", "-c", script, "names", *paths],
+                                  capture_output=True, text=True, check=True).stdout.split()
+        cases = {
+            "/": ["game"], "///": ["game"], "/foo/bar///": ["bar"], "foo//": ["foo"],
+            "/@": ["game"], "/*": ["game"], "/.": ["game"], "/..": ["game"],
+            "/(.)": ["game"], "/(..)": ["game"], "/-": ["game"],
+            "/.locks": ["locks"], "/-weird-": ["weird"], "/Foo  Bar": ["foo-bar"],
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(derive(path), expected)
+        self.assertNotIn("INVALID", derive(*cases))
+        # @ and * must not expand all NAME_MAP entries when NAME_MAP is populated.
+        script = (f'. {ROOT / "sandbox-game-lib"}\n'
+                  'NAME_MAP[real]="mapped"\n'
+                  'for p in /@ "/*"; do derive_name "$p"; printf "%s\\n" "$R_NAME"; done\n')
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(), ["game", "game"])
+        # A user mapping cannot turn into a traversal either.
+        script = (f'. {ROOT / "sandbox-game-lib"}\n'
+                  'NAME_MAP[odd]="../escape"; derive_name /odd; printf "%s\\n" "$R_NAME"\n')
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), "odd")
+
+    def test_preferences_keep_an_explicit_empty_env(self):
+        config = self.base / "config" / "sandbox-game"
+        target = config / "games" / "game"
+        target.parent.mkdir(parents=True)
+        target.write_text("net=1\nenv=\n")
+        (config / "defaults").write_text("env=DXVK_HUD=1\n")
+        script = (f'CFGDIR={str(config)!r}; NAME=game\n'
+                  f'. {ROOT / "sandbox-game-lib"}\n'
+                  "prefs_save '{\"scope\":\"game\"}'\n")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = target.read_text().splitlines()
+        self.assertIn("env=", lines)
+        # An absent key stays absent rather than taking the defaults' value.
+        target.write_text("net=1\n")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(line.startswith("env=") for line in target.read_text().splitlines()))
+
     def test_owner_of_a_namespace_is_told_by_its_parent(self):
         cap = self.base / "cap"
         cap.mkdir()

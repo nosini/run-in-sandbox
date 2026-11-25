@@ -127,12 +127,13 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
         helper = helper.split("\n", 1)[1].split("\nEOF", 1)[0]
         addresses = ["192.0.2.5", "198.51.100.5", "2001:db8:1::5", "2001:db8:2::5"]
         links = [{"link_type": "ether", "addr_info": [
-                    {"local": a, "prefixlen": 24 if ":" not in a else 64}]} for a in addresses]
+                    {"local": a, "prefixlen": 24 if ":" not in a else 64,
+                     "scope": "global"}]} for a in addresses]
         # A DHCPv6 address is a /128; its network comes as an on-link route.
         links.append({"ifname": "eth1", "link_type": "ether", "addr_info": [
-                        {"local": "2001:db8:3::5", "prefixlen": 128}]})
+                        {"local": "2001:db8:3::5", "prefixlen": 128, "scope": "global"}]})
         links.append({"ifname": "tun0", "link_type": "none", "addr_info": [
-                        {"local": "fdfe:dcba:9876::1", "prefixlen": 126}]})
+                        {"local": "fdfe:dcba:9876::1", "prefixlen": 126, "scope": "global"}]})
         routes = {"-4": [{"dst": "default", "gateway": "192.0.2.1", "dev": "eth1"},
                          {"dst": "203.0.113.0/24", "dev": "eth1"},
                          {"dst": "198.18.0.0/15", "dev": "tun0"},
@@ -190,6 +191,54 @@ class RuntimeAndNetworkPolicyTests(unittest.TestCase):
                 if whole_lan == "1":
                     self.assertEqual(refused, {"-4": {"0.0.0.0/8"}, "-6": set()})
 
+
+    def test_host_link_and_site_addresses_stay_refused_under_lan(self):
+        helper = (ROOT / "sandbox-game").read_text().split("NET_HELPER <<'EOF'", 1)[1]
+        helper = helper.split("\n", 1)[1].split("\nEOF", 1)[0]
+
+        def run(links, lan):
+            def fake(args, **kwargs):
+                if args[1:3] == ["-j", "addr"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(links))
+                if args[3:4] == ["route"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="[]")
+                return subprocess.CompletedProcess(args, 0)
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["helper", "", "169.254.1.1", "", "pasta",
+                                                 "02:00:00:00:00:01", lan, "[]"]), \
+                    mock.patch("shutil.which", return_value="ip"), \
+                    mock.patch("subprocess.run", side_effect=fake), \
+                    contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                exec(compile(helper, "NET_HELPER", "exec"), {})
+            return json.loads(out.getvalue())
+
+        loopback = {"ifname": "lo", "link_type": "loopback", "addr_info": [
+            {"local": "127.0.0.1", "prefixlen": 8, "scope": "host"},
+            {"local": "::1", "prefixlen": 128, "scope": "host"}]}
+        # IPv4-only, but every such host still has a link-local IPv6 address.
+        links = [loopback, {"ifname": "eth0", "link_type": "ether", "addr_info": [
+            {"local": "192.0.2.5", "prefixlen": 24, "scope": "global"},
+            {"local": "169.254.10.5", "prefixlen": 16, "scope": "link"},
+            {"local": "fe80::5", "prefixlen": 64, "scope": "link"}]}]
+        out = run(links, "1")
+        rules4 = out["rules"]["4"]
+        self.assertIn("rule add priority 94 to 192.0.2.5 prohibit", rules4)
+        self.assertIn("rule add priority 94 to 169.254.10.5 prohibit", rules4)
+        self.assertNotIn("rule add priority 94 to 127.0.0.1 prohibit", rules4)
+        self.assertFalse(out["ipv6"], "link-local IPv6 alone must keep pasta on -4")
+        self.assertNotIn("6", out["rules"])
+
+        # A global IPv6 address also makes its site and link-local peers
+        # refused; loopback's ::1 never is.
+        links[1]["addr_info"] += [
+            {"local": "2001:db8::5", "prefixlen": 64, "scope": "global"},
+            {"local": "fec0::5", "prefixlen": 64, "scope": "site"}]
+        out = run(links, "1")
+        rules6 = out["rules"]["6"]
+        for address in ("2001:db8::5", "fec0::5", "fe80::5"):
+            self.assertIn(f"rule add priority 94 to {address} prohibit", rules6)
+        self.assertNotIn("rule add priority 94 to ::1 prohibit", rules6)
+        self.assertTrue(out["ipv6"])
 
     def test_pasta_names_the_first_ipv4_nameserver_as_its_dns_host(self):
         helper = (ROOT / "sandbox-game").read_text().split("NET_HELPER <<'EOF'", 1)[1]
@@ -3986,7 +4035,8 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         (secret / "saves" / "1").write_text("host secret\n")
         script.write_text(
             f"source <(sed -n '/^reset_install() {{/,/^}}/p' {lib})\n"
-            "stopped_sandbox() { :; }; reclaim() { :; }; confirm() { :; }; unlock_work() { :; };\n"
+            "stopped_sandbox() { :; }; reclaim() { :; }; confirm() { :; };\n"
+            "unlock_work() { :; }; unlock_dirs() { :; };\n"
             "relocate_layers() { :; }\n"
             f"SANDBOXES={capture.parent}\n"
             "find() { command find \"$@\"; local r=$?\n"
@@ -5181,6 +5231,302 @@ print(json.dumps([tcp(host, int(port)) for host, port in zip(sys.argv[1::2], sys
         lib.rename(real)
         lib.symlink_to("real")
         self.assertIn("gamescope", self.recorded_args("--wayland"))
+
+    # ---- descriptors, signals and closed folders ----------------------------
+    def test_launch_descriptors_are_not_leaked(self):
+        scripts = self.base / "fd-scripts"
+        scripts.mkdir()
+        for name in ("sandbox-game-lib", "sandbox-seccomp", "sandbox-landlock"):
+            shutil.copy2(ROOT / name, scripts / name)
+        absent = self.base / "no-hostname"
+        script = scripts / "sandbox-game"
+        script.write_text((ROOT / "sandbox-game").read_text().replace(
+            "[ -e /etc/hostname ]", f'[ -e "{absent}" ]', 1))
+        script.chmod(0o755)
+        bindir = self.base / "fd-bin"
+        bindir.mkdir()
+        log = self.base / "bwrap-fds"
+        recorder = bindir / "bwrap"
+        recorder.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = --help ]; then printf "%s\\n" --overlay; exit 0; fi\n'
+            "for f in /proc/self/fd/*; do\n"
+            f'  printf "%s %s\\n" "${{f##*/}}" "$(readlink "$f" 2>/dev/null)" >> {str(log)!r}\n'
+            "done\n"
+            "exit 0\n")
+        recorder.chmod(0o755)
+        result = subprocess.run(
+            [str(script), "--headless", "--hosts", "--add-host", "10.0.0.1 fd.example",
+             str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fds = {}
+        for line in log.read_text().splitlines():
+            number, target = line.split(" ", 1)
+            fds[int(number)] = target
+        # No /etc/hostname to bind: 7 must never have been opened.
+        self.assertNotIn(7, fds)
+        # The lock is closed on bwrap; hosts and the boot id are there.
+        self.assertNotIn(18, fds)
+        self.assertIn(8, fds)
+        self.assertIn(5, fds)
+        # The hosts file comes from a real file, not a process substitution.
+        self.assertFalse(fds[5].startswith("pipe:"), fds[5])
+
+    def test_background_helpers_and_scopes_do_not_inherit_launcher_fds(self):
+        source = (ROOT / "sandbox-game").read_text()
+        self.assertNotIn("exec 8< <(", source)
+        self.assertNotIn("exec 5< <(", source)
+        coproc = source.split("coproc WL_CONTEXT {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("4<&- 5<&- 18>&-", coproc)
+        fuse = source.split("fuse-overlayfs -o", 1)[1].split("\n}", 1)[0]
+        self.assertIn("4<&- 5<&- 18>&-", fuse)
+        probe = source.split("probe_limits() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("systemd-run --help 2>/dev/null 4<&-", probe)
+        self.assertIn("14<&- 18>&- 19<&- 20<&- 21<&-)", probe)
+        self.assertIn("4<&- 5<&- 6<&- 7<&- 8<&- 9<&- 14<&- 18>&- 19<&- 20<&- 21<&-", probe)
+
+    def test_invalid_separate_uid_is_refused(self):
+        capture = self.home / "game-sandboxes" / "bad-uid"
+        (capture / "home").mkdir(parents=True)
+        (capture / "uid").write_text("7\n")
+        (capture / "home" / "save").write_text("keep\n")
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "bad-uid",
+             str(self.game), "/bin/true"],
+            env={**self.env, "SANDBOX_SEPARATE_UID": "yes"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid SANDBOX_SEPARATE_UID='yes'", result.stderr)
+        self.assertIn("use 0, 1 or systemd", result.stderr)
+        self.assertTrue((capture / "uid").exists())
+        self.assertEqual((capture / "home" / "save").read_text(), "keep\n")
+
+    def test_new_native_game_without_exec_bit_keeps_a_fresh_machine_id(self):
+        if not Path("/etc/machine-id").exists():
+            self.skipTest("no host /etc/machine-id")
+        binary = self.game / "Game"
+        shutil.copyfile("/bin/true", binary)
+        binary.chmod(0o644)
+        bindir = self.base / "native-bin"
+        bindir.mkdir()
+        (bindir / "bwrap").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = --help ]; then printf "%s\\n" --overlay; exit 0; fi\n'
+            "exit 0\n")
+        (bindir / "bwrap").chmod(0o755)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", str(self.game), "/game/Game"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = self.home / "game-sandboxes" / "game"
+        self.assertTrue((capture / "overlay/rw/Game").exists(),
+                        "the non-executable program was not copied in")
+        self.assertNotEqual((capture / "machine-id").read_text().strip(),
+                            Path("/etc/machine-id").read_text().strip())
+
+    def test_signals_clean_up_and_then_reexecute_the_signal(self):
+        import signal
+        source = (ROOT / "sandbox-game").read_text()
+        for name in ("INT", "TERM", "HUP"):
+            self.assertIn(f"trap 'on_signal {name} ", source)
+        for name, number in (("INT", 130), ("TERM", 143), ("HUP", 129)):
+            with self.subTest(signal=name):
+                marker = self.base / f"cleaned-{name}"
+                script = self.base / f"signal-{name}.sh"
+                script.write_text(
+                    "set -u\n"
+                    f"source <(sed -n '/^on_signal() {{/,/^}}/p' {ROOT / 'sandbox-game'})\n"
+                    f"cleanup() {{ printf cleaned > {str(marker)!r}; }}\n"
+                    f"trap 'on_signal {name} {number}' {name}\n"
+                    f"kill -{name} $$\n"
+                    "sleep 5\n")
+                sig = getattr(signal, "SIG" + name)
+                result = subprocess.run(
+                    ["bash", str(script)], capture_output=True, text=True, timeout=15,
+                    preexec_fn=lambda s=sig: signal.signal(s, signal.SIG_DFL))
+                self.assertEqual(result.returncode, -sig, result.stderr)
+                self.assertEqual(marker.read_text(), "cleaned")
+
+    def net_launcher(self, net_helper):
+        """A sandbox-game whose network helper is this code, for the NET path."""
+        scripts = Path(tempfile.mkdtemp(dir=self.base))
+        for name in ("sandbox-game-lib", "sandbox-seccomp", "sandbox-landlock"):
+            shutil.copy2(ROOT / name, scripts / name)
+        source = (ROOT / "sandbox-game").read_text()
+        head, rest = source.split("read -r -d '' NET_HELPER <<'EOF' || true\n", 1)
+        _, tail = rest.split("\nEOF\n", 1)
+        script = scripts / "sandbox-game"
+        script.write_text(head + "read -r -d '' NET_HELPER <<'EOF' || true\n"
+                          + net_helper + "\nEOF\n" + tail)
+        script.chmod(0o755)
+        return script
+
+    def test_failed_network_start_does_not_sigpipe_the_launcher(self):
+        import signal
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        script = self.net_launcher("import sys\nsys.exit(0)\n")
+        bindir = self.base / "net-bin"
+        bindir.mkdir()
+        for name in ("pasta", "bwrap"):
+            (bindir / name).write_text("#!/bin/sh\nexit 0\n")
+        # bwrap reports a child then goes away without ever reading its go pipe.
+        (bindir / "bwrap").write_text(
+            "#!/bin/bash\n"
+            'if [ "$1" = --help ]; then printf "%s\\n" --overlay; exit 0; fi\n'
+            f"printf '{{\"child-pid\": {child.pid}}}\\n' >&10\n"
+            "exec 11<&-\n"
+            "sleep 1\n"
+            "exit 0\n")
+        for name in ("pasta", "bwrap"):
+            (bindir / name).chmod(0o755)
+        result = subprocess.run(
+            [str(script), "--headless", "--net", str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        self.assertNotEqual(result.returncode, -signal.SIGPIPE, result.stderr)
+        self.assertIn("could not set up the sandbox's network", result.stderr)
+        self.assertIsNotNone(child.poll(), "the failed start left its child running")
+        self.assertTrue((self.home / "game-sandboxes/game/playtime").is_file(),
+                        "the launcher died before cleanup")
+
+    def test_cleanup_does_not_kill_a_reused_pasta_pid(self):
+        pasta = self.base / "pasta-copy"
+        shutil.copyfile("/bin/sleep", pasta)
+        pasta.chmod(0o755)
+        capture = self.home / "game-sandboxes" / "pasta-pid"
+        capture.mkdir(parents=True)
+        pidfile = self.base / "pasta.pid"
+        script = self.base / "cleanup-pasta.sh"
+        script.write_text(
+            "set -u\n"
+            f"source <(sed -n '/^cleanup() {{/,/^}}/p' {ROOT / 'sandbox-game'})\n"
+            f"CAP={str(capture)!r}; SEPARATE_UID=0; UIDHELPER=''; CLEANED=0\n"
+            "CLEANUP=(); PROTON_LAYER=''; BW=''; FIFOS=''; HOSTS_TMP=''\n"
+            "RUNTIME_SOCKETS=''; WL_CONTEXT_HELPER=''; WL_CONTEXT_FD=''; PLAY_START=''\n"
+            f"PASTA_BIN={str(pasta)!r}; PASTA_PID={str(pidfile)!r}\n"
+            "unwork() { :; }; rm_proton_layer() { :; }\n"
+            "remove_runtime_sockets() { :; }; end_security_context() { :; }\n"
+            "cleanup\n")
+        # Its PID now belongs to something else: leave it alone.
+        victim = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(victim.wait)
+        self.addCleanup(victim.kill)
+        pidfile.write_text(f"{victim.pid}\n")
+        result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(victim.poll(), "cleanup killed a PID that no longer ran pasta")
+        # Still one of our pasta copies: end it.
+        owned = subprocess.Popen([str(pasta), "30"])
+        self.addCleanup(owned.wait)
+        self.addCleanup(owned.kill)
+        pidfile.write_text(f"{owned.pid}\n")
+        result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        owned.wait(timeout=5)
+
+    def test_closed_game_folders_do_not_block_reset_or_delete(self):
+        capture = self.home / "game-sandboxes" / "closed"
+        # What the game left behind: a 000 folder in its install overlay,
+        # another in its home, and a save at the bottom of the first.
+        closed = capture / "overlay/rw/closed"
+        (closed / "save").mkdir(parents=True)
+        (closed / "save/1").write_text("saved\n")
+        (closed / "data").write_text("changed\n")
+        locked = capture / "home/locked"
+        locked.mkdir(parents=True)
+        (locked / "x").write_text("home\n")
+        secret = self.base / "outside-secret"
+        secret.write_text("not mine\n")
+        secret.chmod(0)
+        self.addCleanup(lambda: secret.exists() and secret.chmod(0o600))
+        (capture / "overlay/rw/link").symlink_to(secret)
+        closed.chmod(0)
+        locked.chmod(0)
+        result = self.cli("--reset-install", "closed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kept = capture / "overlay/rw" / "closed" / "save" / "1"
+        self.assertEqual(kept.read_text(), "saved\n")
+        self.assertEqual(kept.stat().st_mode & 0o111, 0,
+                         "unlocking added an execute bit to a save file")
+        self.assertFalse((capture / "overlay/rw" / "closed" / "data").exists())
+        self.assertEqual(secret.stat().st_mode & 0o777, 0,
+                         "unlocking followed a link out of the capture")
+        # The same, for --delete, with a fresh closed folder in the home.
+        still = capture / "home/still-closed"
+        (still / "inside").mkdir(parents=True)
+        (still / "inside/file").write_text("x")
+        still.chmod(0)
+        result = self.cli("--delete", "closed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(capture.exists())
+
+    def test_exec_bit_reclaims_before_reading_a_closed_copy(self):
+        (self.game / "bin").mkdir()
+        shutil.copyfile("/bin/true", self.game / "bin/Game")
+        (self.game / "bin/Game").chmod(0o644)
+        capture = self.home / "game-sandboxes" / "game"
+        copy = capture / "overlay/rw/bin/Game"
+        copy.parent.mkdir(parents=True)
+        shutil.copyfile("/bin/true", copy)
+        copy.chmod(0)
+        script = self.base / "exec-bit-closed.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            f"source <(sed -n '/^exec_bit() {{/,/^}}/p' {ROOT / 'sandbox-game'})\n"
+            f"GAMEDIR={str(self.game)!r}; CAP={str(capture)!r}\n"
+            "SEPARATE_UID=1; RECLAIMED=0; EXEC_PREFIX=()\n"
+            "elf_programs() { printf 'elf\\n'; }\n"
+            f"mine() {{ chmod 0644 {str(copy)!r}; RECLAIMED=1; }}\n"
+            "exec_bit /game/bin/Game\n")
+        result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(copy.stat().st_mode & 0o100)
+        # Even if the file stays 000 after reclaim, exec_bit must not abort the launch.
+        copy.chmod(0)
+        script.write_text(
+            "set -euo pipefail\n"
+            f"source <(sed -n '/^exec_bit() {{/,/^}}/p' {ROOT / 'sandbox-game'})\n"
+            f"GAMEDIR={str(self.game)!r}; CAP={str(capture)!r}\n"
+            "SEPARATE_UID=1; RECLAIMED=0; EXEC_PREFIX=()\n"
+            "elf_programs() { printf 'elf\\n'; }\n"
+            "mine() { RECLAIMED=1; }\n"
+            "exec_bit /game/bin/Game\n")
+        result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_writable_hosts_reclaims_before_reading(self):
+        source = (ROOT / "sandbox-game").read_text()
+        block = source.split('if [ "$HOSTS_RW" = 1 ]; then', 1)[1]
+        block = block.split("        exec 4<<", 1)[0]
+        self.assertIn("mine ||", block)
+        self.assertIn('chmod u+r -- "$CAP/hosts"', block)
+        self.assertLess(block.index("mine ||"), block.index('hosts_inherited "$CAP/hosts"'))
+        # A 000 hosts file left by the game must not fail --hosts-writable on relaunch.
+        capture = self.home / "game-sandboxes" / "hosts-closed"
+        capture.mkdir(parents=True)
+        hosts = capture / "hosts"
+        hosts.write_text("127.0.0.1 localhost\n")
+        hosts.chmod(0)
+        bindir = self.base / "hosts-bin"
+        bindir.mkdir()
+        (bindir / "bwrap").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = --help ]; then printf "%s\\n" --overlay; exit 0; fi\n'
+            "exit 0\n")
+        (bindir / "bwrap").chmod(0o755)
+        result = subprocess.run(
+            [str(ROOT / "sandbox-game"), "--headless", "--name", "hosts-closed",
+             "--hosts-writable", "--add-host", "10.0.0.9 game.example",
+             str(self.game), "/bin/true"],
+            env={**self.env, "PATH": str(bindir) + ":/usr/bin:/bin"},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("10.0.0.9 game.example", hosts.read_text())
 
 
 def separate_uid_missing():

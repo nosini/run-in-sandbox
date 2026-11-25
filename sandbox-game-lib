@@ -152,6 +152,14 @@ parse_requirements() {                         # $1 = list
     R_REQUIRE="${out% }"
 }
 
+# .locks is where sandbox-game keeps them, not a sandbox. A leading hyphen
+# would look like an option to anything handed the name; "." and ".." are not
+# folders of their own.
+valid_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9._][a-zA-Z0-9._-]*$ ]] \
+        && [ "$1" != . ] && [ "$1" != .. ] && [ "$1" != .locks ]
+}
+
 # Nicer sandbox names for directories whose basename is ugly. Key = on-disk
 # basename. Here rather than in sandbox-game, so the manager, matching game
 # folders to sandboxes, names them exactly as sandbox-game does.
@@ -161,17 +169,27 @@ declare -gA NAME_MAP=(
 )
 
 # The sandbox name for game dir $1, in R_NAME: no subshell, as the manager
-# names whole folder trees at a time (derive_names).
+# names whole folder trees at a time (derive_names). The result is always
+# something valid_name accepts.
 # shellcheck disable=SC2034  # an output, read by whoever sourced this
 derive_name() {
-    local base="${1%/}"
+    local base="$1"
+    while [[ "$base" == */ ]]; do base="${base%/}"; done
     base="${base##*/}"
-    if [ -n "$base" ] && [ -n "${NAME_MAP[$base]:-}" ]; then R_NAME="${NAME_MAP[$base]}"; return; fi
+    # @ and * in an associative array subscript would expand every value.
+    if [ -n "$base" ] && [ "$base" != "@" ] && [ "$base" != "*" ] \
+       && [ -n "${NAME_MAP[$base]:-}" ] && valid_name "${NAME_MAP[$base]}"; then
+        R_NAME="${NAME_MAP[$base]}"
+        return
+    fi
     base="${base,,}"
     base="${base//[^a-z0-9._-]/-}"
     while [[ "$base" == *--* ]]; do base="${base//--/-}"; done
     base="${base#-}"; base="${base%-}"
-    [ "$base" != .locks ] || base=locks   # where sandbox-game keeps its locks
+    # A folder named after these sanitizes to one of them; none can be a
+    # sandbox of its own.
+    [ "$base" != . ] && [ "$base" != .. ] || base=""
+    [ "$base" != .locks ] || base=locks
     R_NAME="${base:-game}"
 }
 
@@ -717,8 +735,9 @@ PY
                 printf 'env=%s\n' "$env_out"
             fi
         else
-            env_out="$(kept env '')"
-            [ -z "$env_out" ] || printf 'env=%s\n' "$env_out"
+            # An explicit empty env= in the file says "none", and must stay
+            # that way; a key that is absent stays absent.
+            if env_out="$(file_get "$TARGET" env)"; then printf 'env=%s\n' "$env_out"; fi
         fi
         # Keys this window does not know -- hand-written, or newer -- stay.
         if [ -f "$TARGET" ]; then
@@ -771,18 +790,43 @@ sandbox_user() {                      # $1 = PID, $2 = NAME
 # real path (see canonical() there): another one when ~/game-sandboxes, or
 # your home, is reached through a link.
 bound_capture() {                     # "$@" = the bwrap's command line
-    local prev="" a top
+    local -a args=( "$@" )
+    local i=0 a n top
     BOUND=""
     [ -n "${SANDBOXES_REAL-}" ] || SANDBOXES_REAL="$(realpath -m -- "$HOME/game-sandboxes")"
-    for a in "$@"; do
-        if [ "$prev" = --bind ]; then
+    while [ "$i" -lt "${#args[@]}" ]; do
+        a="${args[i]}"
+        # A standalone -- ends bwrap's options; anything after it is the
+        # game's, and may name a capture of its own to look like a sandbox.
+        [ "$a" != -- ] || return 0
+        # How many words bwrap takes after this option, so a "--" that is an
+        # option's value is not mistaken for that terminator.
+        case "$a" in
+            --bind|--bind-try|--ro-bind|--ro-bind-try|--dev-bind|--dev-bind-try|\
+            --setenv|--file|--bind-data|--ro-bind-data|--symlink|--chmod|\
+            --bind-fd|--ro-bind-fd)
+                n=2 ;;
+            --overlay)
+                n=3 ;;
+            --args|--argv0|--userns|--userns2|--pidns|--cap-add|--cap-drop|\
+            --uid|--gid|--chdir|--unsetenv|--lock-file|--sync-fd|--remount-ro|\
+            --proc|--dev|--tmpfs|--mqueue|--dir|--seccomp|--add-seccomp-fd|\
+            --block-fd|--userns-block-fd|--info-fd|--json-status-fd|--perms|\
+            --size|--hostname|--domainname|--overlay-src|--tmp-overlay|\
+            --ro-overlay|--exec-label|--file-label)
+                n=1 ;;
+            *)
+                n=0 ;;
+        esac
+        if [ "$a" = --bind ] && [ $((i + 1)) -lt "${#args[@]}" ]; then
             for top in "$HOME/game-sandboxes" "$SANDBOXES_REAL"; do
-                [[ "$a" == "$top/"*/home ]] || continue
-                BOUND="${a#"$top/"}"; BOUND="${BOUND%/home}"
-                [[ "$BOUND" != */* ]] || BOUND=""
+                [[ "${args[i+1]}" == "$top/"*/home ]] || continue
+                BOUND="${args[i+1]#"$top/"}"; BOUND="${BOUND%/home}"
+                if [[ "$BOUND" != */* ]] && valid_name "$BOUND"; then return 0; fi
+                BOUND=""
                 return 0
             done
         fi
-        prev="$a"
+        i=$((i + 1 + n))
     done
 }
