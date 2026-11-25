@@ -1628,16 +1628,24 @@ class Media {
     get src() { return this._src; }
     set src(value) { this._src = value; }
 }
+global.FontFace = class { constructor() {} };
+global.window = { fetch: async () => {}, FontFace: global.FontFace };
+global.document = { baseURI: "chrome-extension://test/" };
+global.location = { protocol: "chrome-extension:", host: "test" };
+global.nw = { __dirname: root };
+// The first load wraps fs only: a page's element classes are not there yet.
+require(casefold);
 global.HTMLImageElement = Media;
 global.HTMLMediaElement = Media;
 global.HTMLSourceElement = Media;
 global.XMLHttpRequest = class { open() {} };
-global.FontFace = class { constructor() {} };
-global.window = { fetch: async () => {}, FontFace: global.FontFace };
-global.document = { baseURI: "chrome-extension://test/" };
-global.location = { protocol: "chrome-extension:" };
-global.nw = { __dirname: root };
+// A reload runs the script again on the same fs module. Its URL correction
+// must still see the real file system, not the wrappers the first run left.
+delete require.cache[require.resolve(casefold)];
 require(casefold);
+const image = new Media();
+image.src = "chrome-extension://test/img/pictures/B.PNG";
+assert(image.src.endsWith("/Img/Pictures/b.png"), image.src);
 
 assert.strictEqual(fs.readFileSync(path.join(root, "img/pictures/B.PNG"), "utf8"), "image");
 assert.strictEqual(fs.readFileSync(path.join(root, "img/pictures/b.png"), "utf8"), "image");
@@ -1648,8 +1656,79 @@ fs.accessSync(path.join(root, "img/pictures/b.png"));
 assert(fs.readdirSync(path.join(root, "IMG")).includes("Pictures"));
 const fd = fs.openSync(path.join(root, "img/PICTURES/B.PNG"), "r");
 fs.closeSync(fd);
+fs.closeSync(fs.openSync(path.join(root, "img/PICTURES/B.PNG")));
 assert.strictEqual(fs.readFileSync(path.join(root, "..", "Outside", "File.txt"), "utf8"), "outside");
 assert.throws(() => fs.readFileSync(path.join(root, "img/pictures/Missing.png")), /ENOENT/);
+
+// open() folds by its flags: read-only reads, creating and writing write.
+const readFd = fs.openSync(path.join(root, "SAVE", "OLD.SAV"), "r");
+fs.closeSync(readFd);
+const writeFd = fs.openSync(path.join(root, "SAVE", "created.sav"), "w");
+fs.writeSync(writeFd, "created");
+fs.closeSync(writeFd);
+assert.strictEqual(fs.readFileSync(path.join(root, "save/created.sav"), "utf8"), "created");
+const numericFd = fs.openSync(path.join(root, "SAVE", "numeric.sav"),
+                              fs.constants.O_CREAT | fs.constants.O_WRONLY);
+fs.writeSync(numericFd, "numeric");
+fs.closeSync(numericFd);
+assert.strictEqual(fs.readFileSync(path.join(root, "save/numeric.sav"), "utf8"), "numeric");
+
+// open() without a creating flag changes the file that exists under another
+// case, and creates nothing new.
+const rwFd = fs.openSync(path.join(root, "SAVE", "OLD.SAV"), "r+");
+fs.writeSync(rwFd, "OLD", 0);
+fs.closeSync(rwFd);
+assert.strictEqual(fs.readFileSync(path.join(root, "Save/old.sav"), "utf8"), "OLD");
+const rwNumeric = fs.openSync(path.join(root, "SAVE", "OLD.SAV"), fs.constants.O_RDWR);
+fs.writeSync(rwNumeric, "old", 0);
+fs.closeSync(rwNumeric);
+assert.strictEqual(fs.readFileSync(path.join(root, "Save/old.sav"), "utf8"), "old");
+assert(!fs.readdirSync(path.join(root, "Save")).includes("OLD.SAV"));
+// A creating open still writes the exact name under a folded folder.
+const newFd = fs.openSync(path.join(root, "SAVE", "Wrote.SAV"), "w");
+fs.writeSync(newFd, "wrote");
+fs.closeSync(newFd);
+assert.strictEqual(fs.readFileSync(path.join(root, "Save/Wrote.SAV"), "utf8"), "wrote");
+assert(fs.readdirSync(path.join(root, "Save")).includes("Wrote.SAV"));
+assert(!fs.readdirSync(path.join(root, "Save")).includes("wrote.sav"));
+
+// Calls on a file that already exists find it under another case.
+fs.writeFileSync(path.join(root, "Save", "unlink.sav"), "unlink");
+fs.unlinkSync(path.join(root, "SAVE", "UNLINK.SAV"));
+assert(!fs.readdirSync(path.join(root, "Save")).includes("unlink.sav"));
+fs.writeFileSync(path.join(root, "Save", "rm.sav"), "rm");
+fs.rmSync(path.join(root, "SAVE", "RM.SAV"));
+assert(!fs.readdirSync(path.join(root, "Save")).includes("rm.sav"));
+fs.writeFileSync(path.join(root, "Save", "chmod.sav"), "chmod");
+fs.chmodSync(path.join(root, "SAVE", "CHMOD.SAV"), 0o600);
+assert.strictEqual(fs.statSync(path.join(root, "Save/chmod.sav")).mode & 0o777, 0o600);
+const when = new Date(1000000000000);
+fs.writeFileSync(path.join(root, "Save", "utimes.sav"), "utimes");
+fs.utimesSync(path.join(root, "SAVE", "UTIMES.SAV"), when, when);
+assert.strictEqual(fs.statSync(path.join(root, "Save/utimes.sav")).mtime.getTime(),
+                   when.getTime());
+fs.writeFileSync(path.join(root, "Save", "truncate.sav"), "truncate");
+fs.truncateSync(path.join(root, "SAVE", "TRUNCATE.SAV"), 2);
+assert.strictEqual(fs.readFileSync(path.join(root, "Save/truncate.sav"), "utf8"), "tr");
+
+// More write, two-path and read calls, all against the same folded names.
+fs.appendFileSync(path.join(root, "SAVE", "created.sav"), "+more");
+assert.strictEqual(fs.readFileSync(path.join(root, "save/created.sav"), "utf8"), "created+more");
+fs.copyFileSync(path.join(root, "IMG/PICTURES/B.PNG"), path.join(root, "SAVE", "copy.png"));
+assert.strictEqual(fs.readFileSync(path.join(root, "save/copy.png"), "utf8"), "image");
+fs.linkSync(path.join(root, "SAVE", "created.sav"), path.join(root, "SAVE", "hard.sav"));
+assert.strictEqual(fs.readFileSync(path.join(root, "save/hard.sav"), "utf8"), "created+more");
+fs.symlinkSync("created.sav", path.join(root, "SAVE", "link.sav"));
+assert.strictEqual(fs.readlinkSync(path.join(root, "SAVE", "LINK.SAV")), "created.sav");
+assert.strictEqual(fs.realpathSync(path.join(root, "IMG/PICTURES/B.PNG")),
+                   path.join(root, "Img/Pictures/b.png"));
+assert.strictEqual(typeof fs.realpathSync.native, "function");
+assert.strictEqual(fs.realpathSync.native(path.join(root, "IMG/PICTURES/B.PNG")),
+                   path.join(root, "Img/Pictures/b.png"));
+assert.strictEqual(typeof fs.realpath.native, "function");
+const opened = fs.opendirSync(path.join(root, "IMG"));
+assert(opened.readSync().name);
+opened.closeSync();
 
 async function main() {
     assert.strictEqual(await new Promise((resolve, reject) =>
@@ -1674,8 +1753,28 @@ async function main() {
     const handle = await fs.promises.open(path.join(root, "img/PICTURES/B.PNG"), "r");
     await handle.close();
     assert((await fs.promises.readdir(path.join(root, "IMG"))).includes("Pictures"));
+    const writer = await fs.promises.open(path.join(root, "SAVE", "promise.sav"), "w");
+    await writer.writeFile("promise");
+    await writer.close();
+    assert.strictEqual(fs.readFileSync(path.join(root, "save/promise.sav"), "utf8"), "promise");
+    await new Promise((resolve, reject) => {
+        const stream = fs.createWriteStream(path.join(root, "SAVE", "stream.sav"));
+        stream.on("error", reject);
+        stream.end("stream", resolve);
+    });
+    assert.strictEqual(fs.readFileSync(path.join(root, "save/stream.sav"), "utf8"), "stream");
+    // The stream opens asynchronously: a miss in its folder between the call
+    // and the open must not hide the file it then creates.
+    const streamed = fs.createWriteStream(path.join(root, "SAVE", "streamed.sav"));
+    assert(!fs.existsSync(path.join(root, "SAVE", "absent.sav")));
+    await new Promise((resolve, reject) => {
+        streamed.on("error", reject);
+        streamed.on("close", resolve);
+        streamed.end("streamed");
+    });
+    assert(fs.existsSync(path.join(root, "SAVE", "STREAMED.SAV")));
 
-    // Writes resolve the folder, never the final name.
+    // Creating writes resolve the folder, never the final name.
     fs.writeFileSync(path.join(root, "SAVE", "slot1.sav"), "one");
     assert.strictEqual(fs.readFileSync(path.join(root, "save/slot1.sav"), "utf8"), "one");
     await new Promise((resolve, reject) =>
@@ -1690,6 +1789,29 @@ async function main() {
         fs.unlink(path.join(root, "SAVE", "slot2.sav"),
                   (error) => error ? reject(error) : resolve()));
     await fs.promises.unlink(path.join(root, "SAVE", "slot3.sav"));
+    fs.rmSync(path.join(root, "SAVE", "copy.png"));
+    assert(!fs.existsSync(path.join(root, "save/copy.png")));
+    fs.mkdirSync(path.join(root, "SAVE", "TempDir"));
+    fs.rmdirSync(path.join(root, "SAVE", "TempDir"));
+    assert(!fs.existsSync(path.join(root, "save/TempDir")));
+
+    // The promise forms fold the name of an existing file too.
+    const later = new Date(1100000000000);
+    fs.writeFileSync(path.join(root, "Save", "promise-existing.sav"), "promise");
+    await fs.promises.chmod(path.join(root, "SAVE", "PROMISE-EXISTING.SAV"), 0o640);
+    assert.strictEqual((await fs.promises.stat(path.join(root, "Save/promise-existing.sav"))).mode
+                       & 0o777, 0o640);
+    await fs.promises.utimes(path.join(root, "SAVE", "PROMISE-EXISTING.SAV"), later, later);
+    assert.strictEqual((await fs.promises.stat(path.join(root, "Save/promise-existing.sav")))
+                       .mtime.getTime(), later.getTime());
+    await fs.promises.truncate(path.join(root, "SAVE", "PROMISE-EXISTING.SAV"), 2);
+    assert.strictEqual(await fs.promises.readFile(path.join(root, "Save/promise-existing.sav"),
+                                                  "utf8"), "pr");
+    await fs.promises.rm(path.join(root, "SAVE", "PROMISE-EXISTING.SAV"));
+    assert(!fs.readdirSync(path.join(root, "Save")).includes("promise-existing.sav"));
+    fs.writeFileSync(path.join(root, "Save", "promise-unlink.sav"), "unlink");
+    await fs.promises.unlink(path.join(root, "SAVE", "PROMISE-UNLINK.SAV"));
+    assert(!fs.readdirSync(path.join(root, "Save")).includes("promise-unlink.sav"));
 
     // A file added after the folder was read is found by a case-blind miss.
     fs.readdirSync(root);

@@ -338,9 +338,10 @@ untouched. **File names** in the preferences turns it off per game
 (`casefold=0`), and the entry comes out of `package.json` again. A game that
 injects a script of its own keeps it, and goes without the correction; the log
 says so. Plugins that read files through Node's `fs` are covered as well: its
-read calls are wrapped the same way on the module `require("fs")` returns.
-Writes resolve only the folders above the name, never the name itself, so a
-save lands in an existing `Save` or `save` folder.
+read calls are wrapped the same way on the module `require("fs")` returns, and
+so are calls that change or remove a file that already exists. Calls that
+create a file resolve only the folders above the name, never the name itself,
+so a save lands in an existing `Save` or `save` folder.
 
 NW.js is Chromium, and tells the sound server it is "Chromium" like every
 Chromium browser, so an audio router (pulsemeeter, qpwgraph rules) would send
