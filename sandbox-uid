@@ -147,19 +147,28 @@ def listed(ranges, gid):
 def index_of(cap, allocate=True):
     """CAP/uid, allocated under a lock on the sandboxes' folder."""
     path = os.path.join(cap, "uid")
-    try:
-        with open(path) as f:
-            value = f.read().strip()
-        if value.isdigit() and int(value) > 0:
-            return int(value)
-    except FileNotFoundError:
-        pass
+
+    def existing():
+        try:
+            with open(path) as f:
+                value = f.read().strip()
+        except FileNotFoundError:
+            return None
+        return int(value) if value.isdigit() and int(value) > 0 else None
+
+    found = existing()
+    if found is not None:
+        return found
     if not allocate:
         fail(f"{cap} has no uid of its own")
     root = os.path.dirname(os.path.abspath(cap))
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        # Another caller may have allocated it while this one waited.
+        found = existing()
+        if found is not None:
+            return found
         used = set()
         for name in os.listdir(root):
             try:
@@ -172,7 +181,7 @@ def index_of(cap, allocate=True):
         n = 1
         while n in used:
             n += 1
-        tmp = path + ".tmp"
+        tmp = f"{path}.tmp.{os.getpid()}"
         with open(tmp, "w") as f:
             f.write(f"{n}\n")
         os.replace(tmp, path)
@@ -513,18 +522,18 @@ def acl_pack(entries):
         struct.pack("<HHI", tag, perm, i) for (tag, i), perm in sorted(entries.items()))
 
 
-def reshare(path, uid):
-    """share() for one entry of the sandbox user's, as that user: an owner
-    may set its own files' ACLs. One that is not its own -- yours, or a link
-    put in the way -- it cannot change, nor wants to."""
+def reshare_fd(fd, uid):
+    """share() for one entry of the sandbox user's, through its descriptor, as
+    that user: an owner may set its own files' ACLs. One that is not its own --
+    yours, or a link put in the way -- it cannot change, nor wants to."""
     try:
-        st = os.lstat(path)
+        st = os.fstat(fd)
         if st.st_uid != uid or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
             return
         is_dir = stat.S_ISDIR(st.st_mode)
         want = 6 | (1 if is_dir or st.st_mode & 0o111 else 0)
         try:
-            old = os.getxattr(path, ACL_ACCESS, follow_symlinks=False)
+            old = os.getxattr(fd, ACL_ACCESS)
             acl = acl_unpack(old)
         except OSError:
             old, m = None, st.st_mode
@@ -535,17 +544,30 @@ def reshare(path, uid):
                                else 0) | want
         new = acl_pack(acl)
         if new != old:
-            os.setxattr(path, ACL_ACCESS, new, follow_symlinks=False)
+            os.setxattr(fd, ACL_ACCESS, new)
         if is_dir:
             try:
-                os.getxattr(path, ACL_DEFAULT, follow_symlinks=False)
+                os.getxattr(fd, ACL_DEFAULT)
             except OSError:
-                os.setxattr(path, ACL_DEFAULT, acl_pack({
+                os.setxattr(fd, ACL_DEFAULT, acl_pack({
                     (ACL_USER_OBJ, NO_ID): 7, (ACL_USER, 0): 7, (ACL_USER, uid): 7,
-                    (ACL_GROUP_OBJ, NO_ID): 7, (ACL_MASK, NO_ID): 7, (ACL_OTHER, NO_ID): 5}),
-                    follow_symlinks=False)
+                    (ACL_GROUP_OBJ, NO_ID): 7, (ACL_MASK, NO_ID): 7, (ACL_OTHER, NO_ID): 5}))
     except OSError:
         pass                                # gone again, or renamed: share after the run
+
+
+def reshare_at(dir_fd, name, uid):
+    """reshare_fd() for NAME in DIR_FD, opened without following a link or
+    blocking on a FIFO: no path is resolved a second time."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     dir_fd=dir_fd)
+    except OSError:
+        return
+    try:
+        reshare_fd(fd, uid)
+    finally:
+        os.close(fd)
 
 
 def forget(cap, uid):
@@ -553,10 +575,12 @@ def forget(cap, uid):
     entries share() gave the sandbox's uid go: another sandbox may get that
     uid later. Yours stay; they grant you nothing you do not have."""
     cap = os.path.realpath(cap)
+    rw = capture_layer(cap, "rw")
     dev = os.lstat(cap).st_dev
 
-    def drop(path):
-        for name in (ACL_ACCESS, ACL_DEFAULT):
+    def drop(path, is_dir):
+        names = (ACL_ACCESS, ACL_DEFAULT) if is_dir else (ACL_ACCESS,)
+        for name in names:
             try:
                 acl = acl_unpack(os.getxattr(path, name, follow_symlinks=False))
             except OSError as e:
@@ -566,11 +590,20 @@ def forget(cap, uid):
             if acl.pop((ACL_USER, uid), None) is not None:
                 os.setxattr(path, name, acl_pack(acl), follow_symlinks=False)
 
+    def usable(path):
+        # The game may have left a folder of ours with the mode it made. What
+        # is ours is ours to open again, and scanning it is all this needs.
+        st = os.lstat(path)
+        if st.st_uid == os.getuid() and (st.st_mode & 0o700) != 0o700:
+            os.chmod(path, st.st_mode | 0o700)
+
     # Each folder once: CAP here, the rest as entries of the one they are in.
-    drop(cap)
-    todo = [cap]
+    # rw may be a mount of its own, whose entries have its device.
+    usable(cap)
+    drop(cap, True)
+    todo = [(cap, dev)]
     while todo:
-        d = todo.pop()
+        d, dev = todo.pop()
         try:
             with os.scandir(d) as it:
                 entries = [e.path for e in it]
@@ -581,11 +614,66 @@ def forget(cap, uid):
                 st = os.lstat(path)
             except OSError as e:
                 fail(f"could not inspect {path} while removing the sandbox's ACL entries: {e}")
-            if st.st_dev != dev or not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+            if stat.S_ISLNK(st.st_mode) or (st.st_dev != dev and path != rw):
                 continue
             if stat.S_ISDIR(st.st_mode):
-                todo.append(path)
-            drop(path)
+                usable(path)
+                todo.append((path, st.st_dev))
+            drop(path, stat.S_ISDIR(st.st_mode))
+
+
+def watch_fd(ino, events, dirs, fd, uid, fix, dev):
+    """Watch FD, a directory open without following a link, then each folder
+    under it opened relative to its parent. DIRS maps a watch descriptor to
+    the open (fd, dev) it stands for. A folder that cannot be watched is
+    closed and never entered; its descriptor is stored only after the watch
+    succeeds."""
+    todo = [(fd, dev)]
+    while todo:
+        fd, dev = todo.pop()
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != dev \
+           or (fix and st.st_uid != uid):
+            os.close(fd)
+            continue
+        wd = libc.inotify_add_watch(ino, f"/proc/self/fd/{fd}".encode(), events)
+        if wd < 0:
+            os.close(fd)
+            continue
+        if wd in dirs:
+            os.close(fd)
+            fd = dirs[wd][0]
+        else:
+            dirs[wd] = (fd, dev)
+        if fix:
+            reshare_fd(fd, uid)
+        try:
+            with os.scandir(fd) as it:
+                entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+        except OSError:
+            continue
+        for name, is_dir in entries:
+            if not is_dir:
+                if fix:
+                    reshare_at(fd, name, uid)
+                continue
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
+                                os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError:
+                continue
+            todo.append((child, dev))
+
+
+def watch_name(ino, events, dirs, dir_fd, name, uid, dev):
+    """Watch NAME, a new folder event in DIR_FD, opened without following a
+    link. A name that is not a directory by then is left as it is."""
+    try:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
+                        os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError:
+        return
+    watch_fd(ino, events, dirs, child, uid, True, dev)
 
 
 def keep_shared(rw, uid, gid):
@@ -596,6 +684,16 @@ def keep_shared(rw, uid, gid):
     with bwrap; the game starts once it watches, or it could miss the first."""
     parent = os.getpid()
     ready_r, ready = os.pipe()
+    dirs = {}
+
+    def close_dirs():
+        while dirs:
+            wd, (fd, _) = dirs.popitem()
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
     if os.fork():
         os.close(ready)
         os.read(ready_r, 1)                 # or end of file: it gave up
@@ -618,32 +716,15 @@ def keep_shared(rw, uid, gid):
         ino = libc.inotify_init1(os.O_CLOEXEC)
         if ino < 0:
             os._exit(0)
-        events = IN_ATTRIB | IN_MOVED_TO | IN_CREATE | IN_ONLYDIR | IN_DONT_FOLLOW
-        dirs = {}
-
-        def watch(top, fix):
-            # Each folder watched before it is read: what arrives in between
-            # is then in one or the other, or both.
-            todo = [top]
-            while todo:
-                d = todo.pop()
-                wd = libc.inotify_add_watch(ino, os.fsencode(d), events)
-                if wd >= 0:
-                    dirs[wd] = d
-                if fix:
-                    reshare(d, uid)
-                try:
-                    with os.scandir(d) as it:
-                        entries = list(it)
-                except OSError:
-                    continue
-                for e in entries:
-                    if e.is_dir(follow_symlinks=False):
-                        todo.append(e.path)
-                    elif fix:
-                        reshare(e.path, uid)
-
-        watch(rw, False)                    # the run before was shared after it
+        # Directory fds are already opened with O_DIRECTORY | O_NOFOLLOW;
+        # /proc/self/fd/N is itself a symlink, so IN_DONT_FOLLOW would ELOOP.
+        events = IN_ATTRIB | IN_MOVED_TO | IN_CREATE | IN_ONLYDIR
+        try:
+            root = os.open(rw, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            dev = os.fstat(root).st_dev
+        except OSError:
+            os._exit(0)
+        watch_fd(ino, events, dirs, os.dup(root), uid, False, dev)
         os.write(ready, b"1")
         os.close(ready)
         while True:
@@ -654,17 +735,21 @@ def keep_shared(rw, uid, gid):
                 name = data[i + 16:i + 16 + size].rstrip(b"\0")
                 i += 16 + size
                 if mask & IN_Q_OVERFLOW:
-                    watch(rw, True)
+                    close_dirs()            # root stays open for the re-walk
+                    watch_fd(ino, events, dirs, os.dup(root), uid, True, dev)
                 elif mask & IN_IGNORED:
-                    dirs.pop(wd, None)
+                    old = dirs.pop(wd, None)
+                    if old is not None:
+                        os.close(old[0])
                 elif name and wd in dirs:
-                    path = os.path.join(dirs[wd], os.fsdecode(name))
+                    dir_fd, dir_dev = dirs[wd]
                     if mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
-                        watch(path, True)   # with whatever it holds already
+                        watch_name(ino, events, dirs, dir_fd, os.fsdecode(name),
+                                   uid, dir_dev)
                     else:
-                        reshare(path, uid)
+                        reshare_at(dir_fd, os.fsdecode(name), uid)
     except BaseException:
-        pass
+        close_dirs()
     os._exit(0)
 
 
@@ -1309,7 +1394,7 @@ def canonical(argv):
         n = ARITY.get(a, 0)
         args = argv[i + 1:i + 1 + n]
         if a in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind",
-                 "--dev-bind-try", "--overlay-src") and os.path.lexists(args[0]):
+                 "--dev-bind-try", "--overlay-src") and os.path.exists(args[0]):
             args[0] = os.path.realpath(args[0])
         elif a == "--overlay":
             args[:2] = [os.path.realpath(p) for p in args[:2]]
@@ -1340,6 +1425,7 @@ def delegations(argv, specs, extra=(), cap=None):
     root: a folder of yours itself, or the folder of yours it is in.
     mountfsd mounts only that folder, without what is mounted below it."""
     me, mounts = os.getuid(), mount_points()
+    bwrap_real = os.path.realpath(argv[0]) if argv else None
     runtime = {os.path.realpath(p) for p in
                (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{me}") if p}
 
@@ -1354,8 +1440,9 @@ def delegations(argv, specs, extra=(), cap=None):
             # the socket is the narrow way; the runtime folder also holds the
             # session bus and every agent's socket.
             folder = parent
-        elif reachable(path, 0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
-                       else os.R_OK | (os.W_OK if writable else 0)):
+        elif reachable(path, (0 if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode))
+                              else os.R_OK | (os.W_OK if writable else 0)
+                              | (os.X_OK if path == bwrap_real else 0))):
             folder = True                   # a device or socket: bwrap needs only the way
         else:
             folder = None
@@ -1373,15 +1460,18 @@ def delegations(argv, specs, extra=(), cap=None):
             break
         n = ARITY.get(a, 0)
         if a in ("--bind-try", "--ro-bind-try", "--dev-bind-try") \
-           and os.path.lexists(argv[i + 1]) \
-           and shared(argv[i + 1], a == "--bind-try")[0] is None:
-            sys.stderr.write(f"sandbox-uid: skipping {argv[i + 1]}: it is not yours, "
-                             "and the sandbox's user cannot reach it\n")
-            del argv[i:i + 1 + n]
-            continue
+           and os.path.lexists(argv[i + 1]):
+            if not os.path.exists(argv[i + 1]):
+                del argv[i:i + 1 + n]
+                continue
+            if shared(argv[i + 1], a == "--bind-try")[0] is None:
+                sys.stderr.write(f"sandbox-uid: skipping {argv[i + 1]}: it is not yours, "
+                                 "and the sandbox's user cannot reach it\n")
+                del argv[i:i + 1 + n]
+                continue
         i += 1 + n
 
-    needs = [(p, w) for p, w in sources(argv)] + list(extra)
+    needs = [(p, w) for p, w in sources(argv) if os.path.exists(p)] + list(extra)
     for _, lowers, upper, work in specs:
         needs += [(p, False) for p in lowers]
         if upper is not None:
@@ -1601,7 +1691,12 @@ def managed_launch(cap, argv, net=None):
         at = argv.index("--unshare-all") + 1
         argv[at:at] = ["--share-net"]
     # pasta runs from its folder too: sandbox-game names a copy after the game.
-    extra = [(os.path.realpath(net["pasta"]), False)] if net else []
+    # bwrap may be in a folder place() covers -- under a 0700 home -- so it is
+    # delegated and put back before it is executed.
+    bwrap_bin = os.path.realpath(argv[0])
+    extra = [(bwrap_bin, False)]
+    if net:
+        extra.append((os.path.realpath(net["pasta"]), False))
     if specs:
         # The overlays' mount points, unless a delegated capture already
         # holds them (delegations() drops one covered by another).
@@ -1684,7 +1779,7 @@ def managed_launch(cap, argv, net=None):
             f.write(text)
     check(libc.prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), "PR_SET_DUMPABLE")
     os.chdir("/")
-    os.execv(argv[0], argv)
+    os.execv(bwrap_bin, argv)
 
 
 def managed_adopt(cap):
@@ -1718,7 +1813,9 @@ def managed_adopt(cap):
                     others += st.st_gid != me
                     if stat.S_ISDIR(st.st_mode):
                         todo.append((e.path, st.st_dev))
-                    elif in_rw and e.name.startswith(".wh.") and e.name != ".wh..wh..opq" \
+                    elif in_rw and e.name.startswith(".wh.") \
+                            and e.name[4:].strip(".") \
+                            and not e.name[4:].startswith(".wh.") \
                             and stat.S_ISREG(st.st_mode):
                         whiteouts.append(e.name)
             if in_rw:
@@ -1732,34 +1829,58 @@ def managed_adopt(cap):
              f"to them; {GROUP_HELP}\n  chgrp -R {me} {shlex.quote(top)}")
     try:
         for d, whiteouts in layer:
+            st = os.lstat(d)
+            orig = stat.S_IMODE(st.st_mode)
+            unlocked = st.st_uid == me and (orig & 0o700) != 0o700
+            if unlocked:
+                os.chmod(d, orig | 0o700)
             try:
-                opaque = os.getxattr(d, "user.fuseoverlayfs.opaque", follow_symlinks=False) == b"y"
-            except OSError:
-                opaque = False
-            marker = os.path.join(d, ".wh..wh..opq")
-            if opaque or os.path.lexists(marker):
-                os.setxattr(d, "user.overlay.opaque", b"y", follow_symlinks=False)
-                if os.path.lexists(marker):
-                    os.unlink(marker)
-            for name in whiteouts:
-                # A whiteout fuse-overlayfs could not make as a device. Make
-                # the device beside it first: unlinking first would lose the
-                # whiteout if mknod then failed, and the old file would show.
-                target = os.path.join(d, name[4:])
-                if os.path.lexists(target):
-                    raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), target)
-                # Not .wh.NAME.tmp: that is the whiteout of NAME.tmp.
-                temporary = os.path.join(d, f".sandbox-uid-adopt-{os.getpid()}")
-                made = False
                 try:
-                    os.mknod(temporary, stat.S_IFCHR | 0o000, 0)
-                    made = True
-                    os.rename(temporary, target)
-                except BaseException:
-                    if made:
-                        os.unlink(temporary)
-                    raise
-                os.unlink(os.path.join(d, name))
+                    opaque = os.getxattr(d, "user.fuseoverlayfs.opaque",
+                                         follow_symlinks=False) == b"y"
+                except OSError:
+                    opaque = False
+                marker = os.path.join(d, ".wh..wh..opq")
+                try:
+                    marker_st = os.lstat(marker)
+                except OSError:
+                    marker_st = None
+                is_marker = marker_st is not None and stat.S_ISREG(marker_st.st_mode)
+                if opaque or is_marker:
+                    os.setxattr(d, "user.overlay.opaque", b"y", follow_symlinks=False)
+                    if is_marker:
+                        os.unlink(marker)
+                for name in whiteouts:
+                    # A whiteout fuse-overlayfs could not make as a device.
+                    # Make the device beside it first: unlinking first would
+                    # lose the whiteout if mknod then failed, and the old file
+                    # would show.
+                    target = os.path.join(d, name[4:])
+                    if os.path.lexists(target):
+                        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), target)
+                    # Not .wh.NAME.tmp: that is the whiteout of NAME.tmp.
+                    temporary, made, attempt = None, False, 0
+                    while True:
+                        suffix = "" if attempt == 0 else f"-{attempt}"
+                        temporary = os.path.join(
+                            d, f".sandbox-uid-adopt-{os.getpid()}{suffix}")
+                        try:
+                            os.mknod(temporary, stat.S_IFCHR | 0o000, 0)
+                        except FileExistsError:
+                            attempt += 1
+                            continue
+                        made = True
+                        break
+                    try:
+                        os.rename(temporary, target)
+                    except BaseException:
+                        if made:
+                            os.unlink(temporary)
+                        raise
+                    os.unlink(os.path.join(d, name))
+            finally:
+                if unlocked:
+                    os.chmod(d, orig)
     except OSError as e:
         fail(f"cannot switch {cap} to the systemd backend: {e}")
 

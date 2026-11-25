@@ -149,6 +149,23 @@ class AvailabilityTests(unittest.TestCase):
         self.assertEqual([s.calls for s in FakeSocket.made], [2, 2])
 
 
+class IndexTests(unittest.TestCase):
+    def test_an_index_allocated_while_waiting_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = Path(tmp) / 'cap'
+            cap.mkdir()
+            path = cap / 'uid'
+
+            def lock(fd, operation):
+                # The caller that held the lock first wrote its choice.
+                path.write_text('7\n')
+
+            with mock.patch.object(uid.fcntl, 'flock', side_effect=lock), \
+                 mock.patch.object(uid.os, 'listdir', side_effect=AssertionError):
+                self.assertEqual(uid.index_of(str(cap)), 7)
+            self.assertEqual(path.read_text(), '7\n')
+
+
 class ManagedLaunchTests(unittest.TestCase):
     def test_overlay_mounts_are_delegated_when_their_capture_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +202,78 @@ class ManagedLaunchTests(unittest.TestCase):
             self.assertFalse((cap / '.managed-userns').exists())
             self.assertFalse((cap / '.managed-userns.tmp').exists())
 
+    def test_the_binary_to_exec_is_delegated_from_an_unreachable_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = Path(tmp)
+            bindir = cap / 'home/.local/bin'
+            bindir.mkdir(parents=True)
+            bwrap = bindir / 'bwrap'
+            bwrap.write_text('')
+            seen = []
+
+            def delegations(argv, specs, extra, cap=None):
+                seen.append(list(extra))
+                raise RuntimeError
+
+            with mock.patch.object(uid, 'managed_identity_error', return_value=None), \
+                 mock.patch.object(uid, 'group_error', return_value=None), \
+                 mock.patch.object(uid, 'canonical', side_effect=lambda argv: argv), \
+                 mock.patch.object(uid, 'overlays', return_value=([str(bwrap)], [])), \
+                 mock.patch.object(uid, 'delegations', side_effect=delegations):
+                with self.assertRaises(RuntimeError):
+                    uid.managed_launch(str(cap), [str(bwrap)])
+            self.assertIn((os.path.realpath(bwrap), False), seen[0])
+
+    def test_the_launch_executes_the_resolved_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = Path(tmp)
+            link = cap / 'bwrap-link'
+            link.symlink_to('/bin/true')
+            ns = os.open(os.devnull, os.O_RDONLY)
+
+            class Warm:
+                def __init__(self, slow):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def hold(self):
+                    pass
+
+            patches = [
+                mock.patch.object(uid, 'managed_identity_error', return_value=None),
+                mock.patch.object(uid, 'group_error', return_value=None),
+                mock.patch.object(uid, 'canonical', side_effect=lambda argv: argv),
+                mock.patch.object(uid, 'overlays', return_value=([str(link)], [])),
+                mock.patch.object(uid, 'delegations', return_value=[]),
+                mock.patch.object(uid, 'managed_namespace', return_value=ns),
+                mock.patch.object(uid, 'nsresourced_lock', return_value=None),
+                mock.patch.object(uid, 'WarmWorker', Warm),
+                mock.patch.object(uid.libc, 'setns', return_value=0),
+                mock.patch.object(uid.libc, 'prctl', return_value=0),
+                mock.patch.object(uid, 'unshare'),
+                mock.patch.object(uid, 'mount'),
+                mock.patch.object(uid, 'place'),
+                mock.patch.object(uid, 'overlay_points', return_value=[]),
+                mock.patch.object(uid, 'relay_output'),
+                mock.patch.object(uid.os, 'setgroups'),
+                mock.patch.object(uid.os, 'setresgid'),
+                mock.patch.object(uid.os, 'setresuid'),
+                mock.patch.object(uid.os, 'chdir'),
+                mock.patch.object(uid.os, 'replace'),
+                mock.patch('builtins.open', mock.mock_open()),
+            ]
+            with ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                execv = stack.enter_context(mock.patch.object(uid.os, 'execv'))
+                uid.managed_launch(str(cap), [str(link)])
+            execv.assert_called_once_with(os.path.realpath(link), [str(link)])
+
 
 class DelegationTests(unittest.TestCase):
     def setUp(self):
@@ -213,6 +302,46 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(uid.delegations(argv, []), [])
         self.assertEqual(len(argv), 4)
         stderr.write.assert_not_called()
+
+    def test_a_dangling_try_bind_link_is_dropped_by_delegations(self):
+        link = self.base / 'dangling'
+        link.symlink_to('missing')
+        for option in ('--ro-bind-try', '--bind-try'):
+            with self.subTest(option=option):
+                argv = ['bwrap', option, str(link), '/x']
+                stderr = mock.MagicMock()
+                with mock.patch.object(uid.sys, 'stderr', stderr):
+                    self.assertEqual(uid.delegations(argv, []), [])
+                self.assertEqual(argv, ['bwrap'])
+                stderr.write.assert_not_called()
+
+    def test_a_dangling_try_bind_link_does_not_crash_walks(self):
+        link = self.base / 'dangling'
+        link.symlink_to('missing')
+        argv = ['bwrap', '--ro-bind-try', str(link), '/x']
+        # sources() keeps dangling links so stage() creates their parent dirs.
+        self.assertEqual(uid.sources(argv), [(str(link), False)])
+        self.assertEqual(uid.canonical(argv), argv)
+        self.assertEqual(uid.group_mismatches(argv, []), [])
+
+    def test_a_binary_under_an_unreachable_home_is_delegated(self):
+        home = self.base / 'home'
+        bindir = home / '.local/bin'
+        bindir.mkdir(parents=True)
+        bwrap = bindir / 'bwrap'
+        bwrap.write_text('')
+        bwrap.chmod(0o755)
+        home.chmod(0o700)
+        with mock.patch.object(uid, 'mount_points', return_value=set()):
+            self.assertEqual(uid.delegations(['bwrap'], [], [(str(bwrap), False)]),
+                             [(str(bindir), False)])
+
+    def test_a_binary_in_a_system_folder_adds_no_delegation(self):
+        bwrap = shutil.which('bwrap')
+        if not bwrap:
+            self.skipTest('bwrap is not installed')
+        with mock.patch.object(uid, 'mount_points', return_value=set()):
+            self.assertEqual(uid.delegations(['bwrap'], [], [(bwrap, False)]), [])
 
     def test_a_required_bind_others_cannot_reach_still_fails(self):
         private = self.base / 'private'
@@ -812,6 +941,188 @@ class CaptureTests(unittest.TestCase):
             uid.main()
         forget.assert_not_called()
         self.assertIn("its ACL entries stay", "".join(c.args[0] for c in stderr.write.call_args_list))
+
+    def fake_acls(self, user):
+        data = uid.acl_pack({(uid.ACL_USER_OBJ, uid.NO_ID): 7,
+                             (uid.ACL_USER, user): 6,
+                             (uid.ACL_MASK, uid.NO_ID): 7,
+                             (uid.ACL_OTHER, uid.NO_ID): 0})
+        written = {}
+
+        def getxattr(path, name, **kwargs):
+            return data
+
+        def setxattr(path, name, value, **kwargs):
+            written[(os.fspath(path), name)] = uid.acl_unpack(value)
+        return written, mock.patch.object(uid.os, "getxattr", getxattr), \
+            mock.patch.object(uid.os, "setxattr", setxattr)
+
+    def test_forget_drops_acls_from_fifos_and_sockets(self):
+        cap = self.base / "cap"
+        rw = cap / "overlay/rw"
+        rw.mkdir(parents=True)
+        fifo = rw / "pipe"
+        os.mkfifo(fifo)
+        sock_path = rw / "sock"
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(sock_path))
+        self.addCleanup(sock.close)
+        user = 123456
+        written, getxattr, setxattr = self.fake_acls(user)
+        with getxattr, setxattr:
+            uid.forget(str(cap), user)
+        for path in (fifo, sock_path):
+            self.assertIn((str(path), uid.ACL_ACCESS), written)
+            self.assertNotIn((uid.ACL_USER, user), written[(str(path), uid.ACL_ACCESS)])
+            self.assertNotIn((str(path), uid.ACL_DEFAULT), written)
+
+    def test_forget_crosses_into_a_separately_mounted_rw(self):
+        cap = self.base / "cap"
+        rw = cap / "overlay/rw"
+        (rw / "sub").mkdir(parents=True)
+        save = rw / "sub/save"
+        save.write_text("s")
+        cap_dev = os.lstat(cap).st_dev
+        rw_dev = cap_dev + 1
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            st = real_lstat(path, *args, **kwargs)
+            name = os.fspath(path)
+            if name == str(rw) or name.startswith(str(rw) + "/"):
+                fields = list(st)
+                fields[2] = rw_dev
+                return os.stat_result(fields)
+            return st
+
+        user = 123456
+        written, getxattr, setxattr = self.fake_acls(user)
+        with mock.patch.object(uid.os, "lstat", lstat), getxattr, setxattr:
+            uid.forget(str(cap), user)
+        self.assertIn((str(save), uid.ACL_ACCESS), written)
+
+    def test_forget_unlocks_a_folder_the_game_left_at_0000(self):
+        cap = self.base / "cap"
+        locked = cap / "overlay/rw/locked"
+        locked.mkdir(parents=True)
+        save = locked / "save"
+        save.write_text("s")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        user = 123456
+        written, getxattr, setxattr = self.fake_acls(user)
+        with getxattr, setxattr:
+            uid.forget(str(cap), user)
+        self.assertIn((str(save), uid.ACL_ACCESS), written)
+        self.assertEqual(stat.S_IMODE(os.lstat(locked).st_mode) & 0o700, 0o700)
+
+    def test_a_folder_that_cannot_be_watched_is_not_entered(self):
+        rw = self.base / "rw"
+        (rw / "sub").mkdir(parents=True)
+        (rw / "sub/file").write_text("x")
+        fd = os.open(rw, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        dev = os.fstat(fd).st_dev
+        closed, real_close = [], os.close
+
+        def close(descriptor):
+            closed.append(descriptor)
+            real_close(descriptor)
+
+        calls = []
+
+        def add_watch(ino, path, events):
+            calls.append(path)
+            return -1                     # ELOOP: the folder is a link now
+
+        with mock.patch.object(uid.libc, "inotify_add_watch", side_effect=add_watch), \
+             mock.patch.object(uid, "reshare_fd") as reshare, \
+             mock.patch.object(uid.os, "close", side_effect=close), \
+             mock.patch.object(uid.os, "scandir") as scandir:
+            uid.watch_fd(10, 0, {}, fd, os.getuid(), True, dev)
+        self.assertEqual(calls, [f"/proc/self/fd/{fd}".encode()])
+        reshare.assert_not_called()
+        scandir.assert_not_called()
+        self.assertEqual(closed, [fd])
+
+    def test_a_folder_replaced_by_a_link_is_not_followed(self):
+        rw = self.base / "rw"
+        (rw / "sub").mkdir(parents=True)
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "secret").write_text("s")
+        fd = os.open(rw, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        dev = os.fstat(fd).st_dev
+        (rw / "sub").rename(rw / "old")
+        (rw / "sub").symlink_to(outside)
+        calls = []
+
+        def add_watch(ino, path, events):
+            calls.append(path)
+            return len(calls)
+
+        try:
+            with mock.patch.object(uid.libc, "inotify_add_watch", side_effect=add_watch), \
+                 mock.patch.object(uid, "reshare_fd"), \
+                 mock.patch.object(uid, "reshare_at") as reshare:
+                uid.watch_name(10, 0, {}, fd, "sub", os.getuid(), dev)
+        finally:
+            os.close(fd)
+        self.assertEqual(calls, [])
+        reshare.assert_not_called()
+
+    def test_adoption_ignores_whiteout_names_that_are_not_targets(self):
+        cap = self.base / "cap"
+        rw = cap / "overlay/rw"
+        rw.mkdir(parents=True)
+        kept = (".wh.", ".wh...", ".wh....", ".wh..wh.meta")
+        for name in kept:
+            (rw / name).write_text("")
+        (rw / ".wh..wh..opq").mkdir()
+        uid.managed_adopt(str(cap))
+        for name in kept:
+            self.assertTrue((rw / name).is_file(), name)
+        self.assertTrue((rw / ".wh..wh..opq").is_dir())
+        with self.assertRaises(OSError):
+            os.getxattr(rw, "user.overlay.opaque")
+
+    def test_adoption_unlocks_a_read_only_folder_and_restores_it(self):
+        cap = self.base / "cap"
+        locked = cap / "overlay/rw/locked"
+        locked.mkdir(parents=True)
+        (locked / ".wh.gone").write_text("")
+        locked.chmod(0o500)
+        self.addCleanup(locked.chmod, 0o700)
+
+        def mknod(path, mode, device):
+            Path(path).write_text("")
+
+        with mock.patch.object(uid.os, "mknod", side_effect=mknod):
+            uid.managed_adopt(str(cap))
+        self.assertEqual(stat.S_IMODE(os.lstat(locked).st_mode), 0o500)
+        self.assertTrue((locked / "gone").exists())
+        self.assertFalse((locked / ".wh.gone").exists())
+
+    def test_adoption_retries_a_planted_temporary_name(self):
+        cap = self.base / "cap"
+        rw = cap / "overlay/rw"
+        rw.mkdir(parents=True)
+        (rw / ".wh.gone").write_text("")
+        planted = rw / f".sandbox-uid-adopt-{os.getpid()}"
+        planted.write_text("planted")
+        made = []
+
+        def mknod(path, mode, device):
+            made.append(Path(path).name)
+            if os.path.lexists(path):
+                raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
+            Path(path).write_text("")
+
+        with mock.patch.object(uid.os, "mknod", side_effect=mknod):
+            uid.managed_adopt(str(cap))
+        self.assertTrue(planted.exists())
+        self.assertTrue((rw / "gone").exists())
+        self.assertFalse((rw / ".wh.gone").exists())
+        self.assertIn(f".sandbox-uid-adopt-{os.getpid()}-1", made)
 
     def test_a_folder_below_a_mount_in_a_delegated_one_is_placed(self):
         # ~/Games delegated without the drive mounted at ~/Games/ssd, whose

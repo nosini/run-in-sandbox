@@ -88,14 +88,17 @@ done
 # A process inside a game could name any capture dir on its command line, so
 # that alone says nothing.
 #
-# Sets SB_PIDS / SB_NAMES / SB_PROTON in parallel, one entry per sandbox.
-SB_PIDS=(); SB_NAMES=(); SB_PROTON=()
+# Sets SB_PIDS / SB_NAMES / SB_PROTON / SB_OUTERS in parallel, one entry per
+# sandbox.
+SB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SB_OUTERS=()
 scan() {
     local p args name child ours
     for p in /proc/[0-9]*; do
         p="${p##*/}"
         ours=1
         [[ "/proc/$p/ns/user" -ef /proc/self/ns/user ]] || { ours=0; started_by_us "$p"; } || continue
+        # A process of ours in our namespace is ours only if /proc says so.
+        [ "$ours" = 0 ] || [ "$(stat -c %u -- "/proc/$p" 2>/dev/null)" = "$(id -u)" ] || continue
         # Grouped so a process exiting mid-scan does not print anything.
         { mapfile -d '' -t args < "/proc/$p/cmdline"; } 2>/dev/null || continue
         [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || continue
@@ -120,7 +123,33 @@ scan() {
         [ -n "$child" ] && ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]] || continue
         SB_PIDS+=( "$child" ); SB_NAMES+=( "$name" )
         [[ " ${args[*]} " == *" STEAM_COMPAT_DATA_PATH "* ]] && SB_PROTON+=( 1 ) || SB_PROTON+=( 0 )
+        SB_OUTERS+=( "$p" )
     done
+}
+
+# Whether the sandbox found by scan() is still the one at those PIDs: its outer
+# bwrap is still ours, still binds that capture, and still has this child; the
+# child is still bwrap, in a user namespace that is neither the outer's nor
+# ours. A PID can be reused, or its process replaced, while a menu waits.
+verify_target() {                     # $1 = outer PID, $2 = child PID, $3 = NAME
+    local outer="$1" child="$2" name="$3" args=() kargs=() kids=()
+    [[ "$outer" =~ ^[0-9]+$ && "$child" =~ ^[0-9]+$ ]] || return 1
+    if [[ "/proc/$outer/ns/user" -ef /proc/self/ns/user ]]; then
+        [ "$(stat -c %u -- "/proc/$outer" 2>/dev/null)" = "$(id -u)" ] || return 1
+    else
+        started_by_us "$outer" && sandbox_user "$outer" "$name" || return 1
+    fi
+    { mapfile -d '' -t args < "/proc/$outer/cmdline"; } 2>/dev/null || return 1
+    [ "${#args[@]}" -gt 1 ] && [ "${args[0]##*/}" = bwrap ] || return 1
+    bound_capture "${args[@]}"
+    [ "$BOUND" = "$name" ] || return 1
+    { read -r -a kids < "/proc/$outer/task/$outer/children"; } 2>/dev/null || true
+    [[ " ${kids[*]} " == *" $child "* ]] || return 1
+    { mapfile -d '' -t kargs < "/proc/$child/cmdline"; } 2>/dev/null || return 1
+    [ "${#kargs[@]}" -gt 0 ] && [ "${kargs[0]##*/}" = bwrap ] || return 1
+    [ -e "/proc/$child/ns/user" ] && \
+        ! [[ "/proc/$child/ns/user" -ef "/proc/$outer/ns/user" ]] || return 1
+    ! [[ "/proc/$child/ns/user" -ef /proc/self/ns/user ]]
 }
 scan
 
@@ -136,16 +165,18 @@ fi
 
 [ "${#SB_PIDS[@]}" -gt 0 ] || { echo "$SELF: no sandbox is running" >&2; exit 1; }
 
-TARGET=""; TNAME=""; TPROTON=0
+TARGET=""; TNAME=""; TPROTON=0; TOUTER=""
 if [ -n "$NAME" ]; then
     for i in "${!SB_PIDS[@]}"; do
         [ "${SB_NAMES[$i]}" = "$NAME" ] || continue
-        TARGET="${SB_PIDS[$i]}"; TNAME="${SB_NAMES[$i]}"; TPROTON="${SB_PROTON[$i]}"; break
+        TARGET="${SB_PIDS[$i]}"; TNAME="${SB_NAMES[$i]}"; TPROTON="${SB_PROTON[$i]}"
+        TOUTER="${SB_OUTERS[$i]}"; break
     done
     [ -n "$TARGET" ] || { echo "$SELF: no running sandbox named '$NAME'" >&2
                           echo "try: $SELF --list" >&2; exit 1; }
 elif [ "${#SB_PIDS[@]}" = 1 ]; then
     TARGET="${SB_PIDS[0]}"; TNAME="${SB_NAMES[0]}"; TPROTON="${SB_PROTON[0]}"
+    TOUTER="${SB_OUTERS[0]}"
 elif [ -t 0 ] && [ -t 2 ]; then
     # Guessing between two running games would attach the debugger to the
     # wrong one. At a terminal, ask.
@@ -161,12 +192,17 @@ elif [ -t 0 ] && [ -t 2 ]; then
     done
     [ -n "$PICK" ] || exit 1                   # Ctrl-D
     TARGET="${SB_PIDS[$PICK]}"; TNAME="${SB_NAMES[$PICK]}"; TPROTON="${SB_PROTON[$PICK]}"
+    TOUTER="${SB_OUTERS[$PICK]}"
 else
     # And anywhere else, say which are open and stop.
     echo "$SELF: several sandboxes are running -- pick one with --name:" >&2
     for i in "${!SB_PIDS[@]}"; do echo "  ${SB_NAMES[$i]}" >&2; done
     exit 1
 fi
+# The menu may have waited: make sure these are still that sandbox's PIDs
+# before using its name or reading anything through them.
+verify_target "$TOUTER" "$TARGET" "$TNAME" || {
+    echo "$SELF: '$TNAME' is no longer running" >&2; exit 1; }
 
 [ "$MODE" != wine ] || [ "$TPROTON" = 1 ] || {
     echo "$SELF: '$TNAME' is not a Proton sandbox; use --exec for a native command" >&2
@@ -259,15 +295,124 @@ case "$mode" in
     exec)  exec "$@" ;;
     put)
         # Whole or not at all, should the game read it meanwhile; with the
-        # mode the file it replaces had.
-        dest="$1"; [ ! -d "$dest" ] || dest="${dest%/}/$2"
-        perm="$(stat -c %a -- "$dest" 2>/dev/null || echo 664)"
-        tmp="$(mktemp -- "${dest%/*}/.sandbox-attach.XXXXXX")"
-        if cat > "$tmp" && chmod "$perm" -- "$tmp" && mv -f -- "$tmp" "$dest"; then
-            echo "put $dest"
-        else
-            rm -f -- "$tmp"; exit 1
-        fi ;;
+        # mode the file it replaces had. Every parent is opened from a
+        # directory descriptor without following links, and the last step is
+        # an atomic rename, so a link or directory put in the way is never
+        # followed or written through.
+        dest="$1"; file="$2"
+        python3 -I /proc/self/fd/9 "$dest" "$file" 9<<\PY
+import errno, os, secrets, stat, sys
+
+
+def fail(message):
+    print("sandbox-attach: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
+def open_real_directory(name, dir_fd, path):
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
+                       os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            fail("refusing to follow symlink in " + path)
+        if error.errno == errno.ENOTDIR:
+            fail("refusing to follow a symlink or non-directory in " + path)
+        fail("cannot open " + path + ": " + error.strerror)
+
+
+def main():
+    if len(sys.argv) != 3:
+        fail("invalid put request")
+    dest, filename = sys.argv[1], sys.argv[2]
+    if not dest.startswith("/"):
+        fail("--put needs an absolute destination")
+    if not filename or filename in (".", "..") or "/" in filename:
+        fail("invalid destination file name")
+    parts = [part for part in dest.split("/") if part not in ("", ".")]
+    if not parts:
+        fail("invalid destination path")
+    if ".." in parts:
+        fail("destination must not contain ..")
+    dest = "/" + "/".join(parts)
+    parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    tmp_name = None
+    try:
+        for part in parts[:-1]:
+            next_fd = open_real_directory(part, parent_fd, dest)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        base = parts[-1]
+        try:
+            info = os.lstat(base, dir_fd=parent_fd)
+        except FileNotFoundError:
+            info = None
+        except OSError as error:
+            fail("cannot inspect " + dest + ": " + error.strerror)
+        if info is not None and stat.S_ISLNK(info.st_mode):
+            fail("refusing to follow symlink " + dest)
+        if info is not None and stat.S_ISDIR(info.st_mode):
+            next_fd = open_real_directory(base, parent_fd, dest)
+            os.close(parent_fd)
+            parent_fd = next_fd
+            base = filename
+            dest = dest + "/" + filename
+            try:
+                info = os.lstat(base, dir_fd=parent_fd)
+            except FileNotFoundError:
+                info = None
+            except OSError as error:
+                fail("cannot inspect " + dest + ": " + error.strerror)
+            if info is not None and stat.S_ISLNK(info.st_mode):
+                fail("refusing to follow symlink " + dest)
+            if info is not None and stat.S_ISDIR(info.st_mode):
+                fail("refusing to replace directory " + dest)
+        if info is None:
+            perm = 0o664
+        elif stat.S_ISREG(info.st_mode):
+            perm = stat.S_IMODE(info.st_mode)
+        else:
+            fail("refusing to replace " + dest + ": not a regular file")
+        for attempt in range(100):
+            name = ".sandbox-attach." + secrets.token_hex(6)
+            try:
+                tmp_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                 os.O_NOFOLLOW | os.O_CLOEXEC, perm, dir_fd=parent_fd)
+                tmp_name = name
+                break
+            except FileExistsError:
+                continue
+        else:
+            fail("cannot create a temporary file for " + dest)
+        try:
+            while True:
+                data = os.read(0, 65536)
+                if not data:
+                    break
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(tmp_fd, view):]
+            os.fchmod(tmp_fd, perm)
+        finally:
+            os.close(tmp_fd)
+        try:
+            os.replace(tmp_name, base, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except OSError as error:
+            fail("cannot replace " + dest + ": " + error.strerror)
+        tmp_name = None
+        print("put " + dest)
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+main()
+PY
+        ;;
     wine)
         [ -x /proton/files/bin/wine ] || {
             echo "sandbox-attach: /proton/files/bin/wine not found inside" >&2; exit 1; }
@@ -376,9 +521,12 @@ EOF
 #
 # Under the systemd backend that namespace denies setgroups, and nsenter
 # cannot drop our groups there: sandbox-uid goes in the way it came.
+# The sandbox may have gone or changed since it was picked, and the steps
+# between may have waited: check again, then use the outer PID seen then.
+verify_target "$TOUTER" "$TARGET" "$TNAME" || {
+    echo "$SELF: '$TNAME' is no longer running" >&2; exit 1; }
 ENTER=()
-{ read -r PSTAT < "/proc/$TARGET/stat"; } 2>/dev/null || PSTAT=""
-OUTER="${PSTAT##*) }"; OUTER="${OUTER#* }"; OUTER="${OUTER%% *}"
+OUTER="$TOUTER"
 if [[ "$OUTER" =~ ^[0-9]+$ ]] && ! [[ "/proc/$OUTER/ns/user" -ef /proc/self/ns/user ]]; then
     if [ -f "$HOME/game-sandboxes/$TNAME/managed-uid" ]; then
         ENTER=( "$SANDBOX_UID_HELPER" managed-enter "$OUTER" -- )

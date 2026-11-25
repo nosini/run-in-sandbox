@@ -301,6 +301,220 @@ class HostPythonTests(unittest.TestCase):
                 self.assertEqual(first, "#!/usr/bin/env -S python3 -I")
 
 
+class AttachHelperTests(unittest.TestCase):
+    """sandbox-attach's helpers, run here without bwrap's --proc."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-attach-test-",
+                                              dir=os.environ.get("SANDBOX_TEST_TMPDIR"))
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        source = (ROOT / "sandbox-attach").read_text()
+        self.inner = source.split("\nINNER='", 1)[1].split("\n'\n", 1)[0]
+        self.scan = source.split(
+            "\nSB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SB_OUTERS=()\n", 1)[1].split(
+                "\nscan\n", 1)[0]
+        self.verify = "verify_target() {" + source.split(
+            "\nverify_target() {", 1)[1].split("\n}\nscan\n", 1)[0] + "\n}"
+
+    def put(self, dest, filename=None, data=b"edited"):
+        dest = Path(dest)
+        return subprocess.run(
+            ["/bin/bash", "-c", self.inner, "sandbox-attach", "put", str(dest),
+             dest.name if filename is None else filename],
+            input=data, capture_output=True, timeout=15,
+            env={**os.environ, "HOME": str(self.home)})
+
+    def run_bash(self, script, path=None):
+        env = {**os.environ, "HOME": str(self.home),
+               "SANDBOX_LIB": str(ROOT / "sandbox-game-lib")}
+        if path is not None:
+            env["PATH"] = path
+        return subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True,
+                              text=True, timeout=20)
+
+    def fake_sandbox(self, name):
+        """An outer bwrap of ours, with a child bwrap in a user namespace."""
+        capture = self.home / "game-sandboxes" / name / "home"
+        capture.mkdir(parents=True)
+        trigger = self.base / (name + "-trigger")
+        child_script = self.base / (name + "-child.sh")
+        child_script.write_text('#!/bin/sh\n'
+                                'while [ ! -e "$1" ]; do sleep 0.05; done\n'
+                                'exec sleep 30\n')
+        child_script.chmod(0o755)
+        outer_script = self.base / (name + "-outer.sh")
+        outer_script.write_text(
+            '#!/bin/bash\n'
+            'unshare --user /bin/bash -c \'exec -a bwrap /bin/bash "$1" "$2"\' '
+            'sh "$1" "$2" &\n'
+            'wait\n')
+        outer_script.chmod(0o755)
+        proc = subprocess.Popen(
+            ["/bin/bash", "-c",
+             'exec -a bwrap /bin/bash "$1" "$2" "$3" --bind "$4" "$5"',
+             "sh", str(outer_script), str(child_script), str(trigger),
+             str(capture), str(self.home)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        child = None
+        deadline = time.monotonic() + 10
+        while child is None and time.monotonic() < deadline and proc.poll() is None:
+            try:
+                kids = Path(f"/proc/{proc.pid}/task/{proc.pid}/children").read_text().split()
+            except OSError:
+                kids = []
+            for pid in kids:
+                try:
+                    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+                except OSError:
+                    continue
+                if cmdline.split(b"\0")[0].endswith(b"bwrap"):
+                    child = int(pid)
+                    break
+            if child is None:
+                time.sleep(0.02)
+
+        def stop():
+            for pid in (child, proc.pid):
+                try:
+                    os.kill(pid, 9)
+                except (OSError, TypeError):
+                    pass
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=5)
+        self.addCleanup(stop)
+        if child is None:
+            proc.kill()
+            _, error = proc.communicate(timeout=5)
+            self.fail(f"fake sandbox never started a child: {error}")
+        return proc, child, trigger
+
+    def test_put_refuses_symlinks(self):
+        work = self.base / "work"
+        work.mkdir()
+        real = work / "real"
+        real.mkdir()
+        (real / "escape").write_text("keep")
+        parent_link = work / "parent-link"
+        parent_link.symlink_to(real, target_is_directory=True)
+        result = self.put(parent_link / "escape")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((real / "escape").read_text(), "keep")
+
+        target = work / "target"
+        target.write_text("keep")
+        target.chmod(0o600)
+        file_link = work / "file-link"
+        file_link.symlink_to(target)
+        result = self.put(file_link)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(file_link.is_symlink(), "the symlink was replaced")
+        self.assertEqual(target.read_text(), "keep")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+        dir_link = work / "dir-link"
+        dir_link.symlink_to(real, target_is_directory=True)
+        result = self.put(dir_link, "new")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(dir_link.is_symlink(), "the symlink was replaced")
+        self.assertFalse((real / "new").exists())
+
+    def test_put_refuses_to_replace_a_directory(self):
+        work = self.base / "work"
+        parent = work / "parent"
+        target = parent / "existing"
+        target.mkdir(parents=True)
+        result = self.put(parent, "existing")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        result = self.put(work / "sub" / ".." / "other", "other")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((work / "other").exists())
+
+    def test_put_writes_files_and_into_real_directories(self):
+        work = self.base / "work"
+        work.mkdir()
+        existing = work / "file"
+        existing.write_text("shipped")
+        existing.chmod(0o640)
+        result = self.put(existing, data=b"edited")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"put {existing}\n".encode())
+        self.assertEqual(existing.read_text(), "edited")
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o640)
+
+        directory = work / "folder"
+        directory.mkdir()
+        result = self.put(directory, "new", data=b"contents")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"put {directory / 'new'}\n".encode())
+        self.assertEqual((directory / "new").read_text(), "contents")
+        self.assertEqual((directory / "new").stat().st_mode & 0o777, 0o664)
+        self.assertEqual(sorted(p.name for p in work.iterdir()), ["file", "folder"])
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), ["new"])
+
+    def test_scan_requires_an_owned_proc_for_a_sandbox_in_our_namespace(self):
+        proc, child, _ = self.fake_sandbox("owned-" + self.base.name)
+        name = "owned-" + self.base.name
+        script = ('. "$SANDBOX_LIB"\n' + self.scan + '\n'
+                  'SB_PIDS=(); SB_NAMES=(); SB_PROTON=(); SB_OUTERS=()\n'
+                  'scan\n'
+                  'for i in "${!SB_PIDS[@]}"; do\n'
+                  '    printf "%s %s %s\\n" "${SB_NAMES[$i]}" "${SB_PIDS[$i]}" '
+                  '"${SB_OUTERS[$i]}"\n'
+                  'done\n')
+        result = self.run_bash(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{name} {child} {proc.pid}", result.stdout)
+
+        fakebin = self.base / "fakebin"
+        fakebin.mkdir()
+        stat = shutil.which("stat")
+        (fakebin / "stat").write_text(
+            f'#!/bin/sh\n'
+            f'if [ "$4" = "/proc/{proc.pid}" ]; then echo 1; exit 0; fi\n'
+            f'exec {stat} "$@"\n')
+        (fakebin / "stat").chmod(0o755)
+        result = self.run_bash(script, path=str(fakebin) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(name, result.stdout)
+
+    def test_verify_target_rejects_a_pid_that_changed_after_selection(self):
+        name = "changed-" + self.base.name
+        proc, child, trigger = self.fake_sandbox(name)
+        script = ('. "$SANDBOX_LIB"\n' + self.verify + '\n'
+                  f'verify_target {proc.pid} {child} {name}\n')
+        result = self.run_bash(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        trigger.write_text("")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                command = Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")[0]
+            except OSError:
+                break
+            if command.endswith(b"sleep"):
+                break
+            time.sleep(0.02)
+        result = self.run_bash(script)
+        self.assertNotEqual(result.returncode, 0)
+
+        name = "gone-" + self.base.name
+        proc, child, _ = self.fake_sandbox(name)
+        script = ('. "$SANDBOX_LIB"\n' + self.verify + '\n'
+                  f'verify_target {proc.pid} {child} {name}\n')
+        result = self.run_bash(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proc.kill()
+        proc.wait(timeout=5)
+        result = self.run_bash(script)
+        self.assertNotEqual(result.returncode, 0)
+
+
 class SecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="sandbox-game-test-",
@@ -5621,20 +5835,39 @@ class SeparateUidTests(unittest.TestCase):
         self.run_guest('mkdir -p "$HOME/closed"; printf save > "$HOME/closed/save"')
         name = self.cli("--print-name", self.game).stdout.strip()
         capture = self.home / "game-sandboxes" / name
-        # Give the capture back first, then make one directory unreadable.
-        subprocess.run([str(ROOT / "sandbox-uid"), "run", str(capture), "--",
-                        "chown", "-hR", "0:0", str(capture)],
-                       env=self.env, check=True, timeout=15)
+        # If forget() fails, sandbox-game must keep CAP/uid rather than handing
+        # the uid back to the pool with stale ACLs still on the capture.
+        scripts = self.base / "failing-forget"
+        scripts.mkdir()
+        for item in ("sandbox-game", "sandbox-game-lib", "sandbox-seccomp", "sandbox-landlock"):
+            shutil.copy2(ROOT / item, scripts / item)
+        wrapper = scripts / "sandbox-uid"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = forget ]; then\n'
+            '    echo "sandbox-uid: could not remove the sandbox\'s ACL entries" >&2\n'
+            '    exit 1\n'
+            'fi\n'
+            f'exec {str(ROOT / "sandbox-uid")!r} "$@"\n')
+        wrapper.chmod(0o755)
+        result = subprocess.run(
+            [str(scripts / "sandbox-game"), "--headless", str(self.game), "/bin/true"],
+            env={**self.env, "SANDBOX_SEPARATE_UID": "0"},
+            capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not remove the sandbox's ACL entries", result.stderr)
+        self.assertTrue((capture / "uid").exists())
+        # An owned 000 directory left by the game does not stop a real switch.
         closed = capture / "home" / "closed"
         closed.chmod(0)
         try:
             self.env["SANDBOX_SEPARATE_UID"] = "0"
             result = self.cli("--headless", self.game, "/bin/true", check=False)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("could not remove the sandbox's ACL entries", result.stderr)
-            self.assertTrue((capture / "uid").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((capture / "uid").exists())
         finally:
-            closed.chmod(0o700)
+            if closed.exists():
+                closed.chmod(0o700)
 
     def test_game_runs_as_a_user_of_its_own(self):
         (self.game / "original").write_text("original")
